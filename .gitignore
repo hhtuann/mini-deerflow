@@ -1,0 +1,27 @@
+# Secrets and local configuration
+.env
+.env.local
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Test, lint and type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Mini DeerFlow runtime data
+workspaces/
+artifacts/

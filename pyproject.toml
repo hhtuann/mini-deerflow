@@ -1,0 +1,27 @@
+[project]
+name = "mini-deerflow"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Hoàng Hoàng Tuấn", email = "hhtuann.19@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "langchain-openai>=1.6.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+]
+
+[project.scripts]
+mini-deerflow = "mini_deerflow:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.4",
+]
