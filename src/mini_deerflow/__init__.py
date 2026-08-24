@@ -1,2 +1,2 @@
 def main() -> None:
-    print("Hello from mini-deerflow!")
+    print("A minimal deep research agent inspired by DeerFlow.")
