@@ -1,7 +1,7 @@
 [project]
 name = "mini-deerflow"
 version = "0.1.0"
-description = "Add your description here"
+description = "A minimal deep research agent inspired by DeerFlow"
 readme = "README.md"
 authors = [
     { name = "Hoàng Hoàng Tuấn", email = "hhtuann.19@gmail.com" }
