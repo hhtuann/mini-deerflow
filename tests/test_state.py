@@ -13,6 +13,10 @@ def test_create_initial_state_returns_complete_state() -> None:
         "messages": [],
         "plan": None,
         "current_step": 0,
+        "pending_action": None,
+        "tool_observations": [],
+        "tool_calls_in_current_step": 0,
+        "total_tool_calls": 0,
         "notes": [],
         "sources": [],
         "final_answer": None,
@@ -38,6 +42,9 @@ def test_initial_states_do_not_share_mutable_lists() -> None:
     assert second["sources"] == []
     assert second["errors"] == []
     assert second["messages"] == []
+
+    assert first["tool_observations"] is not second["tool_observations"]
+    assert second["tool_observations"] == []
 
 
 def test_graph_accumulates_notes_and_replaces_current_step() -> None:
