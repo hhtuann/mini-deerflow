@@ -6,38 +6,60 @@ This project is inspired by the architecture of [ByteDance DeerFlow](https://git
 
 ## Project status
 
-The project is currently under active development.
+The project is under active development. It is a **bounded tool-using research agent prototype**, not a production-ready system.
+
+Mini DeerFlow plans a research goal into a strict multi-step schema, selects one structured action at a time, executes allowlisted workspace tools under explicit budgets, and synthesizes a final answer from the recorded evidence.
 
 Implemented:
 
-- Environment-based validated configuration
-- OpenAI-compatible model factory
-- Pydantic schemas for bounded research plans
-- Structured planner using function calling
-- Command-line interface
-- Unit tests for configuration, schemas, model factory, planner, and CLI
+- Environment-based validated configuration (Pydantic Settings) and an OpenAI-compatible model factory
+- Strict structured `Plan` schema (unknown fields rejected, consecutive step numbers enforced)
+- Planner using GLM-compatible `json_mode` structured output
+- Bounded planner structured-output attempts
+- LangGraph stateful agent workflow
+- LLM structured action selection with `ToolCallAction` and `CompleteStepAction`
+- Per-step and total-run tool-call budgets
+- LangGraph recursion limit
+- `ToolRegistry` allowlist
+- `ToolRunner` input validation, timeout, and structured failure results
+- Workspace boundary enforcement
+- `list_files` and `read_file` in the default read-only runtime
+- `write_file` only when `--allow-write` is enabled
+- Completed-step summaries for cross-step continuity
+- Strict HTTP/HTTPS source contract for step completions
+- Bounded action-format retry with a static corrective message
 
-Not implemented yet:
+Not yet available:
 
-- LangGraph state workflow
-- Web search and page fetching tools
-- Agent tool-calling loop
-- Per-thread workspace and artifacts
-- Re-planning and review
-- Checkpoint and resume
+- Persistent checkpoint/resume
+- Streaming progress
+- Human-in-the-loop review
 - Sub-agents
-- Evaluation and tracing
+- Default composition of a real web search/fetch provider
+- Rich local/web citation model
+- Token-aware truncation for file/tool observations
+- Production-grade API error presentation
 
-The current version is a validated **planner component**, not yet a complete Deep Agent.
+### Capability distinction
+
+The default CLI runtime composes the workspace file tools: `list_files` and `read_file`, plus `write_file` when `--allow-write` is enabled. Web provider contracts (`src/mini_deerflow/web.py`) and web tool adapters (`web_search` and `web_fetch` in `src/mini_deerflow/tools/web.py`) already exist, but a real web provider is not composed into the default runtime yet, so end-to-end web research is not complete.
 
 ## Current architecture
 
 ```text
-CLI
- └── Settings
-      └── Model factory
-           └── Structured planner
-                └── Validated Plan JSON
+CLI (plan | run)
+ └── Settings → model factory (OpenAI-compatible)
+      └── Planner (json_mode structured output → validated Plan)
+           └── Runtime composition
+                ├── ToolRegistry allowlist + ToolRunner
+                ├── Workspace boundary + file tools
+                ├── LLMActionSelector (structured action selection)
+                └── RuntimeLimits (step/total budgets, recursion limit)
+                     └── LangGraph bounded agent workflow
+                          ├── decide_action (select one action)
+                          ├── execute_tool (run tool, record observation)
+                          ├── complete_step (summary + HTTP/HTTPS sources)
+                          └── synthesize → final answer
 ```
 
 ## Requirements
@@ -85,27 +107,84 @@ Never commit `.env`.
 
 ## Usage
 
-Create a validated research plan:
+### Create a validated research plan
 
 ```bash
-uv run mini-deerflow \
-  "Compare LangGraph and CrewAI for building a deep research agent."
+uv run mini-deerflow plan "Compare LangGraph and CrewAI for a research agent."
+```
+
+`plan` only builds and validates a `Plan`; it does not execute tools.
+
+On Windows PowerShell:
+
+```powershell
+uv run mini-deerflow plan "Compare LangGraph and CrewAI for a research agent."
+```
+
+### Run the bounded research agent
+
+```bash
+uv run mini-deerflow run "Inspect the local workspace and summarize verified evidence."
 ```
 
 On Windows PowerShell:
 
 ```powershell
-uv run mini-deerflow `
-  "Compare LangGraph and CrewAI for building a deep research agent."
+uv run mini-deerflow run "Inspect the local workspace and summarize verified evidence."
 ```
 
-The CLI prints a JSON object containing:
+`run` executes the full bounded agent: planning, tool selection, tool execution, step completion, and final synthesis. The run is **read-only by default**; `--allow-write` is opt-in and adds the `write_file` tool.
 
-- The normalized research goal
-- Between 3 and 7 steps
-- Consecutive step numbers
-- An objective for each step
-- Verifiable success criteria
+Runtime options for `run`:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--workspace` | `.mini-deerflow/workspace` | Workspace directory available to file tools. Created if missing. |
+| `--allow-write` | off | Opt in to the `write_file` tool. |
+| `--max-tool-calls-per-step` | 5 | Maximum tool calls allowed in one plan step. |
+| `--max-total-tool-calls` | 20 | Maximum tool calls allowed in the entire run. |
+| `--recursion-limit` | 100 | Maximum LangGraph execution steps. |
+
+Example with options:
+
+```bash
+uv run mini-deerflow run \
+  "Inspect the local workspace and summarize verified evidence." \
+  --workspace ".mini-deerflow/workspace" \
+  --max-tool-calls-per-step 2 \
+  --max-total-tool-calls 6 \
+  --recursion-limit 60
+```
+
+On Windows PowerShell:
+
+```powershell
+uv run mini-deerflow run `
+  "Inspect the local workspace and summarize verified evidence." `
+  --workspace ".mini-deerflow/workspace" `
+  --max-tool-calls-per-step 2 `
+  --max-total-tool-calls 6 `
+  --recursion-limit 60
+```
+
+### Output and exit codes
+
+- `plan` prints the validated Plan JSON to stdout.
+- `run` prints the final research answer to stdout.
+- Domain and validation errors are printed to stderr and the process exits with code 1.
+- Argument parsing errors print argparse usage to stderr and exit with code 2.
+- Some model API infrastructure errors are not yet converted into a clean error message and may appear as a traceback; this is a known deferred gap.
+
+## Security
+
+- Secrets are loaded from `.env`, which is ignored by Git; API keys use Pydantic `SecretStr`.
+- `ToolRegistry` is an allowlist; tools outside it cannot be executed.
+- Write access is opt-in through `--allow-write`.
+- The workspace rejects absolute paths and path traversal, and filters symlinks and junctions.
+- Tool inputs are validated with Pydantic before execution; tool failures are normalized into structured results.
+- Per-step and total-run budgets plus the recursion limit prevent unbounded loops.
+- Tool output, fetched content, and local files are treated as untrusted evidence; the agent is instructed not to follow instructions found inside them.
+- `HttpUrl` on sources guarantees URL structure only; it does not prove that a URL exists or was observed by a tool.
 
 ## Development checks
 
@@ -118,23 +197,21 @@ uv run pytest -q
 Run lint checks:
 
 ```bash
-uv run ruff check src tests
+uv run ruff check .
 ```
 
 Check formatting:
 
 ```bash
-uv run ruff format --check src tests
+uv run ruff format --check .
 ```
 
-## Security
+## Documentation
 
-- Secrets are loaded from `.env`.
-- `.env` and virtual environments are ignored by Git.
-- API keys use Pydantic `SecretStr` to reduce accidental exposure in logs.
-- Model output is validated before entering application logic.
-- Unknown schema fields are rejected.
-- No shell or filesystem execution tool is currently enabled.
+- [DeerFlow request lifecycle](docs/deerflow-request-lifecycle.md)
+- [LangGraph workflow (day 04)](docs/langgraph-workflow-day-04.md)
+- [Tool execution layer (day 05)](docs/tool-execution-layer-day-05.md)
+- [Bounded agent loop (day 06)](docs/bounded-agent-loop-day-06.md)
 
 ## Learning objective
 
@@ -148,13 +225,11 @@ DeerFlow is used only as a reference implementation and behavioral baseline.
 
 ## Roadmap
 
-The two-week roadmap progressively adds:
+The remaining roadmap progressively adds:
 
-1. LangGraph typed state and workflow
-2. Web and workspace tools
-3. Tool-calling execution loop
-4. Planning, review, and re-planning
-5. Checkpoint and resume
-6. Context management and source provenance
-7. A bounded research sub-agent
-8. Safety, tracing, and evaluation
+1. Real web search/fetch provider composition and richer citations
+2. Re-planning and review
+3. Checkpoint and resume
+4. Context management and source provenance
+5. A bounded research sub-agent
+6. Safety, tracing, and evaluation
