@@ -8,7 +8,11 @@ from pydantic import (
     StringConstraints,
 )
 
-from mini_deerflow.actions import AgentAction, ToolObservation
+from mini_deerflow.actions import (
+    AgentAction,
+    CompletionSummary,
+    ToolObservation,
+)
 from mini_deerflow.schemas import PlanStep
 from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry
@@ -31,6 +35,10 @@ class ActionContext(BaseModel):
 
     goal: ResearchGoal
     step: PlanStep
+    completed_step_summaries: list[CompletionSummary] = Field(
+        default_factory=list,
+        max_length=7,
+    )
     available_tools: list[dict[str, JsonValue]] = Field(
         max_length=50,
     )
@@ -126,6 +134,7 @@ def build_action_context(
     return ActionContext(
         goal=state["goal"],
         step=step,
+        completed_step_summaries=list(state["notes"]),
         available_tools=registry.definitions(),
         observations=step_observations,
         remaining_step_tool_calls=remaining_step_tool_calls,

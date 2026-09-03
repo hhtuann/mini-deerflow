@@ -156,6 +156,33 @@ def test_build_context_uses_current_step_index() -> None:
     assert context.step.step_number == 2
 
 
+def test_build_context_includes_completed_step_summaries() -> None:
+    state = create_planned_state()
+    state["current_step"] = 1
+    state["notes"] = [
+        "Completed step one after finding evidence.txt.",
+    ]
+
+    context = build_action_context(
+        state,
+        ToolRegistry(),
+        max_tool_calls_per_step=5,
+        max_total_tool_calls=20,
+    )
+
+    assert context.completed_step_summaries == [
+        "Completed step one after finding evidence.txt.",
+    ]
+
+    state["notes"].append(
+        "This later mutation must not change the context.",
+    )
+
+    assert context.completed_step_summaries == [
+        "Completed step one after finding evidence.txt.",
+    ]
+
+
 def test_build_context_requires_plan() -> None:
     state = create_initial_state("Research LangGraph")
 

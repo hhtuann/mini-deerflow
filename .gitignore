@@ -25,3 +25,4 @@ dist/
 # Mini DeerFlow runtime data
 workspaces/
 artifacts/
+.mini-deerflow/

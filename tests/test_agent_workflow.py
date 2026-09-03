@@ -2,6 +2,7 @@ import asyncio
 from collections import deque
 
 import pytest
+from langchain_core.exceptions import OutputParserException
 from langgraph.errors import NodeCancelledError
 
 from mini_deerflow.actions import (
@@ -11,6 +12,7 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.decision import ActionContext
+from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.state import (
     AgentState,
@@ -566,3 +568,87 @@ def test_external_graph_cancellation_propagates() -> None:
             await graph_task
 
     asyncio.run(run_and_cancel())
+
+
+class SequencedStructuredRunnable:
+    def __init__(self, outcomes: list[object]) -> None:
+        self._outcomes = deque(outcomes)
+        self.calls: list[object] = []
+
+    async def ainvoke(self, messages: object) -> object:
+        self.calls.append(messages)
+
+        if not self._outcomes:
+            raise AssertionError(
+                "SequencedStructuredRunnable has no outcome left",
+            )
+
+        outcome = self._outcomes.popleft()
+
+        if isinstance(outcome, BaseException):
+            raise outcome
+
+        return outcome
+
+
+class StructuredOutputFakeModel:
+    def __init__(self, runnable: SequencedStructuredRunnable) -> None:
+        self._runnable = runnable
+
+    def with_structured_output(
+        self,
+        schema: object,
+        *,
+        method: str,
+    ) -> SequencedStructuredRunnable:
+        return self._runnable
+
+
+def test_workflow_completes_after_recoverable_action_format_failure() -> None:
+    runnable = SequencedStructuredRunnable(
+        [
+            OutputParserException("Failed to parse ActionDecision"),
+            ToolCallAction(
+                type="tool_call",
+                tool_name="echo",
+                arguments={"text": "workspace evidence"},
+            ),
+            complete_action(1),
+            complete_action(2),
+            complete_action(3),
+        ],
+    )
+    selector = LLMActionSelector(StructuredOutputFakeModel(runnable))
+    echo_tool = EchoTool()
+
+    graph = build_agent_workflow(
+        planner,
+        selector,
+        ToolRegistry([echo_tool]),
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            create_initial_state("Compare LangGraph and CrewAI"),
+            config={
+                "recursion_limit": 100,
+            },
+        )
+    )
+
+    # The first decision consumed two model attempts: one format failure
+    # followed by one corrective retry that returned the tool call.
+    assert len(runnable.calls) == 5
+
+    # Action-format retries never count as tool calls.
+    assert echo_tool.call_count == 1
+    assert result["total_tool_calls"] == 1
+    assert result["tool_calls_in_current_step"] == 0
+    assert len(result["notes"]) == 3
+
+    final_answer = result["final_answer"]
+
+    assert isinstance(final_answer, str)
+    assert "Tool calls: 1" in final_answer
+    assert "Successful tool calls: 1" in final_answer
+    assert "Failed tool calls: 0" in final_answer

@@ -239,6 +239,13 @@ def test_complete_step_rejects_more_than_twenty_sources() -> None:
         "file:///etc/passwd",
         "ftp://example.com/file",
         "not-a-url",
+        "evidence.txt",
+        "./evidence.txt",
+        "read_file:evidence.txt",
+        (
+            "workspace file 'evidence.txt' "
+            "(read via read_file; no external URLs involved)"
+        ),
     ],
 )
 def test_complete_step_rejects_invalid_source_url(
@@ -250,6 +257,37 @@ def test_complete_step_rejects_invalid_source_url(
             summary="Completed the current research step.",
             sources=[invalid_source],
         )
+
+
+@pytest.mark.parametrize(
+    "valid_source",
+    [
+        "https://example.com/evidence/report",
+        "http://example.org/evidence/report",
+    ],
+)
+def test_complete_step_accepts_http_and_https_source_urls(
+    valid_source: str,
+) -> None:
+    action = CompleteStepAction(
+        type="complete_step",
+        summary="Completed the current research step.",
+        sources=[valid_source],
+    )
+
+    assert [str(source) for source in action.sources] == [valid_source]
+
+
+def test_complete_step_accepts_empty_sources_for_local_only_evidence() -> None:
+    action = CompleteStepAction(
+        type="complete_step",
+        summary=(
+            "Verified the requested facts using local workspace "
+            "read_file observations only."
+        ),
+    )
+
+    assert action.sources == []
 
 
 def test_action_models_reject_extra_fields() -> None:
