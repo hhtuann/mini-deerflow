@@ -3,6 +3,15 @@
 > **Cập nhật ngày 24/08/2026, sau khi hoàn thành Ngày 2 và khởi động Ngày 3.**  
 > Điều chỉnh quan trọng: DeerFlow được dùng làm **reference implementation và test oracle**. Mini DeerFlow là một **Git repository độc lập** do chúng ta tự xây bằng Python, không nằm trong và không phụ thuộc mã nguồn DeerFlow upstream.
 
+> **Cập nhật ngày 03/09/2026, sau khi hoàn thành Ngày 7 (realignment).**
+>
+> Ngày 7 thực tế ưu tiên **runtime composition**: composition root, `AgentRuntime`, CLI `plan`/`run`, GLM `json_mode` compatibility, cross-step continuity, bounded action-format retry và read-only default registry. Đây là **prerequisite bắt buộc** trước persistence và web research — không có runtime chạy được thì reviewer/replanner và báo cáo nhiều nguồn không có chỗ để gắn vào. Hệ quả realign:
+>
+> - **Reviewer/replanner** (thuộc Ngày 7 gốc) dời sang **Ngày 10**.
+> - **Real web provider và báo cáo nhiều nguồn** (milestone 1 gốc) dời sang **Ngày 09**.
+> - Ngày 8 giữ nguyên hướng persistence; Ngày 9–14 phân bổ lại theo dependency order.
+> - Các mục chưa làm **không** bị đánh dấu hoàn thành; see "Cổng kiểm tra tiến độ" đã cập nhật.
+
 ## 1. Mục tiêu cuối khóa
 
 Sau 2 tuần, xây được một **Mini DeerFlow** bằng Python có thể:
@@ -158,7 +167,7 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Đầu ra:** `report-ngay-02-deep-agent.md`, smoke-test artifact và hai commit cục bộ `eb9fbd67`, `01039d46`.
 
-### Ngày 3 — Chốt contract và tạo lõi Mini DeerFlow
+### Ngày 3 — Chốt contract và tạo lõi Mini DeerFlow — ĐÃ HOÀN THÀNH
 
 **Học:** request lifecycle của DeerFlow ở mức vừa đủ; model client, structured output, typed state và ranh giới giữa reference code với code MVP.
 
@@ -172,7 +181,7 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Đầu ra:** CLI in plan JSON hợp lệ, test xanh và tài liệu ngắn ánh xạ request lifecycle DeerFlow sang Mini DeerFlow.
 
-### Ngày 4 — LangGraph state và workflow đầu tiên
+### Ngày 4 — LangGraph state và workflow đầu tiên — ĐÃ HOÀN THÀNH
 
 **Học:** typed state, node, conditional edge, reducer, recursion limit; LangGraph khác một chuỗi hàm thông thường ở đâu.
 
@@ -184,7 +193,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Đầu ra:** workflow chạy end-to-end bằng executor giả.
 
-### Ngày 5 — Tool layer và workspace boundary
+### Ngày 5 — Tool layer và workspace boundary — ĐÃ HOÀN THÀNH
+
+> **Thực tế so với kế hoạch:** đã hoàn thành workspace file tools và ToolRegistry/ToolRunner đầy đủ; `web_search`/`fetch_page` mới dừng ở **provider contracts và tool adapters** (test bằng fake provider) — real web provider chưa compose, dời sang Ngày 09.
 
 **Học:** tool schema, validation, timeout, exception boundary, idempotency, least privilege và path traversal.
 
@@ -197,7 +208,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Đầu ra:** ba nhóm tool bắt buộc chạy độc lập với test cho happy path và failure path.
 
-### Ngày 6 — ReAct executor và artifacts
+### Ngày 6 — ReAct executor và artifacts — ĐÃ HOÀN THÀNH
+
+> **Thực tế so với kế hoạch:** executor là **bounded LLM action loop** (model chọn `tool_call`/`complete_step` qua strict schema) thay vì ReAct tự do — chủ đích để kiểm soát termination. Phần **artifact Markdown trong workspace** chưa có, dời sang Ngày 09 cùng báo cáo nhiều nguồn.
 
 **Học:** vòng lặp Reason/Act/Observe, termination condition, tool hallucination, max-steps; artifact khác state như thế nào.
 
@@ -210,45 +223,127 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Đầu ra:** agent hoàn thành câu hỏi cần ít nhất hai tool calls và tạo artifact Markdown.
 
-### Ngày 7 — Planner, re-planner và milestone 1
+### Ngày 7 — Planner, re-planner và milestone 1 — ĐÃ HOÀN THÀNH (theo phạm vi realigned)
 
-**Học:** plan-and-execute, phản hồi từ observation, tiêu chí hoàn thành, khi nào nên re-plan.
+> Kế hoạch gốc của ngày này là reviewer/replanner và báo cáo nhiều nguồn. Thực tế chuyển sang **runtime composition** vì đó là prerequisite của toàn bộ phần còn lại; xem revision note đầu tài liệu.
 
-**Làm:**
+**Mục tiêu:** chuyển các module Ngày 3–6 thành một executable bounded research agent chạy được từ CLI.
 
-- Tạo các node `planner`, `executor`, `reviewer`, `replanner`, `reporter`.
-- Reviewer trả structured verdict: `continue | replan | finish` và lý do ngắn.
-- Thêm budget: số bước, số model calls, số nguồn và thời gian.
-- Chạy 3 bài kiểm thử end-to-end.
+**Học:** composition root, dependency injection, sync/async boundary của LangGraph, capability-aware planning, phân biệt soft prompt guardrail và hard runtime boundary.
 
-**Đầu ra:** MVP v0.1 tạo báo cáo nhiều nguồn; retrospective tuần 1.
+**Đã làm:**
+
+- Composition root `create_default_agent_runtime` (model, workspace, registry, planner, selector, graph — wire ở một chỗ duy nhất) và `AgentRuntime` với `RuntimeLimits`: per-step budget, total-run budget, recursion limit.
+- CLI hai subcommand `plan`/`run`; exit code 0/1/2; `run` read-only mặc định, `--allow-write` opt-in.
+- Capability-aware planner: nhận `registry.definitions()` khi chạy `run`; `plan` standalone là capability-agnostic.
+- GLM planner compatibility: chuyển `function_calling` sang `json_mode` sau sự cố drop trường `title`; vẫn validate bằng strict `Plan`; bounded attempts.
+- Cross-step continuity qua `completed_step_summaries` (tối đa 7, được coi là untrusted data).
+- Bounded action-format retry (2 attempts) với corrective message tĩnh cho action selector; không retry infrastructure error.
+- Controlled full-agent smoke: `list_files` + `read_file`, 2/2 tool calls thành công, 0 failed, 0 execution errors, sentinel chỉ biết được qua `read_file`, workspace hash bất biến, exit 0.
+
+**Chưa làm so với kế hoạch gốc (dời, không đánh dấu hoàn thành):**
+
+- Reviewer/replanner → Ngày 10.
+- Real web provider composition và báo cáo nhiều nguồn → Ngày 09.
+- Richer source/citation architecture → Ngày 09–10.
+
+**Đầu ra:** executable bounded local research agent chạy end-to-end; README và tài liệu kỹ thuật Ngày 7; 260 unit tests xanh.
+
+**Điều kiện hoàn thành:** đạt — agent chạy end-to-end từ CLI với bằng chứng smoke thật; giới hạn (chưa multi-source web) được ghi rõ.
 
 ### Ngày 8 — Checkpoint, thread và resume
+
+**Mục tiêu:** run có thể bị gián đoạn và tiếp tục đúng chỗ dừng mà không thực thi lại các step đã hoàn tất.
 
 **Học:** short-term state, checkpoint, thread identity, durability; memory không đồng nghĩa với lưu toàn bộ chat.
 
 **Làm:**
 
-- Gắn SQLite checkpointer.
+- Gắn SQLite checkpointer cho graph hiện có.
 - CLI nhận `--thread-id`; có lệnh xem/list/resume thread.
 - Mô phỏng crash sau một bước rồi resume.
 
+**Kiểm chứng:**
+
+- Test deterministic: chạy N step, ghi checkpoint, tiến trình "chết", resume — assert các step đã xong không chạy lại (đếm tool calls/decisions).
+- Unit test cho thread identity sai/không tồn tại.
+
+**Không làm trong ngày này:** không cần production database hay migration phức tạp — SQLite cục bộ là đủ cho MVP.
+
 **Đầu ra:** tiếp tục đúng run dang dở mà không thực thi lại các bước đã hoàn tất.
 
-### Ngày 9 — Context engineering
+**Điều kiện hoàn thành:** crash-resume test chạy xanh; resume không tăng tool-call counters của các step đã xong.
 
-**Học:** context window, lost-in-the-middle, prompt injection từ web, summarization và provenance.
+### Ngày 9 — Real web providers, multi-source evidence và citation tracking
+
+**Mục tiêu:** agent nghiên cứu được từ nhiều nguồn web thật và truy ngược citation về bằng chứng.
+
+**Học:** provider boundary, rate limit/failure của search/fetch, provenance; tách trusted instructions khỏi untrusted web content.
 
 **Làm:**
 
-- Tách trusted instructions khỏi untrusted web content.
-- Mỗi trang được rút thành note có URL, tiêu đề, thời điểm truy cập và claims.
-- Thêm token/character budget; summarize notes cũ khi vượt ngưỡng.
-- Yêu cầu final report chỉ dùng nguồn thực sự đã thu thập.
+- Cài real `WebSearchProvider`/`WebFetchProvider` (ứng viên: DuckDuckGo và Jina Reader như DeerFlow reference đã dùng) sau các contracts có sẵn từ Ngày 5.
+- Compose web tools vào runtime mặc định (chỉ khi provider được cấu hình; fail rõ ràng nếu thiếu).
+- Mỗi trang fetch được rút thành evidence record: URL, tiêu đề, thời điểm truy cập, claims.
+- Typed/traceable citations: cross-check URL trong `sources` với evidence records thật; URL không có bằng chứng bị từ chối.
+- Lưu báo cáo Markdown cuối vào workspace (artifact còn nợ từ Ngày 6).
 
-**Đầu ra:** một run dài không vượt context; citations truy ngược được về source records.
+**Kiểm chứng:**
 
-### Ngày 10 — Sub-agent tối giản
+- Unit test citation cross-check với fake provider; smoke thật với query đơn giản.
+- Test run không có provider config phải thất bại sạch, không crash.
+
+**Không làm trong ngày này:** không làm summarization/token budget (Ngày 11), không làm reviewer (Ngày 10).
+
+**Đầu ra:** báo cáo nhiều nguồn có citation truy ngược được về evidence records; artifact Markdown trong workspace.
+
+**Điều kiện hoàn thành:** một run thật dùng ít nhất search + fetch, final answer chỉ cite URL có trong evidence records.
+
+### Ngày 10 — Reviewer/replanner và evidence-quality loop
+
+**Mục tiêu:** agent tự đánh giá tiến độ theo bằng chứng và quyết định tiếp tục, lập lại plan hoặc kết thúc.
+
+**Học:** plan-and-execute, phản hồi từ observation, tiêu chí hoàn thành, khi nào nên re-plan (nội dung Ngày 7 gốc).
+
+**Làm:**
+
+- Node `reviewer` trả structured verdict `continue | replan | finish` kèm lý do ngắn, input là evidence records và plan state.
+- Node `replanner` chỉ chạy theo verdict, sinh plan mới cũng qua strict schema.
+- Budget tổng: số bước re-plan tối đa để tránh vòng lặp planner.
+- Chạy 3 kịch bản end-to-end: happy path, thiếu bằng chứng → replan, đủ sớm → finish.
+
+**Kiểm chứng:** unit test verdict routing; integration test vòng replan có giới hạn; smoke thật 3 kịch bản.
+
+**Không làm trong ngày này:** không thêm sub-agent (Ngày 12), không đổi context strategy.
+
+**Đầu ra:** evidence-quality loop hoạt động; MVP có re-planning thật.
+
+**Điều kiện hoàn thành:** replan xảy ra đúng khi evidence thiếu và dừng sau khi đủ; không vòng lặp planner vô hạn.
+
+### Ngày 11 — Context management, token-aware truncation và long-run limits
+
+**Mục tiêu:** run dài không vượt context window và không đốt token vô ích.
+
+**Học:** context window, lost-in-the-middle, summarization, provenance trong context (nội dung "context engineering" của Ngày 9 gốc).
+
+**Làm:**
+
+- Token/character budget cho observations: truncate nội dung file/web lớn với đánh dấu rõ (giải technical debt đã ghi nhận).
+- Summarize notes cũ khi vượt ngưỡng, giữ nguyên provenance.
+- Tách rõ trusted instructions khỏi untrusted evidence trong mọi prompt.
+- Đóng các debt nhỏ đang hoãn nếu còn thời gian: corrective feedback cho planner retry.
+
+**Kiểm chứng:** test run với file lớn không vượt budget context; test summarized notes vẫn giữ citation.
+
+**Không làm trong ngày này:** không đổi planner/selector schema.
+
+**Đầu ra:** một run dài không vượt context; notes cũ được summarize có provenance.
+
+**Điều kiện hoàn thành:** run dài (nhiều nguồn) hoàn thành mà không lỗi context length.
+
+### Ngày 12 — Bounded sub-agent và delegation
+
+**Mục tiêu:** tách nhánh nghiên cứu độc lập cho sub-agent, lead agent tổng hợp.
 
 **Học:** delegation, task boundary, fan-out/fan-in, giới hạn concurrency; khi nào sub-agent có lợi hoặc chỉ làm tốn token.
 
@@ -257,59 +352,60 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 - Tạo một `researcher` sub-agent có web tools nhưng không có quyền ghi report cuối.
 - Planner chia tối đa 2–3 nhánh nghiên cứu độc lập.
 - Chạy song song bằng async, sau đó lead agent tổng hợp.
-- Thêm timeout, concurrency cap và partial failure handling.
+- Thêm timeout, concurrency cap và partial failure handling (một nhánh fail không giết cả run).
 
-**Đầu ra:** báo cáo so sánh dùng ít nhất hai nhánh research; benchmark thời gian/cost so với chạy tuần tự.
+**Kiểm chứng:** test fan-out/fan-in với fake agents; test partial failure; benchmark thời gian/cost so với chạy tuần tự.
 
-### Ngày 11 — Safety và sandbox boundary
+**Không làm trong ngày này:** không làm HITL/eval (Ngày 13).
 
-**Học:** prompt injection, command injection, SSRF, secrets exposure, approval gates; local filesystem không phải sandbox bảo mật.
+**Đầu ra:** báo cáo so sánh dùng ít nhất hai nhánh research; benchmark tuần tự vs song song.
 
-**Làm:**
+**Điều kiện hoàn thành:** delegation bounded hoạt động; một nhánh fail vẫn ra report với ghi rõ nhánh thiếu.
 
-- Threat model ngắn cho web + files + model.
-- URL allow/deny rules, chặn localhost/private network nếu fetch tùy ý.
-- Redact secrets trong logs.
-- Nếu thêm shell tool, chạy trong container cô lập, allowlist command và yêu cầu approval; nếu chưa đủ thời gian, không bật shell.
+### Ngày 13 — Safety approvals, observability và evaluation
 
-**Đầu ra:** `docs/threat-model.md` và bộ security tests tối thiểu.
+**Mục tiêu:** có approval boundary cho thao tác nhạy cảm, trace được toàn bộ run và bộ eval baseline.
 
-### Ngày 12 — Observability và evaluation
-
-**Học:** tracing khác logging; offline eval; trajectory, task success, groundedness, latency và cost.
+**Học:** prompt injection, SSRF, secrets exposure, approval gates; tracing khác logging; offline eval với trajectory, task success, groundedness, latency, cost.
 
 **Làm:**
 
+- Threat model ngắn cho web + files + model (`docs/threat-model.md`).
+- URL allow/deny rules cho fetch: chặn localhost/private network; redact secrets trong logs.
+- Approval gate tối giản: thao tác ghi/xóa hoặc fetch ngoài allowlist yêu cầu xác nhận qua CLI (HITL interrupt) — hoặc ghi rõ deferred nếu quá tải.
 - Gắn `run_id`, `thread_id`, node, tool, latency, token usage vào structured logs/traces.
-- Tạo 5–10 eval cases cố định với rubric.
-- Chấm: hoàn thành nhiệm vụ, đúng citation, coverage, số lỗi tool, thời gian và chi phí.
-- Lưu baseline để so sánh thay đổi prompt/model.
+- 5–10 eval cases cố định với rubric: hoàn thành nhiệm vụ, đúng citation, coverage, số lỗi tool, thời gian, chi phí; lưu baseline.
 
-**Đầu ra:** `evals/dataset.json`, evaluator script và báo cáo baseline.
+**Kiểm chứng:** security tests tối thiểu (SSRF, redaction, allowlist); evaluator script chạy được và ra báo cáo baseline.
 
-### Ngày 13 — API/UI và hardening
+**Không làm trong ngày này:** không bật shell tool/container (giữ deferred theo kế hoạch cũ); API/UI vẫn deferred (xem Ngày 14).
 
-**Học:** streaming events, cancellation, API boundary, config separation.
+**Đầu ra:** `docs/threat-model.md`, `evals/dataset.json`, evaluator script, báo cáo baseline.
 
-**Làm:**
+**Điều kiện hoàn thành:** mọi run ghi được trace theo `run_id`/`thread_id`; eval baseline có số liệu so sánh được.
 
-- Giữ CLI là interface chuẩn; thêm FastAPI hoặc Streamlit mỏng.
-- Hiển thị plan, bước hiện tại, tool event và link report.
-- Thêm cancel, error message thân thiện và config validation.
-- Chạy ruff, mypy, pytest; sửa lỗi quan trọng.
+### Ngày 14 — End-to-end hardening, demo và tổng kết
 
-**Đầu ra:** demo có thể quan sát tiến trình; test suite xanh.
+**Mục tiêu:** đóng kỹ thuật còn lại ở mức MVP, demo ổn định và tổng kết khóa học.
 
-### Ngày 14 — Demo, đối chiếu DeerFlow và tổng kết
+**Học:** hardest part của agent không phải happy path — failure, resume, và giới hạn hệ thống.
 
 **Làm:**
 
-- Chạy 3 kịch bản: happy path, tool failure, resume after interruption.
+- Hardening các debt nhỏ còn lại nếu chưa xử lý ở Ngày 11: CLI formatting sạch cho API infrastructure errors; budget exhaustion cho phép complete-with-limitation thay vì cắt cụt.
+- Chạy 3 kịch bản demo: happy path, tool failure, resume after interruption.
 - So sánh Mini DeerFlow với lead agent, middleware, sandbox, persistence, sub-agent và tracing của DeerFlow.
-- Viết README: setup, architecture, demo, decisions, security, limitations.
-- Ghi backlog 30 ngày tiếp theo và quay demo 5–10 phút nếu cần trình bày.
+- Hoàn thiện README: setup, architecture, demo, decisions, security, limitations và deferred work.
+- Ghi backlog 30 ngày tiếp theo; quay demo 5–10 phút nếu cần trình bày.
+- Tùy chọn (chỉ khi còn thời gian): FastAPI/Streamlit mỏng hiển thị plan/tool events — nếu không làm, ghi rõ deferred vào backlog.
 
-**Đầu ra:** release `v0.1.0`, báo cáo eval cuối và demo hoàn chỉnh.
+**Kiểm chứng:** ruff/mypy/pytest sạch; 3 kịch bản demo chạy được lặp lại; eval cuối so với baseline Ngày 13.
+
+**Không làm trong ngày này:** không thêm capability mới ngoài hardening và demo.
+
+**Đầu ra:** release `v0.1.0`, báo cáo eval cuối, demo hoàn chỉnh, README đầy đủ với giới hạn và deferred work ghi rõ.
+
+**Điều kiện hoàn thành:** Deep Agent MVP demo end-to-end ổn định — MVP hoàn thành, production hardening còn lại được liệt kê rõ là deferred.
 
 ## 7. Cấu trúc repository mục tiêu
 
@@ -359,11 +455,16 @@ mini-deerflow/
 | --- | --- |
 | Hết ngày 3 | Project Mini DeerFlow độc lập sinh được plan JSON hợp lệ và có unit test |
 | Hết ngày 4 | Graph có typed state và chạy end-to-end bằng executor giả |
-| Hết ngày 6 | Model tự gọi tool có giới hạn, xử lý lỗi và tạo artifact |
-| Hết ngày 7 | Sinh báo cáo nhiều nguồn từ plan nhiều bước |
-| Hết ngày 10 | Resume được và có delegation tối giản |
-| Hết ngày 12 | Có trace và eval baseline định lượng |
-| Hết ngày 14 | Demo ổn định, test xanh, README đầy đủ |
+| Hết ngày 6 | Model tự gọi tool có giới hạn và xử lý lỗi qua secure tool layer (artifact Markdown dời sang Ngày 09) |
+| Hết ngày 7 | Executable bounded local research agent chạy end-to-end từ CLI, read-only smoke thành công (chưa có multi-source web research) |
+| Hết ngày 8 | Resume được run dang dở sau gián đoạn bằng `thread_id`, không chạy lại step đã xong |
+| Hết ngày 9 | Báo cáo nhiều nguồn có citation truy ngược được về evidence records |
+| Hết ngày 10 | Reviewer/replanner hoạt động theo structured verdict, re-plan có giới hạn |
+| Hết ngày 12 | Delegation tối giản qua sub-agent bounded, xử lý partial failure |
+| Hết ngày 13 | Có trace theo `run_id`/`thread_id`, eval baseline định lượng và approval boundary tối giản |
+| Hết ngày 14 | Deep Agent MVP demo end-to-end ổn định, test xanh, README và deferred work ghi rõ |
+
+Phân biệt bắt buộc khi chốt ngày 14: **MVP phải hoàn thành** là everything trong các mốc trên; **hardening/production work còn lại** (multi-tenant, deployment bền vững, container sandbox cho shell, UI đầy đủ, context compaction tốt hơn) thuộc backlog sau 2 tuần.
 
 Nếu trễ tiến độ, ưu tiên theo thứ tự: **correct agent loop → tools → workspace → checkpoint → evaluation → sub-agent → UI**. Không hy sinh tests và safety để làm giao diện đẹp.
 
