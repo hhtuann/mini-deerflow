@@ -28,10 +28,11 @@ Implemented:
 - Completed-step summaries for cross-step continuity
 - Strict HTTP/HTTPS source contract for step completions
 - Bounded action-format retry with a static corrective message
+- Local SQLite checkpoints with stable thread identifiers
+- Persistent thread listing and resume support
 
 Not yet available:
 
-- Persistent checkpoint/resume
 - Streaming progress
 - Human-in-the-loop review
 - Sub-agents
@@ -47,7 +48,7 @@ The default CLI runtime composes the workspace file tools: `list_files` and `rea
 ## Current architecture
 
 ```text
-CLI (plan | run)
+CLI (plan | run | resume | threads)
  └── Settings → model factory (OpenAI-compatible)
       └── Planner (json_mode structured output → validated Plan)
            └── Runtime composition
@@ -56,6 +57,7 @@ CLI (plan | run)
                 ├── LLMActionSelector (structured action selection)
                 └── RuntimeLimits (step/total budgets, recursion limit)
                      └── LangGraph bounded agent workflow
+                          ├── SQLite checkpoint per stable thread ID
                           ├── decide_action (select one action)
                           ├── execute_tool (run tool, record observation)
                           ├── complete_step (summary + HTTP/HTTPS sources)
@@ -107,6 +109,15 @@ Never commit `.env`.
 
 ## Usage
 
+The CLI exposes four commands:
+
+```text
+mini-deerflow plan
+mini-deerflow run
+mini-deerflow resume
+mini-deerflow threads
+```
+
 ### Create a validated research plan
 
 ```bash
@@ -124,32 +135,109 @@ uv run mini-deerflow plan "Compare LangGraph and CrewAI for a research agent."
 ### Run the bounded research agent
 
 ```bash
-uv run mini-deerflow run "Inspect the local workspace and summarize verified evidence."
+uv run mini-deerflow run \
+  "Inspect the local workspace and summarize verified evidence." \
+  --thread-id "workspace-audit-001" \
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" \
+  --workspace ".mini-deerflow/workspace"
 ```
 
 On Windows PowerShell:
 
 ```powershell
-uv run mini-deerflow run "Inspect the local workspace and summarize verified evidence."
+uv run mini-deerflow run `
+  "Inspect the local workspace and summarize verified evidence." `
+  --thread-id "workspace-audit-001" `
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" `
+  --workspace ".mini-deerflow/workspace"
 ```
 
-`run` executes the full bounded agent: planning, tool selection, tool execution, step completion, and final synthesis. The run is **read-only by default**; `--allow-write` is opt-in and adds the `write_file` tool.
+`run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, step completion, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool.
 
-Runtime options for `run`:
+Runtime options for `run` and `resume`:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `--thread-id` | required | Stable identifier for one thread in the selected checkpoint database. |
+| `--checkpoint-db` | `.mini-deerflow/checkpoints.sqlite` | Local SQLite database used for persisted checkpoints. |
 | `--workspace` | `.mini-deerflow/workspace` | Workspace directory available to file tools. Created if missing. |
 | `--allow-write` | off | Opt in to the `write_file` tool. |
 | `--max-tool-calls-per-step` | 5 | Maximum tool calls allowed in one plan step. |
 | `--max-total-tool-calls` | 20 | Maximum tool calls allowed in the entire run. |
 | `--recursion-limit` | 100 | Maximum LangGraph execution steps. |
 
-Example with options:
+### Resume a persisted thread
+
+```bash
+uv run mini-deerflow resume \
+  --thread-id "workspace-audit-001" \
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" \
+  --workspace ".mini-deerflow/workspace"
+```
+
+On Windows PowerShell:
+
+```powershell
+uv run mini-deerflow resume `
+  --thread-id "workspace-audit-001" `
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" `
+  --workspace ".mini-deerflow/workspace"
+```
+
+`resume` does not accept a goal. It loads the goal and workflow state from the selected thread's checkpoint, then continues an interrupted thread or reads the final result of a completed thread.
+
+### List persisted threads
+
+```bash
+uv run mini-deerflow threads \
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite"
+```
+
+On Windows PowerShell:
+
+```powershell
+uv run mini-deerflow threads `
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite"
+```
+
+Example output:
+
+```json
+{
+  "threads": [
+    "research-001",
+    "workspace-audit-001"
+  ],
+  "count": 2
+}
+```
+
+### Thread lifecycle and identity
+
+- `run` creates a new thread; it rejects a duplicate `thread_id` already present in the selected checkpoint database.
+- `threads` lists the persisted thread identifiers in that database.
+- `resume` continues an interrupted thread or reads the saved result of a completed thread.
+- A thread identity belongs to one checkpoint database. The same `thread_id` in another database is a separate namespace.
+- The default tool registry stays read-only. Use `--allow-write` only when the `write_file` tool is intentionally required.
+
+### Migration from the Day 07 runtime
+
+Requiring a stable thread identity is a breaking CLI and runtime contract change:
+
+```text
+Before: mini-deerflow run "<goal>"
+Now:    mini-deerflow run "<goal>" --thread-id "<stable-id>"
+```
+
+The Python runtime changed from `AgentRuntime.run(goal)` to `AgentRuntime.run(goal, *, thread_id=...)`; callers must now supply `thread_id` explicitly.
+
+### Example with custom limits
 
 ```bash
 uv run mini-deerflow run \
   "Inspect the local workspace and summarize verified evidence." \
+  --thread-id "bounded-audit-001" \
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" \
   --workspace ".mini-deerflow/workspace" \
   --max-tool-calls-per-step 2 \
   --max-total-tool-calls 6 \
@@ -161,6 +249,8 @@ On Windows PowerShell:
 ```powershell
 uv run mini-deerflow run `
   "Inspect the local workspace and summarize verified evidence." `
+  --thread-id "bounded-audit-001" `
+  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" `
   --workspace ".mini-deerflow/workspace" `
   --max-tool-calls-per-step 2 `
   --max-total-tool-calls 6 `
@@ -171,9 +261,15 @@ uv run mini-deerflow run `
 
 - `plan` prints the validated Plan JSON to stdout.
 - `run` prints the final research answer to stdout.
+- `resume` prints the resumed or previously completed research answer to stdout.
+- `threads` prints sorted thread identifiers and their count as JSON.
 - Domain and validation errors are printed to stderr and the process exits with code 1.
 - Argument parsing errors print argparse usage to stderr and exit with code 2.
 - Some model API infrastructure errors are not yet converted into a clean error message and may appear as a traceback; this is a known deferred gap.
+
+### Persistence limitations
+
+Persistence uses local SQLite and is intended for the MVP. It does not yet provide lifecycle status, delete/prune operations, or a multi-process atomic duplicate-thread guarantee. Checkpointing also does not guarantee exactly-once external side effects. Production deployment and multi-tenant storage are not implemented.
 
 ## Security
 
@@ -229,7 +325,7 @@ The remaining roadmap progressively adds:
 
 1. Real web search/fetch provider composition and richer citations
 2. Re-planning and review
-3. Checkpoint and resume
+3. Production checkpoint lifecycle management and storage
 4. Context management and source provenance
 5. A bounded research sub-agent
 6. Safety, tracing, and evaluation
