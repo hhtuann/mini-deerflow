@@ -1,16 +1,28 @@
-from collections.abc import Callable
+import sqlite3
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.config import Settings
 from mini_deerflow.decision import ActionSelector
 from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.model import create_chat_model
+from mini_deerflow.persistence import (
+    AsyncCheckpointReader,
+    CheckpointStorageError,
+    CheckpointUnavailableError,
+    ThreadAlreadyExistsError,
+    ThreadNotFoundError,
+    create_thread_config,
+    open_sqlite_checkpointer,
+)
 from mini_deerflow.planner import create_research_plan
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState, create_initial_state
@@ -55,11 +67,25 @@ class AgentGraph(Protocol):
 
     async def ainvoke(
         self,
-        state: AgentState,
+        state: AgentState | None,
         *,
         config: dict[str, object],
     ) -> object:
-        """Execute the graph from an initial state."""
+        """Execute or resume the graph."""
+
+
+async def _read_checkpoint(
+    checkpointer: AsyncCheckpointReader,
+    config: dict[str, object],
+) -> object | None:
+    """Read one checkpoint while preserving a narrow storage boundary."""
+
+    try:
+        return await checkpointer.aget_tuple(config)
+    except sqlite3.Error as error:
+        raise CheckpointStorageError(
+            "could not read checkpoint data",
+        ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +94,7 @@ class AgentRuntime:
 
     graph: AgentGraph
     limits: RuntimeLimits = field(default_factory=RuntimeLimits)
+    checkpointer: AsyncCheckpointReader | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph, AgentGraph):
@@ -76,22 +103,89 @@ class AgentRuntime:
         if not isinstance(self.limits, RuntimeLimits):
             raise TypeError("limits must be RuntimeLimits")
 
-    async def run(self, goal: str) -> AgentState:
+        if self.checkpointer is not None and not isinstance(
+            self.checkpointer,
+            AsyncCheckpointReader,
+        ):
+            raise TypeError(
+                "checkpointer must support async checkpoint lookup",
+            )
+
+    async def run(
+        self,
+        goal: str,
+        *,
+        thread_id: str,
+    ) -> AgentState:
         """Run one research goal and return its final state."""
 
         initial_state = create_initial_state(goal)
 
-        result = await self.graph.ainvoke(
-            initial_state,
-            config={
-                "recursion_limit": self.limits.recursion_limit,
-            },
+        config = create_thread_config(
+            thread_id,
+            recursion_limit=self.limits.recursion_limit,
         )
 
-        if not isinstance(result, dict):
-            raise TypeError("graph must return a state dictionary")
+        if self.checkpointer is not None:
+            checkpoint = await _read_checkpoint(
+                self.checkpointer,
+                config,
+            )
 
-        return cast(AgentState, result)
+            if checkpoint is not None:
+                raise ThreadAlreadyExistsError(
+                    f"thread {thread_id!r} already has a checkpoint",
+                )
+
+        result = await self.graph.ainvoke(
+            initial_state,
+            config=config,
+        )
+
+        return _validate_agent_state_result(result)
+
+    async def resume(
+        self,
+        *,
+        thread_id: str,
+    ) -> AgentState:
+        """Continue an existing persisted thread."""
+
+        config = create_thread_config(
+            thread_id,
+            recursion_limit=self.limits.recursion_limit,
+        )
+
+        if self.checkpointer is None:
+            raise CheckpointUnavailableError(
+                "resume requires a configured checkpointer",
+            )
+
+        checkpoint = await _read_checkpoint(
+            self.checkpointer,
+            config,
+        )
+
+        if checkpoint is None:
+            raise ThreadNotFoundError(
+                f"thread {thread_id!r} has no checkpoint",
+            )
+
+        result = await self.graph.ainvoke(
+            None,
+            config=config,
+        )
+
+        return _validate_agent_state_result(result)
+
+
+def _validate_agent_state_result(
+    result: object,
+) -> AgentState:
+    if not isinstance(result, dict):
+        raise TypeError("graph must return a state dictionary")
+
+    return cast(AgentState, result)
 
 
 def build_agent_runtime(
@@ -99,6 +193,7 @@ def build_agent_runtime(
     action_selector: ActionSelector,
     registry: ToolRegistry,
     *,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
 ) -> AgentRuntime:
     """Build a testable runtime from explicitly supplied dependencies."""
@@ -109,6 +204,7 @@ def build_agent_runtime(
         planner,
         action_selector,
         registry,
+        checkpointer=checkpointer,
         max_tool_calls_per_step=(resolved_limits.max_tool_calls_per_step),
         max_total_tool_calls=resolved_limits.max_total_tool_calls,
     )
@@ -116,6 +212,7 @@ def build_agent_runtime(
     return AgentRuntime(
         graph=graph,
         limits=resolved_limits,
+        checkpointer=checkpointer,
     )
 
 
@@ -124,6 +221,7 @@ def create_default_agent_runtime(
     workspace_root: str | Path,
     *,
     allow_write: bool = False,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
     model_factory: ModelFactory = create_chat_model,
 ) -> AgentRuntime:
@@ -159,5 +257,29 @@ def create_default_agent_runtime(
         planner,
         action_selector,
         registry,
+        checkpointer=checkpointer,
         limits=limits,
     )
+
+
+@asynccontextmanager
+async def open_default_agent_runtime(
+    settings: Settings,
+    workspace_root: str | Path,
+    checkpoint_path: str | Path,
+    *,
+    allow_write: bool = False,
+    limits: RuntimeLimits | None = None,
+    model_factory: ModelFactory = create_chat_model,
+) -> AsyncIterator[AgentRuntime]:
+    """Open a persistent runtime and close its checkpointer on exit."""
+
+    async with open_sqlite_checkpointer(checkpoint_path) as checkpointer:
+        yield create_default_agent_runtime(
+            settings,
+            workspace_root,
+            allow_write=allow_write,
+            checkpointer=checkpointer,
+            limits=limits,
+            model_factory=model_factory,
+        )

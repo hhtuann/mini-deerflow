@@ -1,8 +1,11 @@
 import asyncio
 from collections import deque
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from langchain_core.exceptions import OutputParserException
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import NodeCancelledError
 
 from mini_deerflow.actions import (
@@ -652,3 +655,19 @@ def test_workflow_completes_after_recoverable_action_format_failure() -> None:
     assert "Tool calls: 1" in final_answer
     assert "Successful tool calls: 1" in final_answer
     assert "Failed tool calls: 0" in final_answer
+
+
+def test_build_agent_workflow_attaches_injected_checkpointer() -> None:
+    checkpointer = InMemorySaver()
+    action_selector = SimpleNamespace(
+        select_action=Mock(),
+    )
+
+    graph = build_agent_workflow(
+        Mock(),
+        action_selector,
+        ToolRegistry(),
+        checkpointer=checkpointer,
+    )
+
+    assert graph.checkpointer is checkpointer

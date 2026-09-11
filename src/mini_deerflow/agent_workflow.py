@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable
 from typing import Literal
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -39,6 +40,7 @@ def build_agent_workflow(
     action_selector: ActionSelector,
     registry: ToolRegistry,
     *,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
     max_tool_calls_per_step: int = 5,
     max_total_tool_calls: int = 20,
 ) -> CompiledStateGraph:
@@ -379,7 +381,9 @@ def build_agent_workflow(
     )
     builder.add_edge("synthesize", END)
 
-    return builder.compile()
+    return builder.compile(
+        checkpointer=checkpointer,
+    )
 
 
 def _validate_workflow_limit(

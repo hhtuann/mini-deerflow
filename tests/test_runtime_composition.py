@@ -1,21 +1,27 @@
+import asyncio
 from functools import partial
 from pathlib import Path
 from typing import cast
 
 import pytest
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from mini_deerflow import runtime as runtime_module
 from mini_deerflow.actions import ActionDecision
 from mini_deerflow.config import Settings
 from mini_deerflow.decision import ActionSelector
 from mini_deerflow.llm_selector import LLMActionSelector
+from mini_deerflow.persistence import create_thread_config
 from mini_deerflow.planner import create_research_plan
 from mini_deerflow.runtime import (
     AgentRuntime,
     Planner,
     RuntimeLimits,
     create_default_agent_runtime,
+    open_default_agent_runtime,
 )
 from mini_deerflow.tools import ToolRegistry
 
@@ -94,6 +100,7 @@ def test_default_runtime_composes_expected_file_tools(
         max_total_tool_calls=4,
         recursion_limit=30,
     )
+    expected_checkpointer = InMemorySaver()
     captured: dict[str, object] = {}
 
     def fake_model_factory(
@@ -107,11 +114,13 @@ def test_default_runtime_composes_expected_file_tools(
         action_selector: ActionSelector,
         registry: ToolRegistry,
         *,
+        checkpointer: BaseCheckpointSaver[str] | None = None,
         limits: RuntimeLimits | None = None,
     ) -> AgentRuntime:
         captured["planner"] = planner
         captured["action_selector"] = action_selector
         captured["registry"] = registry
+        captured["checkpointer"] = checkpointer
         captured["limits"] = limits
 
         return expected_runtime
@@ -128,6 +137,7 @@ def test_default_runtime_composes_expected_file_tools(
         settings,
         workspace_root,
         allow_write=allow_write,
+        checkpointer=expected_checkpointer,
         limits=limits,
         model_factory=fake_model_factory,
     )
@@ -160,6 +170,8 @@ def test_default_runtime_composes_expected_file_tools(
         )
     ]
 
+    assert captured["checkpointer"] is expected_checkpointer
+
 
 def test_default_runtime_rejects_non_boolean_write_permission(
     tmp_path: Path,
@@ -190,3 +202,59 @@ def test_default_runtime_rejects_non_boolean_write_permission(
         )
 
     assert model_factory_called is False
+
+
+def test_open_default_agent_runtime_owns_sqlite_lifecycle(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        api_key="test-api-key",
+        _env_file=None,
+    )
+    fake_model = FakeModel()
+    checkpoint_path = tmp_path / "checkpoints.sqlite"
+
+    def fake_model_factory(
+        received_settings: Settings,
+    ) -> ChatOpenAI:
+        assert received_settings is settings
+
+        return cast(
+            ChatOpenAI,
+            fake_model,
+        )
+
+    async def run_scenario() -> None:
+        async with open_default_agent_runtime(
+            settings,
+            tmp_path / "workspace",
+            checkpoint_path,
+            model_factory=fake_model_factory,
+        ) as runtime:
+            checkpointer = getattr(
+                runtime.graph,
+                "checkpointer",
+                None,
+            )
+
+            assert isinstance(
+                checkpointer,
+                AsyncSqliteSaver,
+            )
+
+            config = create_thread_config(
+                "runtime-context-test",
+                recursion_limit=30,
+            )
+
+            assert await checkpointer.aget_tuple(config) is None
+
+        with pytest.raises(
+            ValueError,
+            match="no active connection",
+        ):
+            await checkpointer.conn.execute("SELECT 1")
+
+    asyncio.run(run_scenario())
+
+    assert checkpoint_path.is_file()
