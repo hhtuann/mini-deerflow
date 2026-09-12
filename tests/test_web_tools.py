@@ -16,6 +16,7 @@ from mini_deerflow.web import (
     SearchResult,
     WebFetchError,
     WebPolicyError,
+    WebProviderErrorCategory,
     WebSearchError,
 )
 
@@ -153,7 +154,10 @@ def test_web_search_tool_converts_domain_error_to_safe_failure() -> None:
             *,
             max_results: int,
         ) -> list[SearchResult]:
-            raise WebSearchError("Private provider host search.internal failed")
+            raise WebSearchError(
+                "Private provider host search.internal failed",
+                category=WebProviderErrorCategory.AUTHENTICATION,
+            )
 
     tool = WebSearchTool(FailingSearchProvider())
     result = asyncio.run(
@@ -166,6 +170,7 @@ def test_web_search_tool_converts_domain_error_to_safe_failure() -> None:
     assert result.data is None
     assert result.error == "Web search failed."
     assert result.metadata["error_type"] == "WebSearchError"
+    assert result.metadata["error_category"] == "authentication"
     assert "search.internal" not in result.model_dump_json()
 
 
@@ -244,6 +249,29 @@ def test_web_fetch_tool_returns_normalized_page() -> None:
         "status_code": 200,
         "content_type": "text/html",
     }
+    assert result.metadata == {
+        "tool_name": "web_fetch",
+        "content_truncated": False,
+        "original_content_chars": 15,
+    }
+
+
+def test_web_fetch_tool_limits_output_content() -> None:
+    tool = WebFetchTool(
+        SuccessfulFetchProvider(),
+        max_content_chars=7,
+    )
+
+    result = asyncio.run(
+        tool.run(
+            WebFetchInput(url="https://example.com/article"),
+        )
+    )
+
+    assert result.success is True
+    assert result.data["content"] == "Example"
+    assert result.metadata["content_truncated"] is True
+    assert result.metadata["original_content_chars"] == 15
 
 
 def test_web_fetch_tool_converts_policy_error_to_safe_failure() -> None:
@@ -264,6 +292,7 @@ def test_web_fetch_tool_converts_policy_error_to_safe_failure() -> None:
     assert result.data is None
     assert result.error == "Web fetch failed."
     assert result.metadata["error_type"] == "WebPolicyError"
+    assert result.metadata["error_category"] == "unknown"
     assert "127.0.0.1" not in result.model_dump_json()
 
 
@@ -285,6 +314,7 @@ def test_web_fetch_tool_converts_fetch_error_to_safe_failure() -> None:
     assert result.data is None
     assert result.error == "Web fetch failed."
     assert result.metadata["error_type"] == "WebFetchError"
+    assert result.metadata["error_category"] == "unknown"
     assert "credential" not in result.model_dump_json()
 
 

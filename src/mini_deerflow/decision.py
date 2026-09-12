@@ -13,6 +13,7 @@ from mini_deerflow.actions import (
     CompletionSummary,
     ToolObservation,
 )
+from mini_deerflow.evidence import EvidenceRecord
 from mini_deerflow.schemas import PlanStep
 from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry
@@ -44,6 +45,10 @@ class ActionContext(BaseModel):
     )
     observations: list[ToolObservation] = Field(
         default_factory=list,
+    )
+    evidence: list[EvidenceRecord] = Field(
+        default_factory=list,
+        max_length=50,
     )
     remaining_step_tool_calls: int = Field(
         ge=0,
@@ -137,6 +142,7 @@ def build_action_context(
         completed_step_summaries=list(state["notes"]),
         available_tools=registry.definitions(),
         observations=step_observations,
+        evidence=list(state.get("evidence", [])),
         remaining_step_tool_calls=remaining_step_tool_calls,
         remaining_total_tool_calls=remaining_total_tool_calls,
     )

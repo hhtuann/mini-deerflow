@@ -393,6 +393,10 @@ def test_selector_prompt_states_source_url_rules() -> None:
         in ACTION_SELECTOR_SYSTEM_PROMPT
     )
     assert '"sources": []' in ACTION_SELECTOR_SYSTEM_PROMPT
+    assert "successful evidence records" in ACTION_SELECTOR_SYSTEM_PROMPT
+    assert (
+        "Only report source URLs present in evidence" in ACTION_SELECTOR_SYSTEM_PROMPT
+    )
 
 
 def test_corrective_message_is_static_and_schema_focused() -> None:

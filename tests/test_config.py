@@ -7,6 +7,7 @@ from mini_deerflow.config import Settings
 def test_settings_load_from_environment(monkeypatch):
     monkeypatch.setenv("MINI_DEERFLOW_API_KEY", "test-secret")
     monkeypatch.setenv("MINI_DEERFLOW_MODEL_NAME", "test-model")
+    monkeypatch.setenv("MINI_DEERFLOW_JINA_API_KEY", "jina-secret")
 
     settings = Settings(_env_file=None)
 
@@ -14,7 +15,12 @@ def test_settings_load_from_environment(monkeypatch):
     assert settings.model_name == "test-model"
     assert settings.temperature == 0.0
     assert settings.max_retries == 2
+    assert settings.jina_api_key is not None
+    assert settings.jina_api_key.get_secret_value() == "jina-secret"
+    assert settings.web_request_timeout == 20.0
+    assert settings.web_max_response_bytes == 2_000_000
     assert "test-secret" not in repr(settings)
+    assert "jina-secret" not in repr(settings)
 
 
 def test_settings_require_api_key(monkeypatch):

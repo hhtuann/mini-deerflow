@@ -18,8 +18,11 @@ def test_create_initial_state_returns_complete_state() -> None:
         "tool_calls_in_current_step": 0,
         "total_tool_calls": 0,
         "notes": [],
+        "findings": [],
+        "evidence": [],
         "sources": [],
         "final_answer": None,
+        "artifact_path": None,
         "errors": [],
     }
 

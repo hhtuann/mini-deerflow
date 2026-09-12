@@ -30,7 +30,14 @@ from mini_deerflow.tools import (
     ListFilesTool,
     ReadFileTool,
     ToolRegistry,
+    WebFetchTool,
+    WebSearchTool,
     WriteFileTool,
+)
+from mini_deerflow.web import (
+    JinaWebProvider,
+    UrllibWebHttpClient,
+    WebProvider,
 )
 from mini_deerflow.workspace import Workspace
 
@@ -193,8 +200,10 @@ def build_agent_runtime(
     action_selector: ActionSelector,
     registry: ToolRegistry,
     *,
+    action_registry: ToolRegistry | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
+    artifact_path: str | None = None,
 ) -> AgentRuntime:
     """Build a testable runtime from explicitly supplied dependencies."""
 
@@ -204,9 +213,11 @@ def build_agent_runtime(
         planner,
         action_selector,
         registry,
+        action_registry=action_registry,
         checkpointer=checkpointer,
         max_tool_calls_per_step=(resolved_limits.max_tool_calls_per_step),
         max_total_tool_calls=resolved_limits.max_total_tool_calls,
+        artifact_path=artifact_path,
     )
 
     return AgentRuntime(
@@ -224,6 +235,8 @@ def create_default_agent_runtime(
     checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
     model_factory: ModelFactory = create_chat_model,
+    web_provider: WebProvider | None = None,
+    artifact_path: str = "reports/research-report.md",
 ) -> AgentRuntime:
     """Create the default local Mini DeerFlow runtime."""
 
@@ -232,23 +245,37 @@ def create_default_agent_runtime(
 
     model = model_factory(settings)
     workspace = Workspace(workspace_root)
+    resolved_web_provider = (
+        web_provider
+        if web_provider is not None
+        else JinaWebProvider(
+            UrllibWebHttpClient(),
+            api_key=settings.jina_api_key,
+            timeout_seconds=settings.web_request_timeout,
+            max_response_bytes=settings.web_max_response_bytes,
+        )
+    )
 
-    tools = [
+    action_tools = [
         ListFilesTool(workspace),
         ReadFileTool(workspace),
+        WebSearchTool(resolved_web_provider),
+        WebFetchTool(resolved_web_provider),
     ]
+    execution_tools = list(action_tools)
 
     if allow_write:
-        tools.append(
+        execution_tools.append(
             WriteFileTool(workspace),
         )
 
-    registry = ToolRegistry(tools)
+    action_registry = ToolRegistry(action_tools)
+    registry = ToolRegistry(execution_tools)
 
     planner = partial(
         create_research_plan,
         model,
-        available_tools=registry.definitions(),
+        available_tools=action_registry.definitions(),
     )
 
     action_selector = LLMActionSelector(model)
@@ -257,8 +284,10 @@ def create_default_agent_runtime(
         planner,
         action_selector,
         registry,
+        action_registry=action_registry,
         checkpointer=checkpointer,
         limits=limits,
+        artifact_path=artifact_path if allow_write else None,
     )
 
 
@@ -271,6 +300,8 @@ async def open_default_agent_runtime(
     allow_write: bool = False,
     limits: RuntimeLimits | None = None,
     model_factory: ModelFactory = create_chat_model,
+    web_provider: WebProvider | None = None,
+    artifact_path: str = "reports/research-report.md",
 ) -> AsyncIterator[AgentRuntime]:
     """Open a persistent runtime and close its checkpointer on exit."""
 
@@ -282,4 +313,6 @@ async def open_default_agent_runtime(
             checkpointer=checkpointer,
             limits=limits,
             model_factory=model_factory,
+            web_provider=web_provider,
+            artifact_path=artifact_path,
         )

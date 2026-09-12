@@ -22,6 +22,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
 from mini_deerflow.schemas import Plan
 
 _THREAD_ID_PATTERN = re.compile(
@@ -32,6 +33,9 @@ _ALLOWED_CHECKPOINT_TYPES = (
     ToolObservation,
     CompleteStepAction,
     ToolCallAction,
+    EvidenceProvenance,
+    EvidenceRecord,
+    StepFinding,
 )
 
 

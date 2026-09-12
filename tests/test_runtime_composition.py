@@ -69,6 +69,8 @@ class FakeGraph:
             (
                 "list_files",
                 "read_file",
+                "web_search",
+                "web_fetch",
             ),
         ),
         (
@@ -76,6 +78,8 @@ class FakeGraph:
             (
                 "list_files",
                 "read_file",
+                "web_search",
+                "web_fetch",
                 "write_file",
             ),
         ),
@@ -114,14 +118,18 @@ def test_default_runtime_composes_expected_file_tools(
         action_selector: ActionSelector,
         registry: ToolRegistry,
         *,
+        action_registry: ToolRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         limits: RuntimeLimits | None = None,
+        artifact_path: str | None = None,
     ) -> AgentRuntime:
         captured["planner"] = planner
         captured["action_selector"] = action_selector
         captured["registry"] = registry
+        captured["action_registry"] = action_registry
         captured["checkpointer"] = checkpointer
         captured["limits"] = limits
+        captured["artifact_path"] = artifact_path
 
         return expected_runtime
 
@@ -151,12 +159,21 @@ def test_default_runtime_composes_expected_file_tools(
     assert isinstance(registry, ToolRegistry)
     assert registry.names() == expected_names
 
+    action_registry = captured["action_registry"]
+    assert isinstance(action_registry, ToolRegistry)
+    assert action_registry.names() == (
+        "list_files",
+        "read_file",
+        "web_search",
+        "web_fetch",
+    )
+
     planner = captured["planner"]
     assert isinstance(planner, partial)
     assert planner.func is create_research_plan
     assert planner.args == (fake_model,)
     assert planner.keywords == {
-        "available_tools": registry.definitions(),
+        "available_tools": action_registry.definitions(),
     }
 
     assert isinstance(
@@ -171,6 +188,9 @@ def test_default_runtime_composes_expected_file_tools(
     ]
 
     assert captured["checkpointer"] is expected_checkpointer
+    assert captured["artifact_path"] == (
+        "reports/research-report.md" if allow_write else None
+    )
 
 
 def test_default_runtime_rejects_non_boolean_write_permission(

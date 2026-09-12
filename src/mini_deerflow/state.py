@@ -5,6 +5,12 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
 from mini_deerflow.actions import AgentAction, ToolObservation
+from mini_deerflow.evidence import (
+    EvidenceRecord,
+    StepFinding,
+    merge_citation_sources,
+    merge_evidence_records,
+)
 from mini_deerflow.schemas import Plan
 
 
@@ -22,8 +28,11 @@ class AgentState(TypedDict):
     total_tool_calls: int
 
     notes: Annotated[list[str], add]
-    sources: Annotated[list[str], add]
+    findings: Annotated[list[StepFinding], add]
+    evidence: Annotated[list[EvidenceRecord], merge_evidence_records]
+    sources: Annotated[list[str], merge_citation_sources]
     final_answer: str | None
+    artifact_path: str | None
     errors: Annotated[list[str], add]
 
 
@@ -45,7 +54,10 @@ def create_initial_state(goal: str) -> AgentState:
         tool_calls_in_current_step=0,
         total_tool_calls=0,
         notes=[],
+        findings=[],
+        evidence=[],
         sources=[],
         final_answer=None,
+        artifact_path=None,
         errors=[],
     )

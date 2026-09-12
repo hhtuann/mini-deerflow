@@ -65,6 +65,7 @@ class WebSearchTool:
                 metadata={
                     "tool_name": self.name,
                     "error_type": type(exc).__name__,
+                    "error_category": exc.category.value,
                 },
             )
 
@@ -103,11 +104,24 @@ class WebFetchTool:
     timeout_seconds = 30.0
     idempotent = True
 
-    def __init__(self, provider: WebFetchProvider) -> None:
+    def __init__(
+        self,
+        provider: WebFetchProvider,
+        *,
+        max_content_chars: int = 100_000,
+    ) -> None:
         if not isinstance(provider, WebFetchProvider):
             raise TypeError("provider must satisfy WebFetchProvider.")
 
+        if (
+            isinstance(max_content_chars, bool)
+            or not isinstance(max_content_chars, int)
+            or max_content_chars <= 0
+        ):
+            raise ValueError("max_content_chars must be a positive integer.")
+
         self._provider = provider
+        self._max_content_chars = max_content_chars
 
     async def run(self, tool_input: ToolInput) -> ToolResult:
         assert isinstance(tool_input, WebFetchInput)
@@ -122,6 +136,7 @@ class WebFetchTool:
                 metadata={
                     "tool_name": self.name,
                     "error_type": type(exc).__name__,
+                    "error_category": exc.category.value,
                 },
             )
 
@@ -138,6 +153,16 @@ class WebFetchTool:
                 },
             )
 
+        page_data = page.model_dump(mode="json")
+        original_content_chars = len(page.content)
+        truncated = original_content_chars > self._max_content_chars
+        page_data["content"] = page.content[: self._max_content_chars]
+
         return ToolResult.ok(
-            data=page.model_dump(mode="json"),
+            data=page_data,
+            metadata={
+                "tool_name": self.name,
+                "content_truncated": truncated,
+                "original_content_chars": original_content_chars,
+            },
         )

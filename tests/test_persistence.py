@@ -15,6 +15,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
 from mini_deerflow.persistence import (
     _ALLOWED_CHECKPOINT_TYPES,
     CheckpointPathError,
@@ -294,6 +295,7 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
     completed_step = CompleteStepAction(
         type="complete_step",
         summary="Recorded enough evidence to complete this research step.",
+        sources=["https://example.com/evidence"],
     )
     observation = ToolObservation(
         step_number=1,
@@ -304,6 +306,25 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
             {"summary": "The serializer preserved the tool result."},
         ),
     )
+    provenance = EvidenceProvenance(
+        tool_name="web_search",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = EvidenceRecord(
+        url="https://example.com/evidence#fragment",
+        source_tool="web_search",
+        title="Checkpoint evidence",
+        excerpt="Evidence survives serialization.",
+        provenance=provenance,
+    )
+    finding = StepFinding(
+        step_number=1,
+        summary="Recorded a checkpoint-backed evidence finding.",
+        citations=["https://example.com/evidence"],
+    )
 
     assert serializer._allowed_msgpack_modules is not True
     assert serializer._allowed_msgpack_modules == {
@@ -311,7 +332,15 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
         for domain_type in _ALLOWED_CHECKPOINT_TYPES
     }
 
-    for expected in (plan, observation, completed_step, tool_call):
+    for expected in (
+        plan,
+        observation,
+        completed_step,
+        tool_call,
+        provenance,
+        evidence,
+        finding,
+    ):
         restored = serializer.loads_typed(serializer.dumps_typed(expected))
 
         assert type(restored) is type(expected)

@@ -40,3 +40,17 @@ class Settings(BaseSettings):
         ge=0,
         le=5,
     )
+
+    jina_api_key: SecretStr | None = None
+
+    web_request_timeout: float = Field(
+        default=20.0,
+        gt=0.0,
+        le=120.0,
+    )
+
+    web_max_response_bytes: int = Field(
+        default=2_000_000,
+        ge=1_024,
+        le=10_000_000,
+    )

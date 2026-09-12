@@ -8,6 +8,7 @@ from pydantic import (
     JsonValue,
     RootModel,
     StringConstraints,
+    field_serializer,
     model_validator,
 )
 
@@ -59,6 +60,10 @@ class CompleteStepAction(ActionModel):
         default_factory=list,
         max_length=20,
     )
+
+    @field_serializer("sources")
+    def serialize_sources(self, sources: list[HttpUrl]) -> list[str]:
+        return [str(source) for source in sources]
 
 
 AgentAction = Annotated[

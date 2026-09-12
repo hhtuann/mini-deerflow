@@ -41,6 +41,23 @@ def positive_integer(value: str) -> int:
     return parsed_value
 
 
+def _ensure_utf8_output() -> None:
+    """Reconfigure CLI output streams to UTF-8 when the locale default cannot."""
+
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+
+        encoding = (getattr(stream, "encoding", None) or "").lower()
+        if encoding.replace("-", "") == "utf8":
+            continue
+
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError):
+            continue
+
+
 def _add_checkpoint_argument(
     parser: argparse.ArgumentParser,
 ) -> None:
@@ -221,6 +238,8 @@ async def list_research_threads(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the Mini DeerFlow command-line interface."""
+
+    _ensure_utf8_output()
 
     parser = build_parser()
     arguments = parser.parse_args(argv)

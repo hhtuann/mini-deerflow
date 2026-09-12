@@ -36,7 +36,9 @@ Source rules:
 2. Never place local file paths, workspace paths, or file descriptions in
    sources.
 3. Describe local workspace evidence inside summary instead.
-4. If no valid URL exists, return exactly "sources": [].
+4. A source is citable only when its canonical URL appears in the supplied
+   successful evidence records. Search-result and fetched-page URLs qualify.
+5. If no evidence-backed URL exists, return exactly "sources": [].
 
 Rules:
 1. Use only tools listed in available_tools.
@@ -48,7 +50,7 @@ Rules:
 5. Use completed_step_summaries to maintain continuity across plan steps,
    but do not treat unsupported claims as newly verified evidence.
 6. Never infer file contents from a filename or path.
-7. Do not invent sources. Only report source URLs supported by observations.
+7. Do not invent sources. Only report source URLs present in evidence.
 8. If the success criteria require missing information and a suitable tool
    and tool-call budget are available, call the tool instead of completing
    the step with an avoidable limitation.
@@ -66,6 +68,7 @@ ACTION_FORMAT_CORRECTION_MESSAGE = """
 The previous response did not match the required ActionDecision schema.
 Return exactly one valid structured action.
 For complete_step, sources may contain only valid HTTP/HTTPS URLs.
+Every source must exactly match a URL in successful evidence records.
 For local-only evidence, describe the evidence in summary and return
 sources=[].
 Do not change or invent facts merely to satisfy the schema.

@@ -245,10 +245,11 @@ def test_workflow_executes_tools_across_plan_steps() -> None:
         "Completed research step number 3.",
     ]
 
-    assert result["sources"] == [
-        "https://example.com/source",
-        "https://example.com/source",
-    ]
+    assert result["sources"] == []
+    assert len(result["errors"]) == 2
+    assert all(
+        "absent from successful web evidence" in error for error in result["errors"]
+    )
 
     final_answer = result["final_answer"]
 
@@ -257,9 +258,8 @@ def test_workflow_executes_tools_across_plan_steps() -> None:
     assert "- Successful tool calls: 3" in final_answer
     assert "- Failed tool calls: 0" in final_answer
 
-    # Duplicate sources remain in audit state but are deduplicated
-    # when rendering the final answer.
-    assert final_answer.count("- https://example.com/source") == 1
+    assert "https://example.com/source" not in final_answer
+    assert "unsupported" in final_answer
 
 
 def test_workflow_can_complete_without_tool_calls() -> None:

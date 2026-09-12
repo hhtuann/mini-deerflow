@@ -15,9 +15,17 @@ from mini_deerflow.decision import (
     ActionSelector,
     build_action_context,
 )
+from mini_deerflow.evidence import (
+    StepFinding,
+    extract_evidence_records,
+    render_research_report,
+    sanitize_finding_summary,
+    validate_citations,
+)
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry, ToolRunner
+from mini_deerflow.tools.contracts import ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +48,11 @@ def build_agent_workflow(
     action_selector: ActionSelector,
     registry: ToolRegistry,
     *,
+    action_registry: ToolRegistry | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     max_tool_calls_per_step: int = 5,
     max_total_tool_calls: int = 20,
+    artifact_path: str | None = None,
 ) -> CompiledStateGraph:
     """Build the bounded plan-act-observe research workflow."""
 
@@ -59,6 +69,15 @@ def build_agent_workflow(
         raise TypeError(
             "action_selector must satisfy ActionSelector",
         )
+
+    action_registry_is_restricted = action_registry is not None
+    resolved_action_registry = registry if action_registry is None else action_registry
+
+    if not isinstance(resolved_action_registry, ToolRegistry):
+        raise TypeError("action_registry must be ToolRegistry")
+
+    if any(name not in registry for name in resolved_action_registry.names()):
+        raise ValueError("action_registry tools must be registered for execution")
 
     tool_runner = ToolRunner(registry)
 
@@ -84,7 +103,7 @@ def build_agent_workflow(
     ) -> dict[str, object]:
         context = build_action_context(
             state,
-            registry,
+            resolved_action_registry,
             max_tool_calls_per_step=max_tool_calls_per_step,
             max_total_tool_calls=max_total_tool_calls,
         )
@@ -171,10 +190,22 @@ def build_agent_workflow(
             step.step_number,
         )
 
-        result = await tool_runner.run(
-            action.tool_name,
-            action.arguments,
-        )
+        if (
+            action_registry_is_restricted
+            and action.tool_name not in resolved_action_registry
+        ):
+            result = ToolResult.fail(
+                error="Tool is not available for research actions.",
+                metadata={
+                    "tool_name": action.tool_name,
+                    "error_type": "ActionToolDeniedError",
+                },
+            )
+        else:
+            result = await tool_runner.run(
+                action.tool_name,
+                action.arguments,
+            )
 
         observation = ToolObservation(
             step_number=step.step_number,
@@ -183,10 +214,12 @@ def build_agent_workflow(
             action=action,
             result=result,
         )
+        evidence = extract_evidence_records(observation)
 
         return {
             "pending_action": None,
             "tool_observations": [observation],
+            "evidence": evidence,
             "tool_calls_in_current_step": (step_tool_call_number),
             "total_tool_calls": total_tool_call_number,
         }
@@ -222,12 +255,33 @@ def build_agent_workflow(
             step.title,
         )
 
+        accepted_sources, rejected_count = validate_citations(
+            action.sources,
+            list(state.get("evidence", [])),
+        )
+        sanitized_summary = sanitize_finding_summary(action.summary)
+        errors: list[str] = []
+
+        if rejected_count:
+            errors.append(
+                f"Step {step.step_number} rejected {rejected_count} "
+                "citation(s) absent from successful web evidence."
+            )
+
         return {
             "pending_action": None,
             "current_step": current_step + 1,
             "tool_calls_in_current_step": 0,
-            "notes": [action.summary],
-            "sources": [str(source) for source in action.sources],
+            "notes": [sanitized_summary],
+            "findings": [
+                StepFinding(
+                    step_number=step.step_number,
+                    summary=sanitized_summary,
+                    citations=accepted_sources,
+                )
+            ],
+            "sources": accepted_sources,
+            "errors": errors,
         }
 
     def route_after_completion(
@@ -292,12 +346,10 @@ def build_agent_workflow(
             "errors": [error],
         }
 
-    def synthesize_node(
+    async def synthesize_node(
         state: AgentState,
     ) -> dict[str, object]:
-        completed_notes = state["notes"]
-        unique_sources = list(dict.fromkeys(state["sources"]))
-        errors = state["errors"]
+        errors = list(state["errors"])
         observations = state["tool_observations"]
 
         successful_calls = sum(
@@ -305,39 +357,49 @@ def build_agent_workflow(
         )
         failed_calls = len(observations) - successful_calls
 
-        note_lines = [f"- {note}" for note in completed_notes] or [
-            "- No plan step was completed."
-        ]
-        source_lines = [f"- {source}" for source in unique_sources] or [
-            "- No sources were recorded."
-        ]
-        error_lines = [f"- {error}" for error in errors] or [
-            "- No execution errors were recorded."
-        ]
-
-        final_answer = "\n".join(
-            [
-                f"Research goal: {state['goal']}",
-                "",
-                "Completed step summaries:",
-                *note_lines,
-                "",
-                "Sources:",
-                *source_lines,
-                "",
-                "Execution:",
-                (f"- Tool calls: {state['total_tool_calls']}"),
-                f"- Successful tool calls: {successful_calls}",
-                f"- Failed tool calls: {failed_calls}",
-                "",
-                "Errors:",
-                *error_lines,
-            ]
-        )
-
-        return {
-            "final_answer": final_answer,
+        report_arguments = {
+            "goal": state["goal"],
+            "findings": list(state.get("findings", [])),
+            "evidence": list(state.get("evidence", [])),
+            "errors": errors,
+            "total_tool_calls": state["total_tool_calls"],
+            "successful_tool_calls": successful_calls,
+            "failed_tool_calls": failed_calls,
         }
+        final_answer = render_research_report(**report_arguments)
+        resolved_artifact_path: str | None = None
+
+        if artifact_path is not None:
+            artifact_result = await tool_runner.run(
+                "write_file",
+                {
+                    "path": artifact_path,
+                    "content": final_answer,
+                },
+            )
+
+            if artifact_result.success:
+                resolved_artifact_path = artifact_path
+            else:
+                artifact_error = (
+                    "Research artifact could not be written through the "
+                    "workspace boundary."
+                )
+                errors.append(artifact_error)
+                report_arguments["errors"] = errors
+                final_answer = render_research_report(
+                    **report_arguments,
+                )
+
+        updates: dict[str, object] = {
+            "final_answer": final_answer,
+            "artifact_path": resolved_artifact_path,
+        }
+
+        if len(errors) > len(state["errors"]):
+            updates["errors"] = errors[len(state["errors"]) :]
+
+        return updates
 
     builder = StateGraph(AgentState)
 
