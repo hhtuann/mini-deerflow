@@ -24,7 +24,11 @@ Implemented:
 - `ToolRunner` input validation, timeout, and structured failure results
 - Workspace boundary enforcement
 - `list_files` and `read_file` in the default read-only runtime
+- Jina Search and Reader providers behind an injectable, size-bounded HTTP boundary
+- Multi-source evidence records with canonical URL deduplication and provenance
+- Citation validation against successful web tool observations
 - `write_file` only when `--allow-write` is enabled
+- Markdown research artifact generation when `--allow-write` is enabled
 - Completed-step summaries for cross-step continuity
 - Strict HTTP/HTTPS source contract for step completions
 - Bounded action-format retry with a static corrective message
@@ -36,14 +40,13 @@ Not yet available:
 - Streaming progress
 - Human-in-the-loop review
 - Sub-agents
-- Default composition of a real web search/fetch provider
-- Rich local/web citation model
 - Token-aware truncation for file/tool observations
+- Production-grade SSRF protection and redirect policy
 - Production-grade API error presentation
 
 ### Capability distinction
 
-The default CLI runtime composes the workspace file tools: `list_files` and `read_file`, plus `write_file` when `--allow-write` is enabled. Web provider contracts (`src/mini_deerflow/web.py`) and web tool adapters (`web_search` and `web_fetch` in `src/mini_deerflow/tools/web.py`) already exist, but a real web provider is not composed into the default runtime yet, so end-to-end web research is not complete.
+The default CLI runtime composes the read-only `list_files`, `read_file`, `web_search`, and `web_fetch` tools. Web access uses Jina Search/Reader through an injectable HTTP client. Jina Search requires `MINI_DEERFLOW_JINA_API_KEY`; Reader can use Jina's anonymous quota. `write_file` is added only with `--allow-write`, which also writes the deterministic final report to `reports/research-report.md` through the workspace boundary.
 
 ## Current architecture
 
@@ -54,14 +57,15 @@ CLI (plan | run | resume | threads)
            └── Runtime composition
                 ├── ToolRegistry allowlist + ToolRunner
                 ├── Workspace boundary + file tools
+                ├── Jina provider + web search/fetch tools
                 ├── LLMActionSelector (structured action selection)
                 └── RuntimeLimits (step/total budgets, recursion limit)
                      └── LangGraph bounded agent workflow
                           ├── SQLite checkpoint per stable thread ID
                           ├── decide_action (select one action)
-                          ├── execute_tool (run tool, record observation)
-                          ├── complete_step (summary + HTTP/HTTPS sources)
-                          └── synthesize → final answer
+                          ├── execute_tool (observation + evidence extraction)
+                          ├── complete_step (validate citations against evidence)
+                          └── synthesize → Markdown answer/artifact
 ```
 
 ## Requirements
@@ -103,6 +107,7 @@ Open `.env` and provide your API key:
 
 ```dotenv
 MINI_DEERFLOW_API_KEY=replace-with-your-api-key
+MINI_DEERFLOW_JINA_API_KEY=replace-with-your-jina-api-key
 ```
 
 Never commit `.env`.
@@ -152,7 +157,7 @@ uv run mini-deerflow run `
   --workspace ".mini-deerflow/workspace"
 ```
 
-`run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, step completion, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool.
+`run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, evidence extraction, citation validation, step completion, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool and writes `reports/research-report.md`.
 
 Runtime options for `run` and `resume`:
 
@@ -280,7 +285,9 @@ Persistence uses local SQLite and is intended for the MVP. It does not yet provi
 - Tool inputs are validated with Pydantic before execution; tool failures are normalized into structured results.
 - Per-step and total-run budgets plus the recursion limit prevent unbounded loops.
 - Tool output, fetched content, and local files are treated as untrusted evidence; the agent is instructed not to follow instructions found inside them.
-- `HttpUrl` on sources guarantees URL structure only; it does not prove that a URL exists or was observed by a tool.
+- `HttpUrl` validates source structure, while the workflow separately requires every citation URL to occur in a successful `web_search` or `web_fetch` observation.
+- Evidence and citations are bounded, canonicalized, deduplicated, and checkpointed with tool-call and step provenance.
+- Full SSRF and redirect hardening is deferred; web URLs and fetched content remain untrusted input.
 
 ## Development checks
 
