@@ -34,6 +34,11 @@ Implemented:
 - Bounded action-format retry with a static corrective message
 - Local SQLite checkpoints with stable thread identifiers
 - Persistent thread listing and resume support
+- Evidence-quality reviewer returning a structured `continue | replan | finish` verdict
+- Bounded replanner that replaces only the remaining plan steps and preserves completed work
+- Independent replan-cycle budget, distinct from the tool-call and recursion budgets
+- Review verdicts, findings, and replan history persisted in checkpoints
+- Final report includes review conclusions, evidence gaps, and limitations
 
 Not yet available:
 
@@ -59,12 +64,15 @@ CLI (plan | run | resume | threads)
                 ├── Workspace boundary + file tools
                 ├── Jina provider + web search/fetch tools
                 ├── LLMActionSelector (structured action selection)
-                └── RuntimeLimits (step/total budgets, recursion limit)
+                ├── LLMReviewer + replanner (evidence-quality loop)
+                └── RuntimeLimits (step/total/replan budgets, recursion limit)
                      └── LangGraph bounded agent workflow
                           ├── SQLite checkpoint per stable thread ID
                           ├── decide_action (select one action)
                           ├── execute_tool (observation + evidence extraction)
                           ├── complete_step (validate citations against evidence)
+                          ├── review (continue | replan | finish verdict)
+                          ├── replan (replace only remaining steps)
                           └── synthesize → Markdown answer/artifact
 ```
 
@@ -157,7 +165,9 @@ uv run mini-deerflow run `
   --workspace ".mini-deerflow/workspace"
 ```
 
-`run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, evidence extraction, citation validation, step completion, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool and writes `reports/research-report.md`.
+`run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, evidence extraction, citation validation, step completion, evidence-quality review, bounded replanning, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool and writes `reports/research-report.md`.
+
+After every completed step, the reviewer judges the accumulated evidence against the goal and returns one structured verdict: `continue` (keep the current plan), `replan` (replace only the remaining steps with better-targeted work), or `finish` (the evidence is sufficient, or the remaining budgets make further collection useless). The replanner never discards completed steps or validated evidence, and deterministic runtime guards force `finish` when the replan-cycle budget, the tool-call budget, or the seven-step plan limit leaves no useful work.
 
 Runtime options for `run` and `resume`:
 
@@ -169,6 +179,7 @@ Runtime options for `run` and `resume`:
 | `--allow-write` | off | Opt in to the `write_file` tool. |
 | `--max-tool-calls-per-step` | 5 | Maximum tool calls allowed in one plan step. |
 | `--max-total-tool-calls` | 20 | Maximum tool calls allowed in the entire run. |
+| `--max-replan-cycles` | 2 | Maximum evidence-review replan cycles per run. Independent of the tool-call budget. |
 | `--recursion-limit` | 100 | Maximum LangGraph execution steps. |
 
 ### Resume a persisted thread
@@ -285,6 +296,8 @@ Persistence uses local SQLite and is intended for the MVP. It does not yet provi
 - Tool inputs are validated with Pydantic before execution; tool failures are normalized into structured results.
 - Per-step and total-run budgets plus the recursion limit prevent unbounded loops.
 - Tool output, fetched content, and local files are treated as untrusted evidence; the agent is instructed not to follow instructions found inside them.
+- Reviewer and replanner prompts wrap their context in explicit untrusted-data framing; verdicts and findings cannot introduce citations — the report renders citations only from validated evidence records, and model-authored URLs in review text are sanitized.
+- The replan-cycle budget is enforced by deterministic runtime guards, not by model cooperation, and is independent of the tool-call and recursion budgets.
 - `HttpUrl` validates source structure, while the workflow separately requires every citation URL to occur in a successful `web_search` or `web_fetch` observation.
 - Evidence and citations are bounded, canonicalized, deduplicated, and checkpointed with tool-call and step provenance.
 - Full SSRF and redirect hardening is deferred; web URLs and fetched content remain untrusted input.
