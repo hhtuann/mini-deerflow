@@ -221,3 +221,44 @@ def test_report_uses_only_validated_citations_and_marks_unsupported_claims() -> 
     assert "Step 1 (verified)" in report
     assert "Step 2 (unsupported)" in report
     assert "tool call 3, observation 3" in report
+
+
+def test_report_renders_review_conclusions_and_cycle_counts() -> None:
+    report = render_research_report(
+        goal="Trace every citation.",
+        findings=[],
+        evidence=[],
+        errors=[],
+        total_tool_calls=0,
+        successful_tool_calls=0,
+        failed_tool_calls=0,
+        review_conclusions=[
+            "- **Review 1 — replan:** Remaining steps missed the gap.",
+            "  - [gap] No evidence covers the cost dimension. (steps: 2)",
+        ],
+        review_cycles=1,
+        replan_cycles=1,
+    )
+
+    assert "## Review conclusions" in report
+    assert "- **Review 1 — replan:** Remaining steps missed the gap." in report
+    assert "  - [gap] No evidence covers the cost dimension. (steps: 2)" in report
+    assert "- Review cycles: 1" in report
+    assert "- Replan cycles: 1" in report
+
+
+def test_report_without_reviews_states_absence() -> None:
+    report = render_research_report(
+        goal="Trace every citation.",
+        findings=[],
+        evidence=[],
+        errors=[],
+        total_tool_calls=0,
+        successful_tool_calls=0,
+        failed_tool_calls=0,
+    )
+
+    assert "## Review conclusions" in report
+    assert "- No review verdicts were recorded." in report
+    assert "- Review cycles: 0" in report
+    assert "- Replan cycles: 0" in report

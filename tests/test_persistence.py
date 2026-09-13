@@ -30,6 +30,7 @@ from mini_deerflow.persistence import (
     open_sqlite_checkpointer,
     resolve_checkpoint_path,
 )
+from mini_deerflow.review import ReplanRecord, ReviewFinding, ReviewVerdict
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.tools.contracts import ToolResult
 
@@ -325,6 +326,30 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
         summary="Recorded a checkpoint-backed evidence finding.",
         citations=["https://example.com/evidence"],
     )
+    verdict = ReviewVerdict(
+        verdict="replan",
+        rationale="Remaining steps cannot close the recorded evidence gap.",
+        findings=[
+            ReviewFinding(
+                category="gap",
+                description="One goal dimension lacks any collected evidence.",
+                related_step_numbers=[2],
+            ),
+        ],
+    )
+    replan_record = ReplanRecord(
+        replan_number=1,
+        replaced_step_numbers=[2, 3],
+        replacement_steps=[
+            PlanStep(
+                step_number=2,
+                title="Revised remaining step",
+                objective="Collect the missing evidence dimension.",
+                success_criteria="The reviewed gap is closed.",
+            )
+        ],
+        review_rationale="Remaining steps cannot close the recorded evidence gap.",
+    )
 
     assert serializer._allowed_msgpack_modules is not True
     assert serializer._allowed_msgpack_modules == {
@@ -340,6 +365,8 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
         provenance,
         evidence,
         finding,
+        verdict,
+        replan_record,
     ):
         restored = serializer.loads_typed(serializer.dumps_typed(expected))
 

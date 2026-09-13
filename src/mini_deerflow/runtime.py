@@ -12,6 +12,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.config import Settings
 from mini_deerflow.decision import ActionSelector
+from mini_deerflow.llm_reviewer import LLMReviewer
 from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.model import create_chat_model
 from mini_deerflow.persistence import (
@@ -24,6 +25,8 @@ from mini_deerflow.persistence import (
     open_sqlite_checkpointer,
 )
 from mini_deerflow.planner import create_research_plan
+from mini_deerflow.replanner import create_replacement_plan
+from mini_deerflow.review import EvidenceReviewer, Replanner
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState, create_initial_state
 from mini_deerflow.tools import (
@@ -51,12 +54,14 @@ class RuntimeLimits:
 
     max_tool_calls_per_step: int = 5
     max_total_tool_calls: int = 20
+    max_replan_cycles: int = 2
     recursion_limit: int = 100
 
     def __post_init__(self) -> None:
         for name in (
             "max_tool_calls_per_step",
             "max_total_tool_calls",
+            "max_replan_cycles",
             "recursion_limit",
         ):
             value = getattr(self, name)
@@ -201,6 +206,8 @@ def build_agent_runtime(
     registry: ToolRegistry,
     *,
     action_registry: ToolRegistry | None = None,
+    reviewer: EvidenceReviewer | None = None,
+    replanner: Replanner | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
     artifact_path: str | None = None,
@@ -214,9 +221,12 @@ def build_agent_runtime(
         action_selector,
         registry,
         action_registry=action_registry,
+        reviewer=reviewer,
+        replanner=replanner,
         checkpointer=checkpointer,
         max_tool_calls_per_step=(resolved_limits.max_tool_calls_per_step),
         max_total_tool_calls=resolved_limits.max_total_tool_calls,
+        max_replan_cycles=resolved_limits.max_replan_cycles,
         artifact_path=artifact_path,
     )
 
@@ -279,12 +289,19 @@ def create_default_agent_runtime(
     )
 
     action_selector = LLMActionSelector(model)
+    reviewer = LLMReviewer(model)
+    replanner = partial(
+        create_replacement_plan,
+        model,
+    )
 
     return build_agent_runtime(
         planner,
         action_selector,
         registry,
         action_registry=action_registry,
+        reviewer=reviewer,
+        replanner=replanner,
         checkpointer=checkpointer,
         limits=limits,
         artifact_path=artifact_path if allow_write else None,

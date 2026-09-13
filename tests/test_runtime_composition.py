@@ -13,9 +13,16 @@ from mini_deerflow import runtime as runtime_module
 from mini_deerflow.actions import ActionDecision
 from mini_deerflow.config import Settings
 from mini_deerflow.decision import ActionSelector
+from mini_deerflow.llm_reviewer import LLMReviewer
 from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.persistence import create_thread_config
 from mini_deerflow.planner import create_research_plan
+from mini_deerflow.replanner import create_replacement_plan
+from mini_deerflow.review import (
+    EvidenceReviewer,
+    Replanner,
+    ReviewDecision,
+)
 from mini_deerflow.runtime import (
     AgentRuntime,
     Planner,
@@ -119,6 +126,8 @@ def test_default_runtime_composes_expected_file_tools(
         registry: ToolRegistry,
         *,
         action_registry: ToolRegistry | None = None,
+        reviewer: EvidenceReviewer | None = None,
+        replanner: Replanner | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         limits: RuntimeLimits | None = None,
         artifact_path: str | None = None,
@@ -127,6 +136,8 @@ def test_default_runtime_composes_expected_file_tools(
         captured["action_selector"] = action_selector
         captured["registry"] = registry
         captured["action_registry"] = action_registry
+        captured["reviewer"] = reviewer
+        captured["replanner"] = replanner
         captured["checkpointer"] = checkpointer
         captured["limits"] = limits
         captured["artifact_path"] = artifact_path
@@ -180,11 +191,30 @@ def test_default_runtime_composes_expected_file_tools(
         captured["action_selector"],
         LLMActionSelector,
     )
+    assert isinstance(
+        captured["reviewer"],
+        LLMReviewer,
+    )
+
+    composed_replanner = captured["replanner"]
+
+    assert isinstance(composed_replanner, partial)
+    assert composed_replanner.func is create_replacement_plan
+    assert composed_replanner.args == (fake_model,)
+    assert composed_replanner.keywords == {}
+
+    # The replanner binds its structured model lazily per invocation,
+    # exactly like the planner, so only the eager selector and reviewer
+    # structured-output bindings appear at composition time.
     assert fake_model.structured_output_calls == [
         (
             ActionDecision,
             "json_mode",
-        )
+        ),
+        (
+            ReviewDecision,
+            "json_mode",
+        ),
     ]
 
     assert captured["checkpointer"] is expected_checkpointer

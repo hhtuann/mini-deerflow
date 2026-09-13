@@ -113,6 +113,15 @@ def _add_runtime_arguments(
         help="Maximum tool calls allowed in the entire run.",
     )
     parser.add_argument(
+        "--max-replan-cycles",
+        type=positive_integer,
+        default=2,
+        help=(
+            "Maximum evidence-review replan cycles allowed in one run. "
+            "This budget is independent of the tool-call budget."
+        ),
+    )
+    parser.add_argument(
         "--recursion-limit",
         type=positive_integer,
         default=100,
@@ -268,6 +277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         limits = RuntimeLimits(
             max_tool_calls_per_step=(arguments.max_tool_calls_per_step),
             max_total_tool_calls=arguments.max_total_tool_calls,
+            max_replan_cycles=arguments.max_replan_cycles,
             recursion_limit=arguments.recursion_limit,
         )
 

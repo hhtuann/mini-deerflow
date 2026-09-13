@@ -22,6 +22,20 @@ from mini_deerflow.evidence import (
     sanitize_finding_summary,
     validate_citations,
 )
+from mini_deerflow.review import (
+    EvidenceReviewer,
+    ReplacementWork,
+    Replanner,
+    ReplanRecord,
+    ReplanRequest,
+    ReviewContext,
+    ReviewRoute,
+    ReviewVerdict,
+    derive_review_limitations,
+    merge_replanned_steps,
+    render_review_conclusions,
+    replacement_step_bounds,
+)
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry, ToolRunner
@@ -49,9 +63,12 @@ def build_agent_workflow(
     registry: ToolRegistry,
     *,
     action_registry: ToolRegistry | None = None,
+    reviewer: EvidenceReviewer | None = None,
+    replanner: Replanner | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     max_tool_calls_per_step: int = 5,
     max_total_tool_calls: int = 20,
+    max_replan_cycles: int = 2,
     artifact_path: str | None = None,
 ) -> CompiledStateGraph:
     """Build the bounded plan-act-observe research workflow."""
@@ -64,10 +81,29 @@ def build_agent_workflow(
         "max_total_tool_calls",
         max_total_tool_calls,
     )
+    _validate_workflow_limit(
+        "max_replan_cycles",
+        max_replan_cycles,
+    )
 
     if not isinstance(action_selector, ActionSelector):
         raise TypeError(
             "action_selector must satisfy ActionSelector",
+        )
+
+    if (reviewer is None) != (replanner is None):
+        raise ValueError(
+            "reviewer and replanner must be configured together",
+        )
+
+    if reviewer is not None and not isinstance(reviewer, EvidenceReviewer):
+        raise TypeError(
+            "reviewer must satisfy EvidenceReviewer",
+        )
+
+    if replanner is not None and not callable(replanner):
+        raise TypeError(
+            "replanner must be callable",
         )
 
     action_registry_is_restricted = action_registry is not None
@@ -127,6 +163,11 @@ def build_agent_workflow(
 
         return {
             "pending_action": action,
+            # Entering decide_action consumes a routed "continue" review
+            # verdict; durable history stays in review_verdicts. The
+            # write only lands when this node succeeds, so an interrupt
+            # keeps the pending verdict resumable in the checkpoint.
+            "pending_review_verdict": None,
         }
 
     def route_after_decision(
@@ -306,6 +347,209 @@ def build_agent_workflow(
 
         return "synthesize"
 
+    async def review_node(
+        state: AgentState,
+    ) -> dict[str, object]:
+        plan = state["plan"]
+
+        if plan is None:
+            raise RuntimeError(
+                "evidence review requires a plan",
+            )
+
+        current_step = state["current_step"]
+
+        if current_step < 0 or current_step > len(plan.steps):
+            raise RuntimeError(
+                "current_step is outside the plan",
+            )
+
+        assert reviewer is not None
+
+        remaining_steps = plan.steps[current_step:]
+        remaining_total_tool_calls = max(
+            0,
+            max_total_tool_calls - state["total_tool_calls"],
+        )
+        remaining_replan_cycles = max(
+            0,
+            max_replan_cycles - len(state["replans"]),
+        )
+
+        context = ReviewContext(
+            goal=state["goal"],
+            remaining_steps=remaining_steps,
+            completed_step_summaries=list(state["notes"]),
+            findings=list(state.get("findings", [])),
+            evidence=list(state.get("evidence", [])),
+            limitations=derive_review_limitations(
+                state["tool_observations"],
+                list(state["errors"]),
+            ),
+            remaining_total_tool_calls=remaining_total_tool_calls,
+            remaining_replan_cycles=remaining_replan_cycles,
+        )
+
+        logger.info(
+            "Reviewing evidence quality after plan step %s",
+            current_step,
+        )
+
+        verdict = await reviewer.review_evidence(
+            context,
+        )
+
+        if not isinstance(verdict, ReviewVerdict):
+            raise TypeError(
+                "evidence reviewer returned an invalid verdict",
+            )
+
+        review_number = len(state["review_verdicts"]) + 1
+        route = verdict.verdict
+        coercion_errors: list[str] = []
+
+        if route == "replan":
+            replan_budget_exhausted = len(state["replans"]) >= max_replan_cycles
+            tool_budget_exhausted = state["total_tool_calls"] >= max_total_tool_calls
+
+            if replan_budget_exhausted:
+                route = "finish"
+                coercion_errors.append(
+                    f"Review {review_number} requested another replan "
+                    "after the replan budget was exhausted; finishing "
+                    "with the available evidence."
+                )
+            elif tool_budget_exhausted:
+                route = "finish"
+                coercion_errors.append(
+                    f"Review {review_number} requested a replan after "
+                    "the tool-call budget was exhausted; finishing with "
+                    "the available evidence."
+                )
+            else:
+                try:
+                    replacement_step_bounds(current_step)
+                except ValueError:
+                    route = "finish"
+                    coercion_errors.append(
+                        f"Review {review_number} requested a replan "
+                        "that cannot fit within the seven-step plan "
+                        "limit; finishing with the available evidence."
+                    )
+        elif route == "continue" and current_step >= len(plan.steps):
+            route = "finish"
+            coercion_errors.append(
+                f"Review {review_number} requested continuing a plan "
+                "with no remaining steps; finishing with the available "
+                "evidence."
+            )
+
+        return {
+            "review_verdicts": [verdict],
+            "pending_review_verdict": route,
+            "errors": coercion_errors,
+        }
+
+    def route_after_review(
+        state: AgentState,
+    ) -> ReviewRoute:
+        route = state["pending_review_verdict"]
+
+        if route is None:
+            raise RuntimeError(
+                "review routing requires a pending review verdict",
+            )
+
+        if route not in ("continue", "replan", "finish"):
+            raise RuntimeError(
+                "review routing received an invalid verdict",
+            )
+
+        return route
+
+    def replan_node(
+        state: AgentState,
+    ) -> dict[str, object]:
+        plan = state["plan"]
+
+        if plan is None:
+            raise RuntimeError(
+                "replanning requires a plan",
+            )
+
+        if state["pending_review_verdict"] != "replan":
+            raise RuntimeError(
+                "replanning requires a replan verdict",
+            )
+
+        current_step = state["current_step"]
+
+        if current_step < 0 or current_step > len(plan.steps):
+            raise RuntimeError(
+                "current_step is outside the plan",
+            )
+
+        if not state["review_verdicts"]:
+            raise RuntimeError(
+                "replanning requires a triggering review verdict",
+            )
+
+        assert replanner is not None
+
+        verdict = state["review_verdicts"][-1]
+        minimum, maximum = replacement_step_bounds(current_step)
+
+        request = ReplanRequest(
+            goal=state["goal"],
+            review=verdict,
+            completed_step_summaries=list(state["notes"]),
+            replaced_steps=plan.steps[current_step:],
+            available_tools=resolved_action_registry.definitions(),
+            remaining_total_tool_calls=max(
+                0,
+                max_total_tool_calls - state["total_tool_calls"],
+            ),
+            remaining_replan_cycles=max(
+                0,
+                max_replan_cycles - len(state["replans"]),
+            ),
+            min_replacement_steps=minimum,
+            max_replacement_steps=maximum,
+        )
+
+        logger.info(
+            "Replanning remaining work after review %s",
+            len(state["review_verdicts"]),
+        )
+
+        replacement = replanner(request)
+
+        if not isinstance(replacement, ReplacementWork):
+            raise TypeError(
+                "replanner returned invalid replacement work",
+            )
+
+        completed_steps = plan.steps[:current_step]
+        replaced_steps = plan.steps[current_step:]
+        merged_plan = merge_replanned_steps(
+            plan.goal,
+            completed_steps,
+            replacement.steps,
+        )
+
+        record = ReplanRecord(
+            replan_number=len(state["replans"]) + 1,
+            replaced_step_numbers=[step.step_number for step in replaced_steps],
+            replacement_steps=merged_plan.steps[current_step:],
+            review_rationale=verdict.rationale,
+        )
+
+        return {
+            "plan": merged_plan,
+            "pending_review_verdict": None,
+            "replans": [record],
+        }
+
     def budget_exhausted_node(
         state: AgentState,
     ) -> dict[str, object]:
@@ -365,6 +609,11 @@ def build_agent_workflow(
             "total_tool_calls": state["total_tool_calls"],
             "successful_tool_calls": successful_calls,
             "failed_tool_calls": failed_calls,
+            "review_conclusions": render_review_conclusions(
+                state.get("review_verdicts", []),
+            ),
+            "review_cycles": len(state.get("review_verdicts", [])),
+            "replan_cycles": len(state.get("replans", [])),
         }
         final_answer = render_research_report(**report_arguments)
         resolved_artifact_path: str | None = None
@@ -394,6 +643,9 @@ def build_agent_workflow(
         updates: dict[str, object] = {
             "final_answer": final_answer,
             "artifact_path": resolved_artifact_path,
+            # Synthesis is the consumer of a routed "finish" review
+            # verdict; the terminal state must not retain it.
+            "pending_review_verdict": None,
         }
 
         if len(errors) > len(state["errors"]):
@@ -413,6 +665,10 @@ def build_agent_workflow(
     )
     builder.add_node("synthesize", synthesize_node)
 
+    if reviewer is not None:
+        builder.add_node("review", review_node)
+        builder.add_node("replan", replan_node)
+
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "decide_action")
 
@@ -428,14 +684,29 @@ def build_agent_workflow(
 
     builder.add_edge("execute_tool", "decide_action")
 
-    builder.add_conditional_edges(
-        "complete_step",
-        route_after_completion,
-        {
-            "decide_action": "decide_action",
-            "synthesize": "synthesize",
-        },
-    )
+    if reviewer is not None:
+        builder.add_edge("complete_step", "review")
+
+        builder.add_conditional_edges(
+            "review",
+            route_after_review,
+            {
+                "continue": "decide_action",
+                "replan": "replan",
+                "finish": "synthesize",
+            },
+        )
+
+        builder.add_edge("replan", "decide_action")
+    else:
+        builder.add_conditional_edges(
+            "complete_step",
+            route_after_completion,
+            {
+                "decide_action": "decide_action",
+                "synthesize": "synthesize",
+            },
+        )
 
     builder.add_edge(
         "budget_exhausted",

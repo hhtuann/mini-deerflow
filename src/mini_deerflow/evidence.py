@@ -1,4 +1,5 @@
 import re
+from collections.abc import Sequence
 from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit, urlunsplit
 
@@ -322,6 +323,9 @@ def render_research_report(
     total_tool_calls: int,
     successful_tool_calls: int,
     failed_tool_calls: int,
+    review_conclusions: Sequence[str] = (),
+    review_cycles: int = 0,
+    replan_cycles: int = 0,
 ) -> str:
     """Render a deterministic Markdown artifact from validated state only."""
 
@@ -396,6 +400,11 @@ def render_research_report(
     if not citation_lines:
         citation_lines.append("- No validated citations were used.")
 
+    review_lines = list(review_conclusions)
+
+    if not review_lines:
+        review_lines.append("- No review verdicts were recorded.")
+
     gap_lines = [f"- {error}" for error in errors]
     gap_lines.extend(
         f"- Step {finding.step_number} has no validated web citation."
@@ -426,6 +435,10 @@ def render_research_report(
             "",
             *citation_lines,
             "",
+            "## Review conclusions",
+            "",
+            *review_lines,
+            "",
             "## Gaps and limitations",
             "",
             *gap_lines,
@@ -435,5 +448,7 @@ def render_research_report(
             f"- Tool calls: {total_tool_calls}",
             f"- Successful tool calls: {successful_tool_calls}",
             f"- Failed tool calls: {failed_tool_calls}",
+            f"- Review cycles: {review_cycles}",
+            f"- Replan cycles: {replan_cycles}",
         ]
     )

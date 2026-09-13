@@ -11,6 +11,11 @@ from mini_deerflow.evidence import (
     merge_citation_sources,
     merge_evidence_records,
 )
+from mini_deerflow.review import (
+    ReplanRecord,
+    ReviewRoute,
+    ReviewVerdict,
+)
 from mini_deerflow.schemas import Plan
 
 
@@ -26,6 +31,10 @@ class AgentState(TypedDict):
     tool_observations: Annotated[list[ToolObservation], add]
     tool_calls_in_current_step: int
     total_tool_calls: int
+
+    pending_review_verdict: ReviewRoute | None
+    review_verdicts: Annotated[list[ReviewVerdict], add]
+    replans: Annotated[list[ReplanRecord], add]
 
     notes: Annotated[list[str], add]
     findings: Annotated[list[StepFinding], add]
@@ -53,6 +62,9 @@ def create_initial_state(goal: str) -> AgentState:
         tool_observations=[],
         tool_calls_in_current_step=0,
         total_tool_calls=0,
+        pending_review_verdict=None,
+        review_verdicts=[],
+        replans=[],
         notes=[],
         findings=[],
         evidence=[],
