@@ -24,6 +24,12 @@ from mini_deerflow.runtime import (
 )
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.state import AgentState, create_initial_state
+from mini_deerflow.tracing import (
+    ExecutionTracer,
+    TraceKind,
+    TraceOutcome,
+    TracePhase,
+)
 
 
 def make_plan() -> Plan:
@@ -87,7 +93,7 @@ def test_main_plan_reports_validation_error(capsys) -> None:
 
     assert exit_code == 1
     assert captured.out == ""
-    assert "Error: goal is invalid" in captured.err
+    assert "Error: Input validation failed." in captured.err
 
 
 def test_main_run_prints_final_answer(
@@ -144,6 +150,51 @@ def test_main_run_prints_final_answer(
         max_delegation_concurrency=3,
     )
     assert call.kwargs["checkpoint_path"] == tmp_path / "checkpoints.sqlite"
+    assert call.kwargs["tracer"] is None
+
+
+def test_main_run_can_emit_opt_in_redacted_json_trace(capsys) -> None:
+    expected_state = make_final_state()
+
+    async def traced_run(
+        goal: str,
+        *,
+        thread_id: str,
+        tracer: ExecutionTracer,
+        **kwargs: object,
+    ) -> AgentState:
+        del goal, kwargs
+        with tracer.run_scope(thread_id, "run"):
+            tracer.emit(
+                kind=TraceKind.CHECKPOINT,
+                phase=TracePhase.OUTCOME,
+                outcome=TraceOutcome.SKIPPED,
+                operation="run",
+            )
+        return expected_state
+
+    with patch(
+        "mini_deerflow.cli.run_research_agent",
+        side_effect=traced_run,
+    ):
+        exit_code = main(
+            [
+                "run",
+                "Goal with bearer-private-secret.",
+                "--thread-id",
+                "trace-cli",
+                "--trace-json",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    records = [json.loads(line) for line in captured.err.splitlines()]
+
+    assert exit_code == 0
+    assert captured.out == "The bounded agent run completed.\n"
+    assert [record["sequence"] for record in records] == [1, 2, 3]
+    assert {record["thread_id"] for record in records} == {"trace-cli"}
+    assert "bearer-private-secret" not in captured.err
 
 
 def test_main_run_rejects_missing_final_answer(
@@ -170,7 +221,7 @@ def test_main_run_rejects_missing_final_answer(
 
     assert exit_code == 1
     assert captured.out == ""
-    assert "Error: agent completed without a final answer" in captured.err
+    assert "Error: Agent operation failed." in captured.err
 
 
 def test_main_rejects_non_positive_runtime_limit(
@@ -251,6 +302,7 @@ def test_run_research_agent_builds_and_runs_runtime(
         checkpoint_path,
         allow_write=True,
         limits=limits,
+        tracer=None,
     )
 
     runtime_context.__aenter__.assert_awaited_once_with()
@@ -339,7 +391,7 @@ def test_main_run_reports_persistence_failure_without_traceback(capsys) -> None:
     assert exit_code == 1
     assert captured.out == ""
     assert captured.err.startswith("Error:")
-    assert "could not write checkpoint data" in captured.err
+    assert "Checkpoint operation failed." in captured.err
     assert "Traceback" not in captured.err
 
 
@@ -415,7 +467,7 @@ def test_main_threads_reports_persistence_failure_without_traceback(capsys) -> N
     assert exit_code == 1
     assert captured.out == ""
     assert captured.err.startswith("Error:")
-    assert "could not list checkpoint threads" in captured.err
+    assert "Checkpoint operation failed." in captured.err
     assert "Traceback" not in captured.err
 
 
@@ -517,6 +569,7 @@ def test_main_resume_prints_final_answer(
             max_total_tool_calls=4,
             recursion_limit=30,
         ),
+        tracer=None,
     )
 
 
@@ -574,6 +627,7 @@ def test_resume_research_agent_builds_and_resumes_runtime(
         checkpoint_path,
         allow_write=True,
         limits=limits,
+        tracer=None,
     )
     runtime_context.__aenter__.assert_awaited_once_with()
     runtime_context.__aexit__.assert_awaited_once()
@@ -622,7 +676,7 @@ def test_main_resume_reports_persistence_failure_without_traceback(capsys) -> No
     assert exit_code == 1
     assert captured.out == ""
     assert captured.err.startswith("Error:")
-    assert "could not read checkpoint data" in captured.err
+    assert "Checkpoint operation failed." in captured.err
     assert "Traceback" not in captured.err
 
 

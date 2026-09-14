@@ -10,6 +10,9 @@ from pydantic import ValidationError
 from mini_deerflow.config import Settings
 from mini_deerflow.model import create_chat_model
 from mini_deerflow.persistence import (
+    PersistenceError,
+    ThreadAlreadyExistsError,
+    ThreadNotFoundError,
     list_thread_ids,
     normalize_thread_id,
     open_sqlite_checkpointer,
@@ -21,6 +24,7 @@ from mini_deerflow.runtime import (
 )
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState
+from mini_deerflow.tracing import ExecutionTracer, JsonLinesTraceSink
 
 
 def positive_integer(value: str) -> int:
@@ -134,6 +138,11 @@ def _add_runtime_arguments(
         default=2,
         help="Maximum concurrent researcher branches (1-3).",
     )
+    parser.add_argument(
+        "--trace-json",
+        action="store_true",
+        help="Emit redacted structured trace records as JSON Lines to stderr.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -201,6 +210,7 @@ async def run_research_agent(
     thread_id: str,
     allow_write: bool,
     limits: RuntimeLimits,
+    tracer: ExecutionTracer | None = None,
 ) -> AgentState:
     """Open the persistent runtime and execute one research goal."""
 
@@ -212,6 +222,7 @@ async def run_research_agent(
         checkpoint_path,
         allow_write=allow_write,
         limits=limits,
+        tracer=tracer,
     ) as runtime:
         return await runtime.run(
             goal,
@@ -226,6 +237,7 @@ async def resume_research_agent(
     thread_id: str,
     allow_write: bool,
     limits: RuntimeLimits,
+    tracer: ExecutionTracer | None = None,
 ) -> AgentState:
     """Open the persistent runtime and resume one existing thread."""
 
@@ -237,6 +249,7 @@ async def resume_research_agent(
         checkpoint_path,
         allow_write=allow_write,
         limits=limits,
+        tracer=tracer,
     ) as runtime:
         return await runtime.resume(
             thread_id=thread_id,
@@ -250,6 +263,20 @@ async def list_research_threads(
 
     async with open_sqlite_checkpointer(checkpoint_path) as checkpointer:
         return await list_thread_ids(checkpointer)
+
+
+def _safe_cli_error(error: BaseException) -> str:
+    """Render only controlled diagnostics, never arbitrary exception text."""
+
+    if isinstance(error, ThreadAlreadyExistsError | ThreadNotFoundError):
+        return str(error)
+    if isinstance(error, PersistenceError):
+        return "Checkpoint operation failed."
+    if isinstance(error, ValidationError | ValueError):
+        return "Input validation failed."
+    if isinstance(error, TimeoutError):
+        return "Operation timed out."
+    return "Agent operation failed."
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -288,6 +315,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             recursion_limit=arguments.recursion_limit,
             max_delegation_concurrency=arguments.max_delegation_concurrency,
         )
+        tracer = (
+            ExecutionTracer(JsonLinesTraceSink(sys.stderr))
+            if arguments.trace_json
+            else None
+        )
 
         if arguments.command == "run":
             state = asyncio.run(
@@ -298,6 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     thread_id=arguments.thread_id,
                     allow_write=arguments.allow_write,
                     limits=limits,
+                    tracer=tracer,
                 )
             )
         else:
@@ -308,6 +341,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     thread_id=arguments.thread_id,
                     allow_write=arguments.allow_write,
                     limits=limits,
+                    tracer=tracer,
                 )
             )
 
@@ -328,5 +362,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         RuntimeError,
         TimeoutError,
     ) as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(f"Error: {_safe_cli_error(error)}", file=sys.stderr)
         return 1

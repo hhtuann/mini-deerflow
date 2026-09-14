@@ -32,6 +32,7 @@ from mini_deerflow.runtime import (
     open_default_agent_runtime,
 )
 from mini_deerflow.tools import ToolRegistry
+from mini_deerflow.tracing import ExecutionTracer
 
 
 class FakeStructuredRunnable:
@@ -135,6 +136,7 @@ def test_default_runtime_composes_expected_file_tools(
         limits: RuntimeLimits | None = None,
         context_budget: ContextBudget | None = None,
         artifact_path: str | None = None,
+        tracer: ExecutionTracer | None = None,
     ) -> AgentRuntime:
         captured["planner"] = planner
         captured["action_selector"] = action_selector
@@ -146,6 +148,7 @@ def test_default_runtime_composes_expected_file_tools(
         captured["limits"] = limits
         captured["context_budget"] = context_budget
         captured["artifact_path"] = artifact_path
+        captured["tracer"] = tracer
 
         return expected_runtime
 
@@ -169,6 +172,7 @@ def test_default_runtime_composes_expected_file_tools(
     assert actual_runtime is expected_runtime
     assert captured["settings"] is settings
     assert captured["limits"] is limits
+    assert captured["tracer"] is None
     assert workspace_root.is_dir()
 
     registry = captured["registry"]

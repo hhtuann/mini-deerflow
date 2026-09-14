@@ -15,10 +15,20 @@ from mini_deerflow.web import (
     FetchedPage,
     SearchResult,
     WebFetchError,
-    WebPolicyError,
     WebProviderErrorCategory,
     WebSearchError,
 )
+from mini_deerflow.web_safety import PublicWebTargetValidator, SafeWebTarget
+
+
+class PublicResolver:
+    async def resolve(self, hostname: str, port: int) -> tuple[str, ...]:
+        del hostname, port
+        return ("93.184.216.34",)
+
+
+def public_validator() -> PublicWebTargetValidator:
+    return PublicWebTargetValidator(PublicResolver())
 
 
 class SuccessfulSearchProvider:
@@ -49,9 +59,9 @@ class SuccessfulSearchProvider:
 
 
 class SuccessfulFetchProvider:
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, target: SafeWebTarget) -> FetchedPage:
         return FetchedPage(
-            url=url,
+            url=target.url,
             title="Example page",
             content="Example content",
             status_code=200,
@@ -111,7 +121,7 @@ def test_web_tools_reject_incompatible_provider() -> None:
         TypeError,
         match="WebFetchProvider",
     ):
-        WebFetchTool(object())
+        WebFetchTool(object(), public_validator())
 
 
 def test_web_search_tool_normalizes_and_limits_results() -> None:
@@ -230,7 +240,7 @@ def test_web_search_tool_propagates_unexpected_exception() -> None:
 
 
 def test_web_fetch_tool_returns_normalized_page() -> None:
-    tool = WebFetchTool(SuccessfulFetchProvider())
+    tool = WebFetchTool(SuccessfulFetchProvider(), public_validator())
 
     result = asyncio.run(
         tool.run(
@@ -259,6 +269,7 @@ def test_web_fetch_tool_returns_normalized_page() -> None:
 def test_web_fetch_tool_limits_output_content() -> None:
     tool = WebFetchTool(
         SuccessfulFetchProvider(),
+        public_validator(),
         max_content_chars=7,
     )
 
@@ -274,12 +285,42 @@ def test_web_fetch_tool_limits_output_content() -> None:
     assert result.metadata["original_content_chars"] == 15
 
 
-def test_web_fetch_tool_converts_policy_error_to_safe_failure() -> None:
-    class BlockedFetchProvider:
-        async def fetch(self, url: str) -> FetchedPage:
-            raise WebPolicyError("Blocked internal URL http://127.0.0.1/admin")
+def test_web_fetch_tool_denies_unsafe_redirect_before_accepting_content() -> None:
+    class RedirectingFetchProvider:
+        async def fetch(self, target: SafeWebTarget) -> FetchedPage:
+            del target
+            return FetchedPage(
+                url="http://127.0.0.1/admin",
+                content="private response body",
+                status_code=200,
+                redirect_chain=("http://127.0.0.1/admin",),
+            )
 
-    tool = WebFetchTool(BlockedFetchProvider())
+    tool = WebFetchTool(RedirectingFetchProvider(), public_validator())
+    result = asyncio.run(tool.run(WebFetchInput(url="https://example.com/article")))
+
+    assert result.success is False
+    assert result.error == "Web fetch redirect denied by safety policy."
+    assert result.metadata["error_category"] == "safety_denial"
+    assert result.metadata["error_code"] == "non_public_address"
+    assert "private response body" not in result.model_dump_json()
+
+
+def test_web_fetch_tool_denies_unsafe_target_before_provider_call() -> None:
+    class TrackingFetchProvider:
+        was_called = False
+
+        async def fetch(self, target: SafeWebTarget) -> FetchedPage:
+            del target
+            self.was_called = True
+            return FetchedPage(
+                url="https://example.com/",
+                content="secret",
+                status_code=200,
+            )
+
+    provider = TrackingFetchProvider()
+    tool = WebFetchTool(provider, public_validator())
     result = asyncio.run(
         tool.run(
             WebFetchInput(
@@ -290,18 +331,21 @@ def test_web_fetch_tool_converts_policy_error_to_safe_failure() -> None:
 
     assert result.success is False
     assert result.data is None
-    assert result.error == "Web fetch failed."
+    assert result.error == "Web fetch denied by safety policy."
     assert result.metadata["error_type"] == "WebPolicyError"
-    assert result.metadata["error_category"] == "unknown"
+    assert result.metadata["error_category"] == "safety_denial"
+    assert result.metadata["error_code"] == "non_public_address"
     assert "127.0.0.1" not in result.model_dump_json()
+    assert provider.was_called is False
 
 
 def test_web_fetch_tool_converts_fetch_error_to_safe_failure() -> None:
     class FailingFetchProvider:
-        async def fetch(self, url: str) -> FetchedPage:
+        async def fetch(self, target: SafeWebTarget) -> FetchedPage:
+            del target
             raise WebFetchError("Provider credential was rejected")
 
-    tool = WebFetchTool(FailingFetchProvider())
+    tool = WebFetchTool(FailingFetchProvider(), public_validator())
     result = asyncio.run(
         tool.run(
             WebFetchInput(
@@ -320,13 +364,13 @@ def test_web_fetch_tool_converts_fetch_error_to_safe_failure() -> None:
 
 def test_web_fetch_tool_rejects_invalid_provider_result() -> None:
     class InvalidFetchProvider:
-        async def fetch(self, url: str) -> object:
+        async def fetch(self, target: SafeWebTarget) -> object:
             return {
-                "url": url,
+                "url": str(target.url),
                 "content": "Not a FetchedPage",
             }
 
-    tool = WebFetchTool(InvalidFetchProvider())
+    tool = WebFetchTool(InvalidFetchProvider(), public_validator())
     result = asyncio.run(
         tool.run(
             WebFetchInput(
@@ -346,7 +390,8 @@ def test_runner_rejects_invalid_fetch_url_before_provider_call() -> None:
         def __init__(self) -> None:
             self.was_called = False
 
-        async def fetch(self, url: str) -> FetchedPage:
+        async def fetch(self, target: SafeWebTarget) -> FetchedPage:
+            del target
             self.was_called = True
             return FetchedPage(
                 url="https://example.com",
@@ -358,7 +403,7 @@ def test_runner_rejects_invalid_fetch_url_before_provider_call() -> None:
     runner = ToolRunner(
         ToolRegistry(
             [
-                WebFetchTool(provider),
+                WebFetchTool(provider, public_validator()),
             ]
         )
     )

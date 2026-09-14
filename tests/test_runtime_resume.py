@@ -30,6 +30,12 @@ from mini_deerflow.tools import (
     ToolRegistry,
     ToolResult,
 )
+from mini_deerflow.tracing import (
+    ExecutionTracer,
+    InMemoryTraceSink,
+    TraceKind,
+    TraceOutcome,
+)
 
 _STRICT_TEST_CHILD_ENV = "MINI_DEERFLOW_STRICT_CHECKPOINT_TEST_CHILD"
 _STRICT_TEST_DATABASE_ENV = "MINI_DEERFLOW_STRICT_CHECKPOINT_TEST_DATABASE"
@@ -191,6 +197,7 @@ def test_sqlite_resume_does_not_repeat_completed_steps(
         )
 
         crashing_selector = CrashAfterFirstStepSelector()
+        first_sink = InMemoryTraceSink()
 
         async with open_sqlite_checkpointer(
             checkpoint_path,
@@ -201,6 +208,10 @@ def test_sqlite_resume_does_not_repeat_completed_steps(
                 ToolRegistry(),
                 checkpointer=checkpointer,
                 limits=limits,
+                tracer=ExecutionTracer(
+                    first_sink,
+                    run_id_factory=lambda: "interrupted-run",
+                ),
             )
 
             with pytest.raises(
@@ -213,6 +224,7 @@ def test_sqlite_resume_does_not_repeat_completed_steps(
                 )
 
         completing_selector = CompletingAfterResumeSelector()
+        resume_sink = InMemoryTraceSink()
 
         async with open_sqlite_checkpointer(
             checkpoint_path,
@@ -223,6 +235,10 @@ def test_sqlite_resume_does_not_repeat_completed_steps(
                 ToolRegistry(),
                 checkpointer=checkpointer,
                 limits=limits,
+                tracer=ExecutionTracer(
+                    resume_sink,
+                    run_id_factory=lambda: "resumed-run",
+                ),
             )
 
             result = await resumed_runtime.resume(
@@ -249,6 +265,16 @@ def test_sqlite_resume_does_not_repeat_completed_steps(
         assert result["total_tool_calls"] == 0
         assert result["pending_action"] is None
         assert result["final_answer"] is not None
+        assert any(
+            event.kind is TraceKind.CHECKPOINT and event.outcome is TraceOutcome.RESUMED
+            for event in resume_sink.events
+        )
+        assert not any(
+            event.kind is TraceKind.NODE and event.node == "planner"
+            for event in resume_sink.events
+        )
+        assert {event.run_id for event in first_sink.events} == {"interrupted-run"}
+        assert {event.run_id for event in resume_sink.events} == {"resumed-run"}
 
     asyncio.run(run_scenario())
 

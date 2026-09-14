@@ -11,6 +11,7 @@ from mini_deerflow.web import (
     WebSearchError,
     WebSearchProvider,
 )
+from mini_deerflow.web_safety import SafeWebTarget
 
 
 class FakeSearchProvider:
@@ -29,9 +30,9 @@ class FakeSearchProvider:
 
 
 class FakeFetchProvider:
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, target: SafeWebTarget) -> FetchedPage:
         return FetchedPage(
-            url=url,
+            url=target.url,
             content="Example content",
             status_code=200,
         )

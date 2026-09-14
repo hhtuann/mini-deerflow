@@ -43,10 +43,23 @@ from mini_deerflow.tools import (
     WebSearchTool,
     WriteFileTool,
 )
+from mini_deerflow.tracing import (
+    ExecutionTracer,
+    TraceErrorCategory,
+    TraceErrorCode,
+    TraceKind,
+    TraceOutcome,
+    TracePhase,
+)
 from mini_deerflow.web import (
     JinaWebProvider,
     UrllibWebHttpClient,
     WebProvider,
+)
+from mini_deerflow.web_safety import (
+    PublicWebTargetValidator,
+    SystemHostResolver,
+    WebTargetValidator,
 )
 from mini_deerflow.workspace import Workspace
 
@@ -122,6 +135,7 @@ class AgentRuntime:
     graph: AgentGraph
     limits: RuntimeLimits = field(default_factory=RuntimeLimits)
     checkpointer: AsyncCheckpointReader | None = None
+    tracer: ExecutionTracer = field(default_factory=ExecutionTracer)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph, AgentGraph):
@@ -138,6 +152,9 @@ class AgentRuntime:
                 "checkpointer must support async checkpoint lookup",
             )
 
+        if not isinstance(self.tracer, ExecutionTracer):
+            raise TypeError("tracer must be ExecutionTracer")
+
     async def run(
         self,
         goal: str,
@@ -146,30 +163,49 @@ class AgentRuntime:
     ) -> AgentState:
         """Run one research goal and return its final state."""
 
-        initial_state = create_initial_state(goal)
+        with self.tracer.run_scope(thread_id, "run"):
+            initial_state = create_initial_state(goal)
 
-        config = create_thread_config(
-            thread_id,
-            recursion_limit=self.limits.recursion_limit,
-        )
-
-        if self.checkpointer is not None:
-            checkpoint = await _read_checkpoint(
-                self.checkpointer,
-                config,
+            config = create_thread_config(
+                thread_id,
+                recursion_limit=self.limits.recursion_limit,
             )
 
-            if checkpoint is not None:
-                raise ThreadAlreadyExistsError(
-                    f"thread {thread_id!r} already has a checkpoint",
+            if self.checkpointer is not None:
+                checkpoint = await _read_checkpoint(
+                    self.checkpointer,
+                    config,
                 )
 
-        result = await self.graph.ainvoke(
-            initial_state,
-            config=config,
-        )
+                if checkpoint is not None:
+                    self.tracer.emit(
+                        kind=TraceKind.CHECKPOINT,
+                        phase=TracePhase.OUTCOME,
+                        outcome=TraceOutcome.FAILED,
+                        operation="run",
+                        error_category=TraceErrorCategory.PERSISTENCE,
+                        error_code=TraceErrorCode.CHECKPOINT_FAILURE,
+                    )
+                    raise ThreadAlreadyExistsError(
+                        f"thread {thread_id!r} already has a checkpoint",
+                    )
+                checkpoint_outcome = TraceOutcome.READY
+            else:
+                checkpoint_outcome = TraceOutcome.SKIPPED
 
-        return _validate_agent_state_result(result)
+            self.tracer.emit(
+                kind=TraceKind.CHECKPOINT,
+                phase=TracePhase.OUTCOME,
+                outcome=checkpoint_outcome,
+                operation="run",
+            )
+
+            result = await self.graph.ainvoke(
+                initial_state,
+                config=config,
+            )
+
+            return _validate_agent_state_result(result)
 
     async def resume(
         self,
@@ -178,32 +214,56 @@ class AgentRuntime:
     ) -> AgentState:
         """Continue an existing persisted thread."""
 
-        config = create_thread_config(
-            thread_id,
-            recursion_limit=self.limits.recursion_limit,
-        )
-
-        if self.checkpointer is None:
-            raise CheckpointUnavailableError(
-                "resume requires a configured checkpointer",
+        with self.tracer.run_scope(thread_id, "resume"):
+            config = create_thread_config(
+                thread_id,
+                recursion_limit=self.limits.recursion_limit,
             )
 
-        checkpoint = await _read_checkpoint(
-            self.checkpointer,
-            config,
-        )
+            if self.checkpointer is None:
+                self.tracer.emit(
+                    kind=TraceKind.CHECKPOINT,
+                    phase=TracePhase.OUTCOME,
+                    outcome=TraceOutcome.FAILED,
+                    operation="resume",
+                    error_category=TraceErrorCategory.PERSISTENCE,
+                    error_code=TraceErrorCode.CHECKPOINT_FAILURE,
+                )
+                raise CheckpointUnavailableError(
+                    "resume requires a configured checkpointer",
+                )
 
-        if checkpoint is None:
-            raise ThreadNotFoundError(
-                f"thread {thread_id!r} has no checkpoint",
+            checkpoint = await _read_checkpoint(
+                self.checkpointer,
+                config,
             )
 
-        result = await self.graph.ainvoke(
-            None,
-            config=config,
-        )
+            if checkpoint is None:
+                self.tracer.emit(
+                    kind=TraceKind.CHECKPOINT,
+                    phase=TracePhase.OUTCOME,
+                    outcome=TraceOutcome.FAILED,
+                    operation="resume",
+                    error_category=TraceErrorCategory.PERSISTENCE,
+                    error_code=TraceErrorCode.CHECKPOINT_FAILURE,
+                )
+                raise ThreadNotFoundError(
+                    f"thread {thread_id!r} has no checkpoint",
+                )
 
-        return _validate_agent_state_result(result)
+            self.tracer.emit(
+                kind=TraceKind.CHECKPOINT,
+                phase=TracePhase.OUTCOME,
+                outcome=TraceOutcome.RESUMED,
+                operation="resume",
+            )
+
+            result = await self.graph.ainvoke(
+                None,
+                config=config,
+            )
+
+            return _validate_agent_state_result(result)
 
 
 def _validate_agent_state_result(
@@ -227,10 +287,12 @@ def build_agent_runtime(
     limits: RuntimeLimits | None = None,
     context_budget: ContextBudget | None = None,
     artifact_path: str | None = None,
+    tracer: ExecutionTracer | None = None,
 ) -> AgentRuntime:
     """Build a testable runtime from explicitly supplied dependencies."""
 
     resolved_limits = limits or RuntimeLimits()
+    resolved_tracer = tracer or ExecutionTracer()
 
     graph = build_agent_workflow(
         planner,
@@ -245,12 +307,14 @@ def build_agent_runtime(
         max_replan_cycles=resolved_limits.max_replan_cycles,
         context_budget=context_budget,
         artifact_path=artifact_path,
+        tracer=resolved_tracer,
     )
 
     return AgentRuntime(
         graph=graph,
         limits=resolved_limits,
         checkpointer=checkpointer,
+        tracer=resolved_tracer,
     )
 
 
@@ -264,8 +328,10 @@ def create_default_agent_runtime(
     context_budget: ContextBudget | None = None,
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
+    web_target_validator: WebTargetValidator | None = None,
     researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
+    tracer: ExecutionTracer | None = None,
 ) -> AgentRuntime:
     """Create the default local Mini DeerFlow runtime."""
 
@@ -287,7 +353,13 @@ def create_default_agent_runtime(
 
     resolved_limits = limits or RuntimeLimits()
     web_search_tool = WebSearchTool(resolved_web_provider)
-    web_fetch_tool = WebFetchTool(resolved_web_provider)
+    resolved_target_validator = web_target_validator or PublicWebTargetValidator(
+        SystemHostResolver()
+    )
+    web_fetch_tool = WebFetchTool(
+        resolved_web_provider,
+        resolved_target_validator,
+    )
     branch_registry = ToolRegistry([web_search_tool, web_fetch_tool])
     resolved_context_budget = context_budget or ContextBudget()
     resolved_researcher = researcher_subagent or BoundedResearcherSubagent(
@@ -343,6 +415,7 @@ def create_default_agent_runtime(
         limits=resolved_limits,
         context_budget=resolved_context_budget,
         artifact_path=artifact_path if allow_write else None,
+        tracer=tracer,
     )
 
 
@@ -357,8 +430,10 @@ async def open_default_agent_runtime(
     context_budget: ContextBudget | None = None,
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
+    web_target_validator: WebTargetValidator | None = None,
     researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
+    tracer: ExecutionTracer | None = None,
 ) -> AsyncIterator[AgentRuntime]:
     """Open a persistent runtime and close its checkpointer on exit."""
 
@@ -372,6 +447,8 @@ async def open_default_agent_runtime(
             context_budget=context_budget,
             model_factory=model_factory,
             web_provider=web_provider,
+            web_target_validator=web_target_validator,
             researcher_subagent=researcher_subagent,
             artifact_path=artifact_path,
+            tracer=tracer,
         )

@@ -3,7 +3,7 @@ import json
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -18,6 +18,9 @@ from pydantic import (
 )
 
 DEFAULT_WEB_RESPONSE_BYTES = 2_000_000
+
+if TYPE_CHECKING:
+    from mini_deerflow.web_safety import SafeWebTarget, WebSafetyErrorCode
 
 NonEmptyText = Annotated[
     str,
@@ -56,6 +59,7 @@ class WebProviderErrorCategory(str, Enum):
     REJECTION = "provider_rejection"
     TRANSPORT = "transport"
     MALFORMED_RESPONSE = "malformed_response"
+    SAFETY = "safety_denial"
     UNKNOWN = "unknown"
 
 
@@ -67,9 +71,11 @@ class WebProviderError(RuntimeError):
         message: str,
         *,
         category: WebProviderErrorCategory = WebProviderErrorCategory.UNKNOWN,
+        code: "WebSafetyErrorCode | None" = None,
     ) -> None:
         super().__init__(message)
         self.category = category
+        self.code = code
 
 
 class WebSearchError(WebProviderError):
@@ -107,6 +113,11 @@ class FetchedPage(WebModel):
     content: str
     status_code: int = Field(ge=100, le=599)
     content_type: str | None = None
+    redirect_chain: tuple[HttpUrl, ...] = Field(
+        default_factory=tuple,
+        max_length=10,
+        exclude=True,
+    )
 
 
 @runtime_checkable
@@ -124,9 +135,9 @@ class WebSearchProvider(Protocol):
 class WebFetchProvider(Protocol):
     async def fetch(
         self,
-        url: str,
+        target: "SafeWebTarget",
     ) -> FetchedPage:
-        """Fetch and normalize one public web page."""
+        """Fetch a prevalidated page and report every known redirect target."""
 
 
 @runtime_checkable
@@ -310,7 +321,12 @@ class JinaWebProvider:
 
         return results
 
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, target: "SafeWebTarget") -> FetchedPage:
+        from mini_deerflow.web_safety import SafeWebTarget
+
+        if not isinstance(target, SafeWebTarget):
+            raise TypeError("fetch target must be SafeWebTarget")
+        url = str(target.url)
         response = await self._request(
             self.fetch_endpoint,
             {"url": url},
@@ -342,12 +358,14 @@ class JinaWebProvider:
             status_code = 200
 
         try:
+            redirect_chain = () if resolved_url == url else (resolved_url,)
             return FetchedPage(
                 url=resolved_url,
                 title=title[:500] if title else None,
                 content=content,
                 status_code=status_code,
                 content_type="text/markdown",
+                redirect_chain=redirect_chain,
             )
         except ValidationError:
             raise WebFetchError(

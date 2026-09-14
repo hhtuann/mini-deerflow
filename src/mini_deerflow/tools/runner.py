@@ -40,10 +40,11 @@ class ToolRunner:
                     "validation_error_count": exc.error_count(),
                 },
             )
-        except Exception as exc:
-            logger.exception(
-                "Unexpected input validation error for tool %s",
+        except Exception as exc:  # noqa: BLE001 - normalize the tool seam
+            logger.error(
+                "Unexpected input validation failure for tool %s (%s)",
                 tool.name,
+                type(exc).__name__,
             )
             return ToolResult.fail(
                 error="Tool input validation failed.",
@@ -67,10 +68,11 @@ class ToolRunner:
                     "timeout_seconds": tool.timeout_seconds,
                 },
             )
-        except Exception as exc:
-            logger.exception(
-                "Tool %s raised an exception",
+        except Exception as exc:  # noqa: BLE001 - normalize the tool seam
+            logger.error(
+                "Tool %s failed with a controlled exception category (%s)",
                 tool.name,
+                type(exc).__name__,
             )
             return ToolResult.fail(
                 error="Tool execution failed.",

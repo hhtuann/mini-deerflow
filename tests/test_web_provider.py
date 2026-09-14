@@ -15,6 +15,16 @@ from mini_deerflow.web import (
     WebSearchError,
     WebTransportError,
 )
+from mini_deerflow.web_safety import SafeWebTarget
+
+
+def safe_target(url: str = "https://example.com/") -> SafeWebTarget:
+    return SafeWebTarget(
+        url=url,
+        hostname="example.com",
+        port=443,
+        resolved_addresses=("93.184.216.34",),
+    )
 
 
 class FakeHttpClient:
@@ -107,7 +117,7 @@ def test_jina_fetch_provider_normalizes_page_without_api_key() -> None:
     )
     provider = JinaWebProvider(client)
 
-    page = asyncio.run(provider.fetch("https://example.com/start"))
+    page = asyncio.run(provider.fetch(safe_target("https://example.com/start")))
 
     assert page.model_dump(mode="json") == {
         "url": "https://example.com/final",
@@ -116,7 +126,18 @@ def test_jina_fetch_provider_normalizes_page_without_api_key() -> None:
         "status_code": 200,
         "content_type": "text/markdown",
     }
+    assert [str(url) for url in page.redirect_chain] == ["https://example.com/final"]
     assert client.calls[0]["headers"] == {"Accept": "application/json"}
+
+
+def test_jina_fetch_provider_rejects_unvalidated_target_before_transport() -> None:
+    client = FakeHttpClient([])
+    provider = JinaWebProvider(client)
+
+    with pytest.raises(TypeError, match="SafeWebTarget"):
+        asyncio.run(provider.fetch("https://example.com"))  # type: ignore[arg-type]
+
+    assert client.calls == []
 
 
 def test_jina_search_requires_configured_api_key_without_calling_provider() -> None:
@@ -154,7 +175,7 @@ def test_jina_provider_normalizes_transport_timeout(
         if operation == "search":
             asyncio.run(provider.search("query", max_results=1))
         else:
-            asyncio.run(provider.fetch("https://example.com"))
+            asyncio.run(provider.fetch(safe_target()))
 
     rendered = str(exc_info.value)
     assert exc_info.value.category is WebProviderErrorCategory.TRANSPORT
@@ -224,7 +245,7 @@ def test_jina_provider_normalizes_invalid_json_without_body_leak() -> None:
     )
 
     with pytest.raises(WebFetchError, match="invalid JSON") as exc_info:
-        asyncio.run(provider.fetch("https://example.com"))
+        asyncio.run(provider.fetch(safe_target()))
 
     rendered = f"{exc_info.value!s} {exc_info.value!r}"
     assert exc_info.value.category is WebProviderErrorCategory.MALFORMED_RESPONSE

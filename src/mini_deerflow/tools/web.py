@@ -8,9 +8,11 @@ from mini_deerflow.web import (
     FetchedPage,
     SearchResult,
     WebFetchProvider,
+    WebPolicyError,
     WebProviderError,
     WebSearchProvider,
 )
+from mini_deerflow.web_safety import WebTargetValidator
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +109,15 @@ class WebFetchTool:
     def __init__(
         self,
         provider: WebFetchProvider,
+        target_validator: WebTargetValidator,
         *,
         max_content_chars: int = 100_000,
     ) -> None:
         if not isinstance(provider, WebFetchProvider):
             raise TypeError("provider must satisfy WebFetchProvider.")
+
+        if not isinstance(target_validator, WebTargetValidator):
+            raise TypeError("target_validator must satisfy WebTargetValidator.")
 
         if (
             isinstance(max_content_chars, bool)
@@ -121,14 +127,32 @@ class WebFetchTool:
             raise ValueError("max_content_chars must be a positive integer.")
 
         self._provider = provider
+        self._target_validator = target_validator
         self._max_content_chars = max_content_chars
 
     async def run(self, tool_input: ToolInput) -> ToolResult:
         assert isinstance(tool_input, WebFetchInput)
 
         try:
+            safe_target = await self._target_validator.validate(tool_input.url)
+        except WebPolicyError as exc:
+            return ToolResult.fail(
+                error="Web fetch denied by safety policy.",
+                metadata={
+                    "tool_name": self.name,
+                    "error_type": type(exc).__name__,
+                    "error_category": exc.category.value,
+                    "error_code": (
+                        exc.code.value
+                        if getattr(exc, "code", None) is not None
+                        else None
+                    ),
+                },
+            )
+
+        try:
             page = await self._provider.fetch(
-                str(tool_input.url),
+                safe_target,
             )
         except WebProviderError as exc:
             return ToolResult.fail(
@@ -153,7 +177,31 @@ class WebFetchTool:
                 },
             )
 
-        page_data = page.model_dump(mode="json")
+        redirect_targets = [*page.redirect_chain, page.url]
+        checked_urls = {str(safe_target.url)}
+        try:
+            for redirect_target in redirect_targets:
+                rendered_redirect = str(redirect_target)
+                if rendered_redirect in checked_urls:
+                    continue
+                await self._target_validator.validate(redirect_target)
+                checked_urls.add(rendered_redirect)
+        except WebPolicyError as exc:
+            return ToolResult.fail(
+                error="Web fetch redirect denied by safety policy.",
+                metadata={
+                    "tool_name": self.name,
+                    "error_type": type(exc).__name__,
+                    "error_category": exc.category.value,
+                    "error_code": (
+                        exc.code.value
+                        if getattr(exc, "code", None) is not None
+                        else None
+                    ),
+                },
+            )
+
+        page_data = page.model_dump(mode="json", exclude={"redirect_chain"})
         original_content_chars = len(page.content)
         truncated = original_content_chars > self._max_content_chars
         page_data["content"] = page.content[: self._max_content_chars]

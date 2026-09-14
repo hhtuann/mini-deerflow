@@ -20,7 +20,7 @@ def build_research_workflow(
     """Build the first deterministic research workflow."""
 
     def planner_node(state: AgentState) -> dict[str, object]:
-        logger.info("Planning research goal: %s", state["goal"])
+        logger.info("Planning a bounded research goal")
 
         plan = planner(state["goal"])
 
@@ -49,11 +49,7 @@ def build_research_workflow(
         step = plan.steps[current_step]
         observation = f"Stub observation for step {step.step_number}: {step.title}"
 
-        logger.info(
-            "Executing stub step %s: %s",
-            step.step_number,
-            step.title,
-        )
+        logger.info("Executing stub step %s", step.step_number)
 
         return {
             "notes": [observation],

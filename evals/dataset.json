@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "suite": "mini-deerflow-day-13-deterministic-contracts",
+  "limitations": [
+    "Uses deterministic fakes only at planner, selector, reviewer, replanner, provider, and researcher boundaries.",
+    "Measures invariant compliance, not factual-answer quality, benchmark superiority, model calibration, live latency, or live cost."
+  ],
+  "cases": [
+    {
+      "id": "safe_evidence_citation_artifact",
+      "test": "tests/test_tracing.py::test_safe_evidence_citation_and_artifact_outcomes_are_traced",
+      "invariants": [
+        "successful provider output becomes evidence",
+        "citations remain a subset of successful evidence URLs",
+        "the parent writes the only artifact through the workspace boundary",
+        "tool, citation, and artifact outcomes are traced without content"
+      ]
+    },
+    {
+      "id": "invented_citation_rejection",
+      "test": "tests/test_tracing.py::test_invented_citation_rejection_is_traced_and_not_rendered",
+      "invariants": [
+        "an unsupported URL is rejected",
+        "the unsupported URL is absent from rendered output",
+        "the rejection count is traced"
+      ]
+    },
+    {
+      "id": "unsafe_url_pretransport_denial",
+      "test": "tests/test_tracing.py::test_unsafe_url_denial_has_a_distinct_redacted_trace",
+      "invariants": [
+        "a loopback target is denied before provider invocation",
+        "the denial is classified as safety rather than provider failure",
+        "the target and response body are absent from trace diagnostics"
+      ]
+    },
+    {
+      "id": "provider_failure_redaction",
+      "test": "tests/test_tracing.py::test_provider_failure_has_a_distinct_redacted_trace",
+      "invariants": [
+        "provider failure remains a failed tool observation",
+        "provider failure is distinct from a safety denial",
+        "credentials and response-body text are absent from results and traces"
+      ]
+    },
+    {
+      "id": "context_budget_refusal",
+      "test": "tests/test_tracing.py::test_context_budget_refusal_is_traced_before_selector_invocation",
+      "invariants": [
+        "irreducible context pressure refuses execution",
+        "the model selector is not invoked with oversized context",
+        "the refusal has a controlled context-budget trace category"
+      ]
+    },
+    {
+      "id": "reviewer_replan_finish",
+      "test": "tests/test_tracing.py::test_reviewer_replan_and_finish_routes_are_traced",
+      "invariants": [
+        "the reviewer can route to a bounded replan",
+        "the replanner replaces only remaining work",
+        "the later finish route and both review outcomes are traced"
+      ]
+    },
+    {
+      "id": "delegation_partial_failure_fan_in",
+      "test": "tests/test_tracing.py::test_delegation_partial_failure_and_fan_in_are_traced",
+      "invariants": [
+        "successful sibling evidence survives a controlled branch failure",
+        "fan-in remains deterministic and citation-validated",
+        "branch status and reservation accounting are traced as counts"
+      ]
+    },
+    {
+      "id": "checkpoint_resume_no_duplicate_work",
+      "test": "tests/test_runtime_resume.py::test_sqlite_resume_does_not_repeat_completed_steps",
+      "invariants": [
+        "resume reuses the durable checkpoint",
+        "completed step one is not selected again",
+        "the resumed run has a new run identity under the same thread",
+        "resume is traced and planner execution is absent from the resumed trajectory"
+      ]
+    }
+  ]
+}

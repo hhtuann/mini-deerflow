@@ -177,7 +177,7 @@ def test_runner_converts_timeout_to_failure() -> None:
     assert result.metadata["timeout_seconds"] == 0.01
 
 
-def test_runner_converts_execution_exception_to_safe_failure() -> None:
+def test_runner_converts_execution_exception_to_safe_failure(caplog) -> None:
     runner = ToolRunner(ToolRegistry([CrashingTool()]))
 
     result = asyncio.run(
@@ -195,6 +195,8 @@ def test_runner_converts_execution_exception_to_safe_failure() -> None:
     serialized_result = result.model_dump_json()
 
     assert "Internal service host" not in serialized_result
+    assert "Internal service host" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_runner_rejects_invalid_tool_result() -> None:
@@ -226,7 +228,7 @@ def test_runner_does_not_swallow_cancellation() -> None:
         )
 
 
-def test_runner_converts_unexpected_validation_exception() -> None:
+def test_runner_converts_unexpected_validation_exception(caplog) -> None:
     runner = ToolRunner(ToolRegistry([BrokenValidationTool()]))
 
     result = asyncio.run(
@@ -240,3 +242,5 @@ def test_runner_converts_unexpected_validation_exception() -> None:
     assert result.data is None
     assert result.error == "Tool input validation failed."
     assert result.metadata["error_type"] == "RuntimeError"
+    assert "Broken custom validator" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)

@@ -1,0 +1,75 @@
+{
+  "limitations": [
+    "Uses deterministic fakes only at planner, selector, reviewer, replanner, provider, and researcher boundaries.",
+    "Measures invariant compliance, not factual-answer quality, benchmark superiority, model calibration, live latency, or live cost."
+  ],
+  "metrics": {
+    "case_pass_rate": 1.0,
+    "cases_failed": 0,
+    "cases_passed": 8,
+    "cases_total": 8,
+    "invariant_pass_rate": 1.0,
+    "invariants_passed": 26,
+    "invariants_total": 26
+  },
+  "results": [
+    {
+      "failure_code": null,
+      "id": "safe_evidence_citation_artifact",
+      "invariants": 4,
+      "passed": true,
+      "passed_invariants": 4
+    },
+    {
+      "failure_code": null,
+      "id": "invented_citation_rejection",
+      "invariants": 3,
+      "passed": true,
+      "passed_invariants": 3
+    },
+    {
+      "failure_code": null,
+      "id": "unsafe_url_pretransport_denial",
+      "invariants": 3,
+      "passed": true,
+      "passed_invariants": 3
+    },
+    {
+      "failure_code": null,
+      "id": "provider_failure_redaction",
+      "invariants": 3,
+      "passed": true,
+      "passed_invariants": 3
+    },
+    {
+      "failure_code": null,
+      "id": "context_budget_refusal",
+      "invariants": 3,
+      "passed": true,
+      "passed_invariants": 3
+    },
+    {
+      "failure_code": null,
+      "id": "reviewer_replan_finish",
+      "invariants": 3,
+      "passed": true,
+      "passed_invariants": 3
+    },
+    {
+      "failure_code": null,
+      "id": "delegation_partial_failure_fan_in",
+      "invariants": 3,
+      "passed": true,
+      "passed_invariants": 3
+    },
+    {
+      "failure_code": null,
+      "id": "checkpoint_resume_no_duplicate_work",
+      "invariants": 4,
+      "passed": true,
+      "passed_invariants": 4
+    }
+  ],
+  "schema_version": 1,
+  "suite": "mini-deerflow-day-13-deterministic-contracts"
+}

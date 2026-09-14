@@ -29,9 +29,16 @@ from mini_deerflow.tools import (
     WriteFileTool,
 )
 from mini_deerflow.web import FetchedPage, SearchResult
+from mini_deerflow.web_safety import PublicWebTargetValidator, SafeWebTarget
 from mini_deerflow.workspace import Workspace
 
 GOAL = "Research multi-source evidence."
+
+
+class PublicResolver:
+    async def resolve(self, hostname: str, port: int) -> tuple[str, ...]:
+        del hostname, port
+        return ("93.184.216.34",)
 
 
 class StaticSearchProvider:
@@ -836,9 +843,9 @@ class LongPageProvider:
     def __init__(self, body_length: int) -> None:
         self._body_length = body_length
 
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, target: SafeWebTarget) -> FetchedPage:
         return FetchedPage(
-            url=url,
+            url=target.url,
             title="Long source",
             content=(
                 "Provenance-carrying opening. "
@@ -879,7 +886,9 @@ def test_llm_contexts_are_bounded_under_pressure() -> None:
     graph = build_agent_workflow(
         plan,
         selector,
-        ToolRegistry([WebFetchTool(provider)]),
+        ToolRegistry(
+            [WebFetchTool(provider, PublicWebTargetValidator(PublicResolver()))]
+        ),
         reviewer=reviewer,
         replanner=replanner,
         context_budget=budget,

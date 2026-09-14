@@ -13,6 +13,7 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.context_budget import (
     ContextBudget,
+    ProjectionMetadata,
     fit_context_to_budget,
     merge_metadata,
     project_evidence_records,
@@ -56,6 +57,14 @@ from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry, ToolRunner
 from mini_deerflow.tools.contracts import ToolResult
+from mini_deerflow.tracing import (
+    ExecutionTracer,
+    TraceErrorCategory,
+    TraceErrorCode,
+    TraceKind,
+    TraceOutcome,
+    TracePhase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +82,61 @@ CompletionRoute = Literal[
 ]
 
 
+def _trace_projection(
+    tracer: ExecutionTracer,
+    node: str,
+    projection: ProjectionMetadata | None,
+) -> None:
+    if projection is None:
+        return
+    compacted = projection.omitted_items > 0 or projection.truncated_items > 0
+    tracer.emit(
+        kind=TraceKind.CONTEXT_BUDGET,
+        phase=TracePhase.OUTCOME,
+        outcome=(TraceOutcome.COMPACTED if compacted else TraceOutcome.WITHIN_BUDGET),
+        node=node,
+        context_omitted_items=projection.omitted_items,
+        context_truncated_items=projection.truncated_items,
+        context_estimated_tokens=projection.estimated_tokens,
+    )
+
+
+def _tool_trace_classification(
+    result: ToolResult,
+) -> tuple[
+    TraceOutcome,
+    TraceErrorCategory | None,
+    TraceErrorCode | None,
+]:
+    if result.success:
+        return TraceOutcome.SUCCEEDED, None, None
+
+    category = result.metadata.get("error_category")
+    if category == "safety_denial":
+        return (
+            TraceOutcome.SAFETY_DENIED,
+            TraceErrorCategory.SAFETY,
+            TraceErrorCode.URL_DENIED,
+        )
+    if category == "transport":
+        return (
+            TraceOutcome.TRANSPORT_FAILED,
+            TraceErrorCategory.TRANSPORT,
+            TraceErrorCode.WEB_TRANSPORT_FAILURE,
+        )
+    if isinstance(category, str):
+        return (
+            TraceOutcome.PROVIDER_FAILED,
+            TraceErrorCategory.PROVIDER,
+            TraceErrorCode.WEB_PROVIDER_FAILURE,
+        )
+    return (
+        TraceOutcome.FAILED,
+        TraceErrorCategory.TOOL,
+        TraceErrorCode.TOOL_FAILURE,
+    )
+
+
 def build_agent_workflow(
     planner: Planner,
     action_selector: ActionSelector,
@@ -87,6 +151,7 @@ def build_agent_workflow(
     max_replan_cycles: int = 2,
     context_budget: ContextBudget | None = None,
     artifact_path: str | None = None,
+    tracer: ExecutionTracer | None = None,
 ) -> CompiledStateGraph:
     """Build the bounded plan-act-observe research workflow."""
 
@@ -114,6 +179,7 @@ def build_agent_workflow(
     resolved_context_budget = (
         context_budget if context_budget is not None else ContextBudget()
     )
+    resolved_tracer = tracer or ExecutionTracer()
 
     if not isinstance(action_selector, ActionSelector):
         raise TypeError(
@@ -149,10 +215,7 @@ def build_agent_workflow(
     def planner_node(
         state: AgentState,
     ) -> dict[str, object]:
-        logger.info(
-            "Planning research goal: %s",
-            state["goal"],
-        )
+        logger.info("Planning a bounded research goal")
 
         plan = planner(state["goal"])
 
@@ -172,6 +235,11 @@ def build_agent_workflow(
             max_tool_calls_per_step=max_tool_calls_per_step,
             max_total_tool_calls=max_total_tool_calls,
             context_budget=resolved_context_budget,
+        )
+        _trace_projection(
+            resolved_tracer,
+            "decide_action",
+            context.context_projection,
         )
 
         logger.info(
@@ -306,6 +374,24 @@ def build_agent_workflow(
             result=result,
         )
         evidence = extract_evidence_records(observation)
+        trace_outcome, error_category, error_code = _tool_trace_classification(result)
+        resolved_tracer.emit(
+            kind=TraceKind.TOOL,
+            phase=TracePhase.OUTCOME,
+            outcome=trace_outcome,
+            node="execute_tool",
+            tool_name=action.tool_name
+            if action.tool_name in registry
+            else "unregistered",
+            current_step=state["current_step"],
+            step_tool_calls=step_tool_call_number,
+            total_tool_calls=total_tool_call_number,
+            max_step_tool_calls=max_tool_calls_per_step,
+            max_total_tool_calls=max_total_tool_calls,
+            evidence_count=len(evidence),
+            error_category=error_category,
+            error_code=error_code,
+        )
 
         if delegated_tool is not None:
             record = parse_delegation_record(result)
@@ -403,6 +489,29 @@ def build_agent_workflow(
                     "citation(s) absent from successful merged evidence."
                 )
 
+        failed_count = len(record.fan_in.failed_branches)
+        cancelled_count = len(record.fan_in.cancelled_branches)
+        resolved_tracer.emit(
+            kind=TraceKind.DELEGATION,
+            phase=TracePhase.OUTCOME,
+            outcome=(
+                TraceOutcome.PARTIAL_FAILURE
+                if failed_count or cancelled_count
+                else TraceOutcome.SUCCEEDED
+            ),
+            node="execute_tool",
+            tool_name=DelegateResearchTool.name,
+            branch_count=len(record.results),
+            successful_branch_count=len(record.fan_in.successful_branches),
+            failed_branch_count=failed_count,
+            cancelled_branch_count=cancelled_count,
+            reserved_tool_calls=record.reserved_tool_calls,
+            used_tool_calls=record.used_tool_calls,
+            charged_tool_calls=record.charged_tool_calls,
+            evidence_count=len(delegated_evidence),
+            citation_count=len(sources),
+        )
+
         return {
             "pending_action": None,
             "tool_observations": [parent_observation, *remapped_observations],
@@ -441,11 +550,7 @@ def build_agent_workflow(
 
         step = plan.steps[current_step]
 
-        logger.info(
-            "Completing plan step %s: %s",
-            step.step_number,
-            step.title,
-        )
+        logger.info("Completing plan step %s", step.step_number)
 
         accepted_sources, rejected_count = validate_citations(
             action.sources,
@@ -459,6 +564,19 @@ def build_agent_workflow(
                 f"Step {step.step_number} rejected {rejected_count} "
                 "citation(s) absent from successful web evidence."
             )
+
+        resolved_tracer.emit(
+            kind=TraceKind.CITATION,
+            phase=TracePhase.OUTCOME,
+            outcome=(
+                TraceOutcome.REJECTED if rejected_count else TraceOutcome.ACCEPTED
+            ),
+            node="complete_step",
+            current_step=current_step,
+            evidence_count=len(state.get("evidence", [])),
+            citation_count=len(accepted_sources),
+            rejected_citation_count=rejected_count,
+        )
 
         return {
             "pending_action": None,
@@ -572,6 +690,7 @@ def build_agent_workflow(
                 summaries_metadata,
             ),
         )
+        _trace_projection(resolved_tracer, "review", context.context_projection)
 
         logger.info(
             "Reviewing evidence quality after plan step %s",
@@ -626,6 +745,20 @@ def build_agent_workflow(
                 "with no remaining steps; finishing with the available "
                 "evidence."
             )
+
+        resolved_tracer.emit(
+            kind=TraceKind.REVIEW,
+            phase=TracePhase.OUTCOME,
+            outcome=TraceOutcome(route),
+            node="review",
+            route=route,
+            current_step=current_step,
+            total_tool_calls=state["total_tool_calls"],
+            max_total_tool_calls=max_total_tool_calls,
+            max_replan_cycles=max_replan_cycles,
+            evidence_count=len(state.get("evidence", [])),
+            citation_count=len(state.get("sources", [])),
+        )
 
         return {
             "review_verdicts": [verdict],
@@ -718,6 +851,7 @@ def build_agent_workflow(
                 replan_compaction_metadata,
             ),
         )
+        _trace_projection(resolved_tracer, "replan", request.context_projection)
 
         logger.info(
             "Replanning remaining work after review %s",
@@ -744,6 +878,16 @@ def build_agent_workflow(
             replaced_step_numbers=[step.step_number for step in replaced_steps],
             replacement_steps=merged_plan.steps[current_step:],
             review_rationale=verdict.rationale,
+        )
+        resolved_tracer.emit(
+            kind=TraceKind.REPLAN,
+            phase=TracePhase.OUTCOME,
+            outcome=TraceOutcome.SUCCEEDED,
+            node="replan",
+            route="replan",
+            current_step=current_step,
+            total_tool_calls=state["total_tool_calls"],
+            max_replan_cycles=max_replan_cycles,
         )
 
         return {
@@ -786,6 +930,20 @@ def build_agent_workflow(
         )
 
         logger.warning(error)
+
+        resolved_tracer.emit(
+            kind=TraceKind.TOOL,
+            phase=TracePhase.OUTCOME,
+            outcome=TraceOutcome.REFUSED,
+            node="budget_exhausted",
+            current_step=current_step,
+            step_tool_calls=state["tool_calls_in_current_step"],
+            total_tool_calls=state["total_tool_calls"],
+            max_step_tool_calls=max_tool_calls_per_step,
+            max_total_tool_calls=max_total_tool_calls,
+            error_category=TraceErrorCategory.TOOL,
+            error_code=TraceErrorCode.TOOL_FAILURE,
+        )
 
         return {
             "pending_action": None,
@@ -842,6 +1000,37 @@ def build_agent_workflow(
                     **report_arguments,
                 )
 
+            resolved_tracer.emit(
+                kind=TraceKind.ARTIFACT,
+                phase=TracePhase.OUTCOME,
+                outcome=(
+                    TraceOutcome.WRITTEN
+                    if artifact_result.success
+                    else TraceOutcome.FAILED
+                ),
+                node="synthesize",
+                tool_name="write_file",
+                artifact_count=1 if artifact_result.success else 0,
+                evidence_count=len(state.get("evidence", [])),
+                citation_count=len(state.get("sources", [])),
+                error_category=(
+                    None if artifact_result.success else TraceErrorCategory.TOOL
+                ),
+                error_code=(
+                    None if artifact_result.success else TraceErrorCode.TOOL_FAILURE
+                ),
+            )
+        else:
+            resolved_tracer.emit(
+                kind=TraceKind.ARTIFACT,
+                phase=TracePhase.OUTCOME,
+                outcome=TraceOutcome.NOT_REQUESTED,
+                node="synthesize",
+                artifact_count=0,
+                evidence_count=len(state.get("evidence", [])),
+                citation_count=len(state.get("sources", [])),
+            )
+
         updates: dict[str, object] = {
             "final_answer": final_answer,
             "artifact_path": resolved_artifact_path,
@@ -857,19 +1046,31 @@ def build_agent_workflow(
 
     builder = StateGraph(AgentState)
 
-    builder.add_node("planner", planner_node)
-    builder.add_node("decide_action", decide_action_node)
-    builder.add_node("execute_tool", execute_tool_node)
-    builder.add_node("complete_step", complete_step_node)
+    builder.add_node("planner", resolved_tracer.wrap_node("planner", planner_node))
+    builder.add_node(
+        "decide_action",
+        resolved_tracer.wrap_node("decide_action", decide_action_node),
+    )
+    builder.add_node(
+        "execute_tool",
+        resolved_tracer.wrap_node("execute_tool", execute_tool_node),
+    )
+    builder.add_node(
+        "complete_step",
+        resolved_tracer.wrap_node("complete_step", complete_step_node),
+    )
     builder.add_node(
         "budget_exhausted",
-        budget_exhausted_node,
+        resolved_tracer.wrap_node("budget_exhausted", budget_exhausted_node),
     )
-    builder.add_node("synthesize", synthesize_node)
+    builder.add_node(
+        "synthesize",
+        resolved_tracer.wrap_node("synthesize", synthesize_node),
+    )
 
     if reviewer is not None:
-        builder.add_node("review", review_node)
-        builder.add_node("replan", replan_node)
+        builder.add_node("review", resolved_tracer.wrap_node("review", review_node))
+        builder.add_node("replan", resolved_tracer.wrap_node("replan", replan_node))
 
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "decide_action")
