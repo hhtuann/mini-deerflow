@@ -40,12 +40,13 @@ Implemented:
 - Review verdicts, findings, and replan history persisted in checkpoints
 - Final report includes review conclusions, evidence gaps, and limitations
 - Deterministic hard-bounded context projections for the action selector, reviewer, and replanner
+- Depth-one bounded researcher delegation with parent-budget admission and deterministic fan-in
 
 Not yet available:
 
 - Streaming progress
 - Human-in-the-loop review
-- Sub-agents
+- Heterogeneous researcher roles and nested or unbounded delegation
 - Exact tokenizer-aware context accounting
 - LLM summarization of older context
 - Production-grade SSRF protection and redirect policy
@@ -53,7 +54,7 @@ Not yet available:
 
 ### Capability distinction
 
-The default CLI runtime composes the read-only `list_files`, `read_file`, `web_search`, and `web_fetch` tools. Web access uses Jina Search/Reader through an injectable HTTP client. Jina Search requires `MINI_DEERFLOW_JINA_API_KEY`; Reader can use Jina's anonymous quota. `write_file` is added only with `--allow-write`, which also writes the deterministic final report to `reports/research-report.md` through the workspace boundary.
+The default CLI runtime composes the read-only `list_files`, `read_file`, `web_search`, `web_fetch`, and parent-only `delegate_research` tools. Web access uses Jina Search/Reader through an injectable HTTP client. Jina Search requires `MINI_DEERFLOW_JINA_API_KEY`; Reader can use Jina's anonymous quota. `write_file` is added only with `--allow-write`, which also writes the deterministic final report to `reports/research-report.md` through the workspace boundary.
 
 ## Current architecture
 
@@ -65,10 +66,11 @@ CLI (plan | run | resume | threads)
                 ├── ToolRegistry allowlist + ToolRunner
                 ├── Workspace boundary + file tools
                 ├── Jina provider + web search/fetch tools
+                ├── Depth-one bounded researcher delegation (web-only branches)
                 ├── LLMActionSelector (structured action selection)
                 ├── LLMReviewer + replanner (evidence-quality loop)
                 ├── ContextBudget (bounded LLM-facing projections)
-                └── RuntimeLimits (step/total/replan budgets, recursion limit)
+                └── RuntimeLimits (step/total/replan budgets, recursion and delegation limits)
                      └── LangGraph bounded agent workflow
                           ├── SQLite checkpoint per stable thread ID
                           ├── decide_action (select one action)
@@ -172,6 +174,18 @@ uv run mini-deerflow run `
 
 After every completed step, the reviewer judges the accumulated evidence against the goal and returns one structured verdict: `continue` (keep the current plan), `replan` (replace only the remaining steps with better-targeted work), or `finish` (the evidence is sufficient, or the remaining budgets make further collection useless). The replanner never discards completed steps or validated evidence, and deterministic runtime guards force `finish` when the replan-cycle budget, the tool-call budget, or the seven-step plan limit leaves no useful work.
 
+### Bounded researcher delegation (Day 12)
+
+The parent may select `delegate_research` for one depth-one fan-out wave containing exactly 2–3 tasks with unique branch IDs. Delegation concurrency defaults to `2`, is validated in the inclusive range `1–3`, and can be configured for `run` or `resume` with `--max-delegation-concurrency`.
+
+The parent workflow retains ownership of the original goal, per-step and total tool-call budgets, SQLite thread/checkpoint state, final citation validation, and final answer/artifact rendering. Each branch receives only its narrow task and a Day 11 hard-bounded projected context. Branch registries may contain only the read-only `web_search` and `web_fetch` tools: branches cannot write to the workspace, create artifacts, mutate parent state, or delegate again.
+
+Before dispatch, the parent reserves the aggregate branch tool-call budgets plus the parent delegation call against both remaining tool-call limits. Fan-in sorts results by branch ID, canonical-deduplicates successful evidence, and revalidates citations against that merged evidence. A controlled failure, invalid result, or timeout cancellation becomes a bounded limitation; evidence and findings from successful sibling branches remain available.
+
+The complete delegation record is persisted with the parent tool-node checkpoint. Resuming from SQLite reuses a completed record rather than dispatching those branches again. This is not an exactly-once guarantee for a crash during an external effect before that checkpoint is written.
+
+Delegation preserves the Day 09 evidence/citation and parent-only artifact boundaries and the Day 11 rule that compaction affects only LLM-facing projections, not durable state. The deterministic three-branch smoke with concurrency `2` passes, and the full suite reports **473 passed, 2 skipped**. This MVP makes no production-readiness claim: live model/network benchmarking, heterogeneous branch roles, nested or unbounded scheduling, and exactly-once external side effects remain out of scope.
+
 ### Bounded LLM context projections
 
 Mini DeerFlow separates complete checkpointed state from the context sent to
@@ -212,7 +226,7 @@ composition; there is no CLI flag for it yet. The reported token figure is
 only a conservative `characters / 4` estimate, not exact GLM token accounting.
 
 The deterministic hard-bound/context-pressure smoke passes, and the current
-test suite result is **459 passed, 2 skipped**. This does not establish
+test suite result is **473 passed, 2 skipped**. This does not establish
 production readiness. Exact tokenizer integration, LLM summarization of old
 context, and real-model context-pressure behavior remain untested or
 unimplemented.
@@ -228,6 +242,7 @@ Runtime options for `run` and `resume`:
 | `--max-tool-calls-per-step` | 5 | Maximum tool calls allowed in one plan step. |
 | `--max-total-tool-calls` | 20 | Maximum tool calls allowed in the entire run. |
 | `--max-replan-cycles` | 2 | Maximum evidence-review replan cycles per run. Independent of the tool-call budget. |
+| `--max-delegation-concurrency` | 2 | Maximum concurrent researcher branches; validated from 1 through 3. |
 | `--recursion-limit` | 100 | Maximum LangGraph execution steps. |
 
 ### Resume a persisted thread
