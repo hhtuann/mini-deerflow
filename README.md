@@ -39,13 +39,15 @@ Implemented:
 - Independent replan-cycle budget, distinct from the tool-call and recursion budgets
 - Review verdicts, findings, and replan history persisted in checkpoints
 - Final report includes review conclusions, evidence gaps, and limitations
+- Deterministic hard-bounded context projections for the action selector, reviewer, and replanner
 
 Not yet available:
 
 - Streaming progress
 - Human-in-the-loop review
 - Sub-agents
-- Token-aware truncation for file/tool observations
+- Exact tokenizer-aware context accounting
+- LLM summarization of older context
 - Production-grade SSRF protection and redirect policy
 - Production-grade API error presentation
 
@@ -65,6 +67,7 @@ CLI (plan | run | resume | threads)
                 ├── Jina provider + web search/fetch tools
                 ├── LLMActionSelector (structured action selection)
                 ├── LLMReviewer + replanner (evidence-quality loop)
+                ├── ContextBudget (bounded LLM-facing projections)
                 └── RuntimeLimits (step/total/replan budgets, recursion limit)
                      └── LangGraph bounded agent workflow
                           ├── SQLite checkpoint per stable thread ID
@@ -168,6 +171,51 @@ uv run mini-deerflow run `
 `run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, evidence extraction, citation validation, step completion, evidence-quality review, bounded replanning, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool and writes `reports/research-report.md`.
 
 After every completed step, the reviewer judges the accumulated evidence against the goal and returns one structured verdict: `continue` (keep the current plan), `replan` (replace only the remaining steps with better-targeted work), or `finish` (the evidence is sufficient, or the remaining budgets make further collection useless). The replanner never discards completed steps or validated evidence, and deterministic runtime guards force `finish` when the replan-cycle budget, the tool-call budget, or the seven-step plan limit leaves no useful work.
+
+### Bounded LLM context projections
+
+Mini DeerFlow separates complete checkpointed state from the context sent to
+LLM-facing seams. Raw evidence, validated citations, findings, completed-step
+summaries, review history, and replan history remain intact for audit, SQLite
+resume, and deterministic artifact rendering. Before each action-selector,
+reviewer, or replanner call, the runtime derives a separate, deterministic
+projection and compacts only that projection; it does not truncate the durable
+state.
+
+`ContextBudget` has four character-based limits:
+
+| Limit | Default | Meaning |
+| --- | ---: | --- |
+| `max_total_chars` | `60000` | Hard ceiling on the exact serialized LLM-facing payload. |
+| `max_item_chars` | `4000` | Per-item text limit during projection. |
+| `retained_recent_items` | `30` | Number of recent evidence records and observations retained before total-size pressure. |
+| `max_excerpt_chars` | `1500` | Per-evidence-excerpt limit in projected context. |
+
+Compaction is deterministic and priority-based. Current-step identity,
+remaining budgets, required tool identity, recent material, and relevant
+finding/replan identity are preserved first. Older lower-priority evidence,
+observations, summaries, findings, limitations, verbose tool schemas, and
+replaced-step detail are compacted or omitted as pressure increases. Shortened
+or replaced text carries explicit markers, while projection metadata records
+truncation and omission counts.
+
+Projection preserves provenance: compacted context cannot create a citation or
+promote arbitrary text into evidence, and citation validation still accepts
+only URLs backed by successful evidence. If mandatory context still cannot fit
+after all deterministic compaction tiers, the runtime raises
+`ContextBudgetExceededError` instead of sending an oversized prompt.
+
+This context budget is independent of per-step and total tool-call limits, the
+replan-cycle limit, and the LangGraph recursion limit. A custom
+`ContextBudget` can currently be injected programmatically through runtime
+composition; there is no CLI flag for it yet. The reported token figure is
+only a conservative `characters / 4` estimate, not exact GLM token accounting.
+
+The deterministic hard-bound/context-pressure smoke passes, and the current
+test suite result is **459 passed, 2 skipped**. This does not establish
+production readiness. Exact tokenizer integration, LLM summarization of old
+context, and real-model context-pressure behavior remain untested or
+unimplemented.
 
 Runtime options for `run` and `resume`:
 
