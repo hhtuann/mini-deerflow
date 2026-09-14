@@ -41,6 +41,9 @@ Implemented:
 - Final report includes review conclusions, evidence gaps, and limitations
 - Deterministic hard-bounded context projections for the action selector, reviewer, and replanner
 - Depth-one bounded researcher delegation with parent-budget admission and deterministic fan-in
+- Typed public HTTP(S) target validation before every `web_fetch` provider call
+- Redacted structured execution traces with opt-in CLI JSON Lines output
+- Eight-case deterministic Day 13 invariant evaluation baseline
 
 Not yet available:
 
@@ -49,7 +52,7 @@ Not yet available:
 - Heterogeneous researcher roles and nested or unbounded delegation
 - Exact tokenizer-aware context accounting
 - LLM summarization of older context
-- Production-grade SSRF protection and redirect policy
+- Production DNS pinning, rebinding protection, and direct redirect-hop enforcement
 - Production-grade API error presentation
 
 ### Capability distinction
@@ -342,9 +345,9 @@ uv run mini-deerflow run `
 - `run` prints the final research answer to stdout.
 - `resume` prints the resumed or previously completed research answer to stdout.
 - `threads` prints sorted thread identifiers and their count as JSON.
-- Domain and validation errors are printed to stderr and the process exits with code 1.
+- `run` and `resume` accept `--trace-json` to emit redacted JSON Lines to stderr; no trace file is written by default.
+- Domain and validation errors use controlled stderr messages and the process exits with code 1.
 - Argument parsing errors print argparse usage to stderr and exit with code 2.
-- Some model API infrastructure errors are not yet converted into a clean error message and may appear as a traceback; this is a known deferred gap.
 
 ### Persistence limitations
 
@@ -362,8 +365,10 @@ Persistence uses local SQLite and is intended for the MVP. It does not yet provi
 - Reviewer and replanner prompts wrap their context in explicit untrusted-data framing; verdicts and findings cannot introduce citations — the report renders citations only from validated evidence records, and model-authored URLs in review text are sanitized.
 - The replan-cycle budget is enforced by deterministic runtime guards, not by model cooperation, and is independent of the tool-call and recursion budgets.
 - `HttpUrl` validates source structure, while the workflow separately requires every citation URL to occur in a successful `web_search` or `web_fetch` observation.
+- `web_fetch` validates a typed HTTP(S) target before provider invocation, denies local/non-public IP space, requires every DNS answer to be public, and revalidates final/declared redirect targets before accepting content.
 - Evidence and citations are bounded, canonicalized, deduplicated, and checkpointed with tool-call and step provenance.
-- Full SSRF and redirect hardening is deferred; web URLs and fetched content remain untrusted input.
+- Traces use a closed safe-field schema and never include goals, queries, URLs, headers, response bodies, excerpts, artifact content, or exception chains.
+- DNS pinning/rebinding protection and independent enforcement of redirects followed inside the remote Reader remain deferred production hardening; web URLs and fetched content remain untrusted input.
 
 ## Development checks
 
@@ -391,6 +396,8 @@ uv run ruff format --check .
 - [LangGraph workflow (day 04)](docs/langgraph-workflow-day-04.md)
 - [Tool execution layer (day 05)](docs/tool-execution-layer-day-05.md)
 - [Bounded agent loop (day 06)](docs/bounded-agent-loop-day-06.md)
+- [Day 13 threat model](docs/threat-model.md)
+- [Safety, observability, and deterministic evaluation (day 13)](docs/safety-observability-evaluation-day-13.md)
 
 ## Learning objective
 
