@@ -85,12 +85,35 @@ class ToolObservation(ActionModel):
     )
     action: ToolCallAction
     result: ToolResult
+    delegation_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$",
+        exclude_if=lambda value: value is None,
+    )
+    branch_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$",
+        exclude_if=lambda value: value is None,
+    )
+    branch_tool_call_number: int | None = Field(
+        default=None,
+        ge=1,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_call_numbers(self) -> Self:
         if self.step_tool_call_number > self.total_tool_call_number:
             raise ValueError(
                 "step_tool_call_number cannot exceed total_tool_call_number"
+            )
+
+        branch_fields = (self.branch_id, self.branch_tool_call_number)
+        if any(value is not None for value in branch_fields) and any(
+            value is None for value in branch_fields
+        ):
+            raise ValueError(
+                "branch_id and branch_tool_call_number must be set together"
             )
 
         return self

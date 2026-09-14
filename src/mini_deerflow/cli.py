@@ -127,6 +127,13 @@ def _add_runtime_arguments(
         default=100,
         help="Maximum LangGraph execution steps.",
     )
+    parser.add_argument(
+        "--max-delegation-concurrency",
+        type=positive_integer,
+        choices=range(1, 4),
+        default=2,
+        help="Maximum concurrent researcher branches (1-3).",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -279,6 +286,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_total_tool_calls=arguments.max_total_tool_calls,
             max_replan_cycles=arguments.max_replan_cycles,
             recursion_limit=arguments.recursion_limit,
+            max_delegation_concurrency=arguments.max_delegation_concurrency,
         )
 
         if arguments.command == "run":

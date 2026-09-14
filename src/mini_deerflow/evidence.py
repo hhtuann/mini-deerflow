@@ -90,6 +90,21 @@ class EvidenceProvenance(EvidenceModel):
     step_tool_call_number: int = Field(ge=1)
     total_tool_call_number: int = Field(ge=1)
     observation_index: int = Field(ge=1)
+    delegation_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$",
+        exclude_if=lambda value: value is None,
+    )
+    branch_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$",
+        exclude_if=lambda value: value is None,
+    )
+    branch_tool_call_number: int | None = Field(
+        default=None,
+        ge=1,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_call_numbers(self) -> Self:
@@ -135,6 +150,11 @@ class StepFinding(EvidenceModel):
     step_number: int = Field(ge=1, le=7)
     summary: str = Field(min_length=1, max_length=4_000)
     citations: list[str] = Field(default_factory=list, max_length=20)
+    branch_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$",
+        exclude_if=lambda value: value is None,
+    )
 
     @field_validator("citations", mode="before")
     @classmethod
@@ -235,6 +255,9 @@ def _provenance_for(
         step_tool_call_number=observation.step_tool_call_number,
         total_tool_call_number=observation.total_tool_call_number,
         observation_index=observation.total_tool_call_number,
+        delegation_id=observation.delegation_id,
+        branch_id=observation.branch_id,
+        branch_tool_call_number=observation.branch_tool_call_number,
     )
 
 

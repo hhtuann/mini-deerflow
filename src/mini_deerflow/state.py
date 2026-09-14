@@ -5,6 +5,7 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
 from mini_deerflow.actions import AgentAction, ToolObservation
+from mini_deerflow.delegation import DelegationRecord
 from mini_deerflow.evidence import (
     EvidenceRecord,
     StepFinding,
@@ -35,6 +36,7 @@ class AgentState(TypedDict):
     pending_review_verdict: ReviewRoute | None
     review_verdicts: Annotated[list[ReviewVerdict], add]
     replans: Annotated[list[ReplanRecord], add]
+    delegations: Annotated[list[DelegationRecord], add]
 
     notes: Annotated[list[str], add]
     findings: Annotated[list[StepFinding], add]
@@ -65,6 +67,7 @@ def create_initial_state(goal: str) -> AgentState:
         pending_review_verdict=None,
         review_verdicts=[],
         replans=[],
+        delegations=[],
         notes=[],
         findings=[],
         evidence=[],

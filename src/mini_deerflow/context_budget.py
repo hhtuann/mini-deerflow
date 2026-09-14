@@ -378,6 +378,7 @@ def _finding_marker(finding: StepFinding) -> StepFinding:
         step_number=finding.step_number,
         summary=f"[finding {_OMITTED_MARKER} {len(finding.summary)} characters]",
         citations=[],
+        branch_id=finding.branch_id,
     )
 
 

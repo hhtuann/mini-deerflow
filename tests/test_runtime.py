@@ -133,6 +133,7 @@ def test_runtime_limits_have_safe_defaults() -> None:
     assert limits.max_tool_calls_per_step == 5
     assert limits.max_total_tool_calls == 20
     assert limits.recursion_limit == 100
+    assert limits.max_delegation_concurrency == 2
 
 
 @pytest.mark.parametrize(
@@ -141,6 +142,7 @@ def test_runtime_limits_have_safe_defaults() -> None:
         ("max_tool_calls_per_step", True),
         ("max_total_tool_calls", 1.5),
         ("recursion_limit", "100"),
+        ("max_delegation_concurrency", True),
     ],
 )
 def test_runtime_limits_reject_invalid_types(
@@ -151,6 +153,7 @@ def test_runtime_limits_reject_invalid_types(
         "max_tool_calls_per_step": 5,
         "max_total_tool_calls": 20,
         "recursion_limit": 100,
+        "max_delegation_concurrency": 2,
     }
     values[field_name] = invalid_value
 
@@ -173,11 +176,18 @@ def test_runtime_limits_reject_non_positive_values(
         "max_tool_calls_per_step": 5,
         "max_total_tool_calls": 20,
         "recursion_limit": 100,
+        "max_delegation_concurrency": 2,
     }
     values[field_name] = 0
 
     with pytest.raises(ValueError, match="greater than zero"):
         RuntimeLimits(**values)
+
+
+@pytest.mark.parametrize("value", [0, 4])
+def test_runtime_limits_reject_invalid_delegation_concurrency(value: int) -> None:
+    with pytest.raises(ValueError, match="between 1 and 3"):
+        RuntimeLimits(max_delegation_concurrency=value)
 
 
 def test_agent_runtime_invokes_graph_with_initial_state() -> None:

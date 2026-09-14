@@ -114,6 +114,8 @@ def test_main_run_prints_final_answer(
                 "4",
                 "--recursion-limit",
                 "30",
+                "--max-delegation-concurrency",
+                "3",
                 "--thread-id",
                 "cli-test",
                 "--checkpoint-db",
@@ -139,6 +141,7 @@ def test_main_run_prints_final_answer(
         max_tool_calls_per_step=2,
         max_total_tool_calls=4,
         recursion_limit=30,
+        max_delegation_concurrency=3,
     )
     assert call.kwargs["checkpoint_path"] == tmp_path / "checkpoints.sqlite"
 

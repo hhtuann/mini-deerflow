@@ -22,6 +22,13 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.delegation import (
+    BranchFinding,
+    BranchResult,
+    DelegationRecord,
+    FanInSummary,
+    ScopedResearchTask,
+)
 from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
 from mini_deerflow.review import ReplanRecord, ReviewFinding, ReviewVerdict
 from mini_deerflow.schemas import Plan
@@ -40,6 +47,11 @@ _ALLOWED_CHECKPOINT_TYPES = (
     ReviewVerdict,
     ReviewFinding,
     ReplanRecord,
+    ScopedResearchTask,
+    BranchFinding,
+    BranchResult,
+    FanInSummary,
+    DelegationRecord,
 )
 
 

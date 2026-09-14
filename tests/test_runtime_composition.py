@@ -79,6 +79,7 @@ class FakeGraph:
                 "read_file",
                 "web_search",
                 "web_fetch",
+                "delegate_research",
             ),
         ),
         (
@@ -88,6 +89,7 @@ class FakeGraph:
                 "read_file",
                 "web_search",
                 "web_fetch",
+                "delegate_research",
                 "write_file",
             ),
         ),
@@ -180,6 +182,7 @@ def test_default_runtime_composes_expected_file_tools(
         "read_file",
         "web_search",
         "web_fetch",
+        "delegate_research",
     )
 
     planner = captured["planner"]
@@ -206,10 +209,13 @@ def test_default_runtime_composes_expected_file_tools(
     assert composed_replanner.args == (fake_model,)
     assert composed_replanner.keywords == {}
 
-    # The replanner binds its structured model lazily per invocation,
-    # exactly like the planner, so only the eager selector and reviewer
-    # structured-output bindings appear at composition time.
+    # The replanner binds lazily. The researcher selector, parent selector,
+    # and reviewer bind eagerly at composition time.
     assert fake_model.structured_output_calls == [
+        (
+            ActionDecision,
+            "json_mode",
+        ),
         (
             ActionDecision,
             "json_mode",
@@ -221,7 +227,7 @@ def test_default_runtime_composes_expected_file_tools(
     ]
 
     assert captured["checkpointer"] is expected_checkpointer
-    assert captured["context_budget"] is None
+    assert captured["context_budget"] == ContextBudget()
     assert captured["artifact_path"] == (
         "reports/research-report.md" if allow_write else None
     )

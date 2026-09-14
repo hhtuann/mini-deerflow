@@ -13,6 +13,11 @@ from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.decision import ActionSelector
+from mini_deerflow.delegation import (
+    BoundedResearcherSubagent,
+    DelegateResearchTool,
+    ResearcherSubagent,
+)
 from mini_deerflow.llm_reviewer import LLMReviewer
 from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.model import create_chat_model
@@ -57,6 +62,7 @@ class RuntimeLimits:
     max_total_tool_calls: int = 20
     max_replan_cycles: int = 2
     recursion_limit: int = 100
+    max_delegation_concurrency: int = 2
 
     def __post_init__(self) -> None:
         for name in (
@@ -72,6 +78,14 @@ class RuntimeLimits:
 
             if value <= 0:
                 raise ValueError(f"{name} must be greater than zero")
+
+        if isinstance(self.max_delegation_concurrency, bool) or not isinstance(
+            self.max_delegation_concurrency, int
+        ):
+            raise TypeError("max_delegation_concurrency must be an integer")
+
+        if not 1 <= self.max_delegation_concurrency <= 3:
+            raise ValueError("max_delegation_concurrency must be between 1 and 3")
 
 
 @runtime_checkable
@@ -250,6 +264,7 @@ def create_default_agent_runtime(
     context_budget: ContextBudget | None = None,
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
+    researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
 ) -> AgentRuntime:
     """Create the default local Mini DeerFlow runtime."""
@@ -270,11 +285,29 @@ def create_default_agent_runtime(
         )
     )
 
+    resolved_limits = limits or RuntimeLimits()
+    web_search_tool = WebSearchTool(resolved_web_provider)
+    web_fetch_tool = WebFetchTool(resolved_web_provider)
+    branch_registry = ToolRegistry([web_search_tool, web_fetch_tool])
+    resolved_context_budget = context_budget or ContextBudget()
+    resolved_researcher = researcher_subagent or BoundedResearcherSubagent(
+        LLMActionSelector(model),
+        branch_registry,
+        context_budget=resolved_context_budget,
+    )
+    delegation_tool = DelegateResearchTool(
+        resolved_researcher,
+        branch_registry,
+        max_concurrency=resolved_limits.max_delegation_concurrency,
+        context_budget=resolved_context_budget,
+    )
+
     action_tools = [
         ListFilesTool(workspace),
         ReadFileTool(workspace),
-        WebSearchTool(resolved_web_provider),
-        WebFetchTool(resolved_web_provider),
+        web_search_tool,
+        web_fetch_tool,
+        delegation_tool,
     ]
     execution_tools = list(action_tools)
 
@@ -307,8 +340,8 @@ def create_default_agent_runtime(
         reviewer=reviewer,
         replanner=replanner,
         checkpointer=checkpointer,
-        limits=limits,
-        context_budget=context_budget,
+        limits=resolved_limits,
+        context_budget=resolved_context_budget,
         artifact_path=artifact_path if allow_write else None,
     )
 
@@ -324,6 +357,7 @@ async def open_default_agent_runtime(
     context_budget: ContextBudget | None = None,
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
+    researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
 ) -> AsyncIterator[AgentRuntime]:
     """Open a persistent runtime and close its checkpointer on exit."""
@@ -338,5 +372,6 @@ async def open_default_agent_runtime(
             context_budget=context_budget,
             model_factory=model_factory,
             web_provider=web_provider,
+            researcher_subagent=researcher_subagent,
             artifact_path=artifact_path,
         )

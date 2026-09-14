@@ -20,6 +20,7 @@ def test_create_initial_state_returns_complete_state() -> None:
         "pending_review_verdict": None,
         "review_verdicts": [],
         "replans": [],
+        "delegations": [],
         "notes": [],
         "findings": [],
         "evidence": [],

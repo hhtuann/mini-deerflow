@@ -23,7 +23,13 @@ from mini_deerflow.decision import (
     ActionSelector,
     build_action_context,
 )
+from mini_deerflow.delegation import (
+    DelegateResearchTool,
+    DelegationRecord,
+    parse_delegation_record,
+)
 from mini_deerflow.evidence import (
+    EvidenceRecord,
     StepFinding,
     extract_evidence_records,
     render_research_report,
@@ -255,6 +261,8 @@ def build_agent_workflow(
             step.step_number,
         )
 
+        delegated_tool: DelegateResearchTool | None = None
+
         if (
             action_registry_is_restricted
             and action.tool_name not in resolved_action_registry
@@ -266,6 +274,24 @@ def build_agent_workflow(
                     "error_type": "ActionToolDeniedError",
                 },
             )
+        elif action.tool_name == DelegateResearchTool.name:
+            candidate = registry.get(action.tool_name)
+            if not isinstance(candidate, DelegateResearchTool):
+                result = ToolResult.fail(
+                    error="Registered delegation tool has an invalid implementation.",
+                    metadata={"error_type": "InvalidDelegationToolError"},
+                )
+            else:
+                delegated_tool = candidate
+                remaining_tool_calls = min(
+                    max_tool_calls_per_step - state["tool_calls_in_current_step"],
+                    max_total_tool_calls - state["total_tool_calls"],
+                )
+                result = await delegated_tool.run_with_parent_budget(
+                    action.arguments,
+                    parent_step_number=step.step_number,
+                    remaining_tool_calls=remaining_tool_calls,
+                )
         else:
             result = await tool_runner.run(
                 action.tool_name,
@@ -281,12 +307,113 @@ def build_agent_workflow(
         )
         evidence = extract_evidence_records(observation)
 
+        if delegated_tool is not None:
+            record = parse_delegation_record(result)
+            if record is not None:
+                return _integrate_delegation(
+                    state,
+                    observation,
+                    record,
+                    step_tool_call_number=step_tool_call_number,
+                    total_tool_call_number=total_tool_call_number,
+                )
+
         return {
             "pending_action": None,
             "tool_observations": [observation],
             "evidence": evidence,
             "tool_calls_in_current_step": (step_tool_call_number),
             "total_tool_calls": total_tool_call_number,
+        }
+
+    def _integrate_delegation(
+        state: AgentState,
+        parent_observation: ToolObservation,
+        record: DelegationRecord,
+        *,
+        step_tool_call_number: int,
+        total_tool_call_number: int,
+    ) -> dict[str, object]:
+        """Rebuild trusted fan-in data from structured branch observations."""
+
+        remapped_observations: list[ToolObservation] = []
+        next_step_call = step_tool_call_number
+        next_total_call = total_tool_call_number
+
+        for branch_result in sorted(record.results, key=lambda item: item.branch_id):
+            for local_observation in branch_result.observations:
+                next_step_call += 1
+                next_total_call += 1
+                remapped_observations.append(
+                    local_observation.model_copy(
+                        update={
+                            "step_number": record.parent_step_number,
+                            "step_tool_call_number": next_step_call,
+                            "total_tool_call_number": next_total_call,
+                            "delegation_id": record.delegation_id,
+                            "branch_id": branch_result.branch_id,
+                            "branch_tool_call_number": (
+                                local_observation.branch_tool_call_number
+                                or local_observation.step_tool_call_number
+                            ),
+                        },
+                    )
+                )
+
+        charged_without_observations = record.charged_tool_calls - len(
+            remapped_observations
+        )
+        next_step_call += charged_without_observations
+        next_total_call += charged_without_observations
+
+        delegated_evidence: list[EvidenceRecord] = []
+        for branch_observation in remapped_observations:
+            delegated_evidence.extend(extract_evidence_records(branch_observation))
+
+        citable_evidence = [*state.get("evidence", []), *delegated_evidence]
+        findings: list[StepFinding] = []
+        sources: list[str] = []
+        notes: list[str] = []
+        errors: list[str] = []
+
+        for branch_result in sorted(record.results, key=lambda item: item.branch_id):
+            if branch_result.status != "success" or branch_result.finding is None:
+                errors.append(
+                    f"Branch {branch_result.branch_id}: {branch_result.error}"
+                )
+                continue
+            accepted, rejected = validate_citations(
+                branch_result.finding.citations,
+                citable_evidence,
+            )
+            summary = sanitize_finding_summary(branch_result.finding.summary)
+            findings.append(
+                StepFinding(
+                    step_number=record.parent_step_number,
+                    summary=summary,
+                    citations=accepted,
+                    branch_id=branch_result.branch_id,
+                )
+            )
+            notes.append(f"Branch {branch_result.branch_id}: {summary}")
+            sources.extend(source for source in accepted if source not in sources)
+            if rejected:
+                errors.append(
+                    f"Branch {branch_result.branch_id} rejected {rejected} "
+                    "citation(s) absent from successful merged evidence."
+                )
+
+        return {
+            "pending_action": None,
+            "tool_observations": [parent_observation, *remapped_observations],
+            "evidence": delegated_evidence,
+            "tool_calls_in_current_step": next_step_call,
+            "total_tool_calls": next_total_call,
+            "delegations": [record],
+            "notes": notes,
+            "findings": findings,
+            "sources": sources,
+            "errors": errors,
         }
 
     def complete_step_node(
@@ -674,7 +801,7 @@ def build_agent_workflow(
         successful_calls = sum(
             observation.result.success for observation in observations
         )
-        failed_calls = len(observations) - successful_calls
+        failed_calls = state["total_tool_calls"] - successful_calls
 
         report_arguments = {
             "goal": state["goal"],
