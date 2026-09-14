@@ -1,4 +1,3 @@
-import json
 from typing import Annotated, Protocol, runtime_checkable
 
 from langchain_core.exceptions import OutputParserException
@@ -8,6 +7,7 @@ from pydantic import (
     ValidationError,
 )
 
+from mini_deerflow.context_budget import render_llm_payload
 from mini_deerflow.review import (
     ReplacementWork,
     ReplanRequest,
@@ -124,13 +124,7 @@ def create_replacement_plan(
         ),
         (
             "human",
-            json.dumps(
-                request.model_dump(
-                    mode="json",
-                ),
-                ensure_ascii=False,
-                indent=2,
-            ),
+            render_llm_payload(request),
         ),
     ]
 

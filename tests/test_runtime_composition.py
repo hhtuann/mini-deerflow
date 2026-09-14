@@ -12,6 +12,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from mini_deerflow import runtime as runtime_module
 from mini_deerflow.actions import ActionDecision
 from mini_deerflow.config import Settings
+from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.decision import ActionSelector
 from mini_deerflow.llm_reviewer import LLMReviewer
 from mini_deerflow.llm_selector import LLMActionSelector
@@ -130,6 +131,7 @@ def test_default_runtime_composes_expected_file_tools(
         replanner: Replanner | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         limits: RuntimeLimits | None = None,
+        context_budget: ContextBudget | None = None,
         artifact_path: str | None = None,
     ) -> AgentRuntime:
         captured["planner"] = planner
@@ -140,6 +142,7 @@ def test_default_runtime_composes_expected_file_tools(
         captured["replanner"] = replanner
         captured["checkpointer"] = checkpointer
         captured["limits"] = limits
+        captured["context_budget"] = context_budget
         captured["artifact_path"] = artifact_path
 
         return expected_runtime
@@ -218,6 +221,7 @@ def test_default_runtime_composes_expected_file_tools(
     ]
 
     assert captured["checkpointer"] is expected_checkpointer
+    assert captured["context_budget"] is None
     assert captured["artifact_path"] == (
         "reports/research-report.md" if allow_write else None
     )

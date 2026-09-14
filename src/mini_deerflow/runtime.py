@@ -11,6 +11,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.config import Settings
+from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.decision import ActionSelector
 from mini_deerflow.llm_reviewer import LLMReviewer
 from mini_deerflow.llm_selector import LLMActionSelector
@@ -210,6 +211,7 @@ def build_agent_runtime(
     replanner: Replanner | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
+    context_budget: ContextBudget | None = None,
     artifact_path: str | None = None,
 ) -> AgentRuntime:
     """Build a testable runtime from explicitly supplied dependencies."""
@@ -227,6 +229,7 @@ def build_agent_runtime(
         max_tool_calls_per_step=(resolved_limits.max_tool_calls_per_step),
         max_total_tool_calls=resolved_limits.max_total_tool_calls,
         max_replan_cycles=resolved_limits.max_replan_cycles,
+        context_budget=context_budget,
         artifact_path=artifact_path,
     )
 
@@ -244,6 +247,7 @@ def create_default_agent_runtime(
     allow_write: bool = False,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
+    context_budget: ContextBudget | None = None,
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
     artifact_path: str = "reports/research-report.md",
@@ -304,6 +308,7 @@ def create_default_agent_runtime(
         replanner=replanner,
         checkpointer=checkpointer,
         limits=limits,
+        context_budget=context_budget,
         artifact_path=artifact_path if allow_write else None,
     )
 
@@ -316,6 +321,7 @@ async def open_default_agent_runtime(
     *,
     allow_write: bool = False,
     limits: RuntimeLimits | None = None,
+    context_budget: ContextBudget | None = None,
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
     artifact_path: str = "reports/research-report.md",
@@ -329,6 +335,7 @@ async def open_default_agent_runtime(
             allow_write=allow_write,
             checkpointer=checkpointer,
             limits=limits,
+            context_budget=context_budget,
             model_factory=model_factory,
             web_provider=web_provider,
             artifact_path=artifact_path,

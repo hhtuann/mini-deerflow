@@ -11,6 +11,14 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.context_budget import (
+    ContextBudget,
+    fit_context_to_budget,
+    merge_metadata,
+    project_evidence_records,
+    project_summaries,
+    truncate_text,
+)
 from mini_deerflow.decision import (
     ActionSelector,
     build_action_context,
@@ -31,8 +39,10 @@ from mini_deerflow.review import (
     ReviewContext,
     ReviewRoute,
     ReviewVerdict,
+    compact_replan_request,
     derive_review_limitations,
     merge_replanned_steps,
+    project_review_findings,
     render_review_conclusions,
     replacement_step_bounds,
 )
@@ -69,6 +79,7 @@ def build_agent_workflow(
     max_tool_calls_per_step: int = 5,
     max_total_tool_calls: int = 20,
     max_replan_cycles: int = 2,
+    context_budget: ContextBudget | None = None,
     artifact_path: str | None = None,
 ) -> CompiledStateGraph:
     """Build the bounded plan-act-observe research workflow."""
@@ -84,6 +95,18 @@ def build_agent_workflow(
     _validate_workflow_limit(
         "max_replan_cycles",
         max_replan_cycles,
+    )
+
+    if context_budget is not None and not isinstance(
+        context_budget,
+        ContextBudget,
+    ):
+        raise TypeError(
+            "context_budget must satisfy ContextBudget",
+        )
+
+    resolved_context_budget = (
+        context_budget if context_budget is not None else ContextBudget()
     )
 
     if not isinstance(action_selector, ActionSelector):
@@ -142,6 +165,7 @@ def build_agent_workflow(
             resolved_action_registry,
             max_tool_calls_per_step=max_tool_calls_per_step,
             max_total_tool_calls=max_total_tool_calls,
+            context_budget=resolved_context_budget,
         )
 
         logger.info(
@@ -376,18 +400,50 @@ def build_agent_workflow(
             max_replan_cycles - len(state["replans"]),
         )
 
+        # LLM-facing projection only: reviewer state and history stay
+        # complete in AgentState for checkpointing and report rendering.
+        projected_evidence, evidence_metadata = project_evidence_records(
+            list(state.get("evidence", [])),
+            resolved_context_budget,
+        )
+        projected_findings, findings_metadata = project_review_findings(
+            list(state.get("findings", [])),
+            resolved_context_budget,
+        )
+        projected_summaries, summaries_metadata = project_summaries(
+            list(state["notes"]),
+            resolved_context_budget,
+        )
+        projected_limitations = [
+            truncate_text(
+                limitation,
+                resolved_context_budget.max_item_chars,
+            )[0]
+            for limitation in derive_review_limitations(
+                state["tool_observations"],
+                list(state["errors"]),
+            )
+        ]
+
         context = ReviewContext(
             goal=state["goal"],
             remaining_steps=remaining_steps,
-            completed_step_summaries=list(state["notes"]),
-            findings=list(state.get("findings", [])),
-            evidence=list(state.get("evidence", [])),
-            limitations=derive_review_limitations(
-                state["tool_observations"],
-                list(state["errors"]),
-            ),
+            completed_step_summaries=projected_summaries,
+            findings=projected_findings,
+            evidence=projected_evidence,
+            limitations=projected_limitations,
             remaining_total_tool_calls=remaining_total_tool_calls,
             remaining_replan_cycles=remaining_replan_cycles,
+        )
+
+        context = fit_context_to_budget(
+            context,
+            resolved_context_budget,
+            merge_metadata(
+                evidence_metadata,
+                findings_metadata,
+                summaries_metadata,
+            ),
         )
 
         logger.info(
@@ -499,10 +555,15 @@ def build_agent_workflow(
         verdict = state["review_verdicts"][-1]
         minimum, maximum = replacement_step_bounds(current_step)
 
+        projected_summaries, summaries_metadata = project_summaries(
+            list(state["notes"]),
+            resolved_context_budget,
+        )
+
         request = ReplanRequest(
             goal=state["goal"],
             review=verdict,
-            completed_step_summaries=list(state["notes"]),
+            completed_step_summaries=projected_summaries,
             replaced_steps=plan.steps[current_step:],
             available_tools=resolved_action_registry.definitions(),
             remaining_total_tool_calls=max(
@@ -515,6 +576,20 @@ def build_agent_workflow(
             ),
             min_replacement_steps=minimum,
             max_replacement_steps=maximum,
+        )
+
+        request, replan_compaction_metadata = compact_replan_request(
+            request,
+            resolved_context_budget,
+        )
+
+        request = fit_context_to_budget(
+            request,
+            resolved_context_budget,
+            merge_metadata(
+                summaries_metadata,
+                replan_compaction_metadata,
+            ),
         )
 
         logger.info(

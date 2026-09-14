@@ -1,4 +1,4 @@
-from typing import Annotated, Protocol, runtime_checkable
+from typing import Annotated, Protocol, cast, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -12,6 +12,15 @@ from mini_deerflow.actions import (
     AgentAction,
     CompletionSummary,
     ToolObservation,
+)
+from mini_deerflow.context_budget import (
+    ContextBudget,
+    ProjectionMetadata,
+    fit_context_to_budget,
+    merge_metadata,
+    project_evidence_records,
+    project_observations,
+    project_summaries,
 )
 from mini_deerflow.evidence import EvidenceRecord
 from mini_deerflow.schemas import PlanStep
@@ -56,6 +65,7 @@ class ActionContext(BaseModel):
     remaining_total_tool_calls: int = Field(
         ge=0,
     )
+    context_projection: ProjectionMetadata | None = None
 
 
 @runtime_checkable
@@ -73,6 +83,7 @@ def build_action_context(
     *,
     max_tool_calls_per_step: int,
     max_total_tool_calls: int,
+    context_budget: ContextBudget | None = None,
 ) -> ActionContext:
     _validate_positive_limit(
         "max_tool_calls_per_step",
@@ -82,6 +93,8 @@ def build_action_context(
         "max_total_tool_calls",
         max_total_tool_calls,
     )
+
+    resolved_budget = context_budget if context_budget is not None else ContextBudget()
 
     def _validate_execution_counters(
         step_tool_calls: int,
@@ -136,15 +149,43 @@ def build_action_context(
         max_total_tool_calls - total_tool_calls,
     )
 
-    return ActionContext(
+    # LLM-facing projection only: caller-owned state keeps the complete
+    # evidence, observations, and summaries for checkpoint and rendering.
+    projected_evidence, evidence_metadata = project_evidence_records(
+        list(state.get("evidence", [])),
+        resolved_budget,
+    )
+    projected_observations, observation_metadata = project_observations(
+        step_observations,
+        resolved_budget,
+    )
+    projected_summaries, summary_metadata = project_summaries(
+        list(state["notes"]),
+        resolved_budget,
+    )
+
+    context = ActionContext(
         goal=state["goal"],
         step=step,
-        completed_step_summaries=list(state["notes"]),
+        completed_step_summaries=projected_summaries,
         available_tools=registry.definitions(),
-        observations=step_observations,
-        evidence=list(state.get("evidence", [])),
+        observations=projected_observations,
+        evidence=projected_evidence,
         remaining_step_tool_calls=remaining_step_tool_calls,
         remaining_total_tool_calls=remaining_total_tool_calls,
+    )
+
+    return cast(
+        ActionContext,
+        fit_context_to_budget(
+            context,
+            resolved_budget,
+            merge_metadata(
+                evidence_metadata,
+                observation_metadata,
+                summary_metadata,
+            ),
+        ),
     )
 
 

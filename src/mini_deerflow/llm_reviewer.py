@@ -1,10 +1,10 @@
-import json
 from typing import Protocol, runtime_checkable
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from mini_deerflow.context_budget import render_llm_payload
 from mini_deerflow.review import (
     ReviewContext,
     ReviewDecision,
@@ -136,13 +136,7 @@ class LLMReviewer:
         self,
         context: ReviewContext,
     ) -> ReviewVerdict:
-        context_json = json.dumps(
-            context.model_dump(
-                mode="json",
-            ),
-            ensure_ascii=False,
-            indent=2,
-        )
+        context_json = render_llm_payload(context)
 
         base_messages = [
             SystemMessage(

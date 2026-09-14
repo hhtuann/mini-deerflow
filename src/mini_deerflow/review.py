@@ -15,6 +15,12 @@ from mini_deerflow.actions import (
     CompletionSummary,
     ToolObservation,
 )
+from mini_deerflow.context_budget import (
+    ContextBudget,
+    ProjectionMetadata,
+    payload_size,
+    truncate_text,
+)
 from mini_deerflow.evidence import (
     EvidenceRecord,
     StepFinding,
@@ -274,6 +280,7 @@ class ReviewContext(ReviewModel):
     remaining_replan_cycles: int = Field(
         ge=0,
     )
+    context_projection: ProjectionMetadata | None = None
 
 
 class ReplanRequest(ReviewModel):
@@ -306,6 +313,7 @@ class ReplanRequest(ReviewModel):
         ge=1,
         le=7,
     )
+    context_projection: ProjectionMetadata | None = None
 
     @model_validator(mode="after")
     def validate_replacement_bounds(self) -> Self:
@@ -315,6 +323,139 @@ class ReplanRequest(ReviewModel):
             )
 
         return self
+
+
+def project_review_findings(
+    findings: list[StepFinding],
+    budget: ContextBudget,
+) -> tuple[list[StepFinding], ProjectionMetadata]:
+    """Bound finding summaries for an LLM context.
+
+    Citations are provenance and are never truncated; only the prose
+    summary of each finding is bounded.
+    """
+
+    truncated = 0
+    projected: list[StepFinding] = []
+
+    for finding in findings:
+        summary, was_truncated = truncate_text(
+            finding.summary,
+            budget.max_item_chars,
+        )
+        truncated += int(was_truncated)
+        projected.append(
+            finding.model_copy(update={"summary": summary}),
+        )
+
+    return projected, ProjectionMetadata(
+        truncated_items=truncated,
+    )
+
+
+REPLANNING_RATIONALE_PRESSURE_CHARS = 400
+
+
+def compact_replan_request(
+    request: ReplanRequest,
+    budget: ContextBudget,
+) -> tuple[ReplanRequest, ProjectionMetadata]:
+    """Compactly project the review-derived content of a replan request.
+
+    Applies only under serialized pressure: when the request already fits
+    the budget it is returned unchanged. Under pressure the triggering
+    review is compacted deterministically — its rationale is bounded to a
+    small pressure cap, its newest finding is kept in the fullest form the
+    per-item budget allows, and older findings are replaced oldest-first
+    with markers that preserve the finding category and related step
+    numbers (the review identity) before being dropped entirely. The
+    caller still runs the generic tiered fit, which enforces the hard
+    bound.
+    """
+
+    if payload_size(request) <= budget.max_total_chars:
+        return request, ProjectionMetadata()
+
+    truncated = 0
+    omitted = 0
+    rationale, rationale_truncated = truncate_text(
+        request.review.rationale,
+        min(budget.max_item_chars, REPLANNING_RATIONALE_PRESSURE_CHARS),
+    )
+    truncated += int(rationale_truncated)
+
+    findings = list(request.review.findings)
+    compacted: list[ReviewFinding] = []
+
+    for index, finding in enumerate(findings):
+        if (
+            index < len(findings) - 1
+            and payload_size(
+                request.model_copy(
+                    update={
+                        "review": request.review.model_copy(
+                            update={"rationale": rationale},
+                        ),
+                    },
+                ),
+            )
+            > budget.max_total_chars
+        ):
+            compacted.append(
+                ReviewFinding(
+                    category=finding.category,
+                    description=(
+                        f"[finding omitted: {len(finding.description)} characters]"
+                    ),
+                    related_step_numbers=finding.related_step_numbers,
+                ),
+            )
+            truncated += 1
+        else:
+            description, description_truncated = truncate_text(
+                finding.description,
+                budget.max_item_chars,
+            )
+            truncated += int(description_truncated)
+            compacted.append(
+                finding.model_copy(update={"description": description}),
+            )
+
+    compacted_request = request.model_copy(
+        update={
+            "review": request.review.model_copy(
+                update={
+                    "rationale": rationale,
+                    "findings": compacted,
+                },
+            ),
+        },
+    )
+
+    # Even markers can overflow an extremely tight budget: drop the
+    # oldest marked findings, newest intact, counting every omission.
+    while (
+        payload_size(compacted_request) > budget.max_total_chars
+        and len(
+            compacted_request.review.findings,
+        )
+        > 1
+    ):
+        omitted += 1
+        compacted_request = compacted_request.model_copy(
+            update={
+                "review": compacted_request.review.model_copy(
+                    update={
+                        "findings": compacted_request.review.findings[1:],
+                    },
+                ),
+            },
+        )
+
+    return compacted_request, ProjectionMetadata(
+        omitted_items=omitted,
+        truncated_items=truncated,
+    )
 
 
 @runtime_checkable

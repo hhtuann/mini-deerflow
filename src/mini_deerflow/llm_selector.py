@@ -1,4 +1,3 @@
-import json
 from typing import Protocol, runtime_checkable
 
 from langchain_core.exceptions import OutputParserException
@@ -12,6 +11,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     parse_agent_action,
 )
+from mini_deerflow.context_budget import render_llm_payload
 from mini_deerflow.decision import ActionContext
 
 ACTION_SELECTOR_SYSTEM_PROMPT = """
@@ -140,14 +140,7 @@ class LLMActionSelector:
         self,
         context: ActionContext,
     ) -> AgentAction:
-        context_json = json.dumps(
-            context.model_dump(
-                mode="json",
-                by_alias=True,
-            ),
-            ensure_ascii=False,
-            indent=2,
-        )
+        context_json = render_llm_payload(context)
 
         base_messages = [
             SystemMessage(

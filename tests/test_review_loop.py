@@ -10,6 +10,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
 )
 from mini_deerflow.agent_workflow import build_agent_workflow
+from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.decision import ActionContext
 from mini_deerflow.persistence import create_thread_config, open_sqlite_checkpointer
 from mini_deerflow.review import (
@@ -21,8 +22,13 @@ from mini_deerflow.review import (
 from mini_deerflow.runtime import RuntimeLimits, build_agent_runtime
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.state import AgentState, create_initial_state
-from mini_deerflow.tools import ToolRegistry, WebSearchTool, WriteFileTool
-from mini_deerflow.web import SearchResult
+from mini_deerflow.tools import (
+    ToolRegistry,
+    WebFetchTool,
+    WebSearchTool,
+    WriteFileTool,
+)
+from mini_deerflow.web import FetchedPage, SearchResult
 from mini_deerflow.workspace import Workspace
 
 GOAL = "Research multi-source evidence."
@@ -821,6 +827,125 @@ def test_invalid_reviewer_output_is_rejected() -> None:
                 create_initial_state(GOAL),
                 config={"recursion_limit": 120},
             ),
+        )
+
+
+class LongPageProvider:
+    """Deterministic fetch provider returning near-cap page content."""
+
+    def __init__(self, body_length: int) -> None:
+        self._body_length = body_length
+
+    async def fetch(self, url: str) -> FetchedPage:
+        return FetchedPage(
+            url=url,
+            title="Long source",
+            content=(
+                "Provenance-carrying opening. "
+                + "L" * self._body_length
+                + " closing tail marker."
+            ),
+            status_code=200,
+            content_type="text/markdown",
+        )
+
+
+def fetch_action() -> ToolCallAction:
+    return ToolCallAction(
+        type="tool_call",
+        tool_name="web_fetch",
+        arguments={"url": "https://example.com/long"},
+    )
+
+
+def test_llm_contexts_are_bounded_under_pressure() -> None:
+    body_length = 19_000
+    provider = LongPageProvider(body_length)
+    budget = ContextBudget(
+        max_total_chars=8_000,
+        max_item_chars=800,
+        retained_recent_items=5,
+        max_excerpt_chars=600,
+    )
+    selector = QueueSelector(
+        [
+            fetch_action(),
+            completion(1, ["https://example.com/long"]),
+        ],
+    )
+    reviewer = QueuedReviewer([review_verdict("finish")])
+    replanner = QueuedReplanner([])
+
+    graph = build_agent_workflow(
+        plan,
+        selector,
+        ToolRegistry([WebFetchTool(provider)]),
+        reviewer=reviewer,
+        replanner=replanner,
+        context_budget=budget,
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            create_initial_state(GOAL),
+            config={"recursion_limit": 120},
+        ),
+    )
+
+    selector_before_fetch = selector.contexts[0]
+
+    assert selector_before_fetch.evidence == []
+
+    selector_after_fetch = selector.contexts[1]
+
+    assert len(selector_after_fetch.evidence) == 1
+    assert len(selector_after_fetch.evidence[0].excerpt) <= 600
+    assert "[truncated at 600 of" in selector_after_fetch.evidence[0].excerpt
+    assert len(selector_after_fetch.observations[0].result.data["content"]) <= 800
+
+    review_context = reviewer.contexts[0]
+
+    assert len(review_context.evidence) == 1
+    assert len(review_context.evidence[0].excerpt) <= 600
+    assert "[truncated at 600 of" in review_context.evidence[0].excerpt
+
+    projection = review_context.context_projection
+
+    assert projection is not None
+    assert projection.truncated_items >= 1
+    assert projection.estimated_tokens > 0
+
+    serialized_context = review_context.model_dump_json()
+
+    assert len(serialized_context) <= budget.max_total_chars
+    assert "closing tail marker" not in serialized_context
+
+    state_excerpt = result["evidence"][0].excerpt
+
+    assert len(state_excerpt) > body_length
+    assert state_excerpt.endswith("closing tail marker.")
+    assert result["pending_review_verdict"] is None
+    assert result["total_tool_calls"] == 1
+
+    report = result["final_answer"]
+
+    assert report is not None
+    assert "closing tail marker." in report
+    assert "[truncated at" not in report
+
+
+def test_workflow_rejects_invalid_context_budget() -> None:
+    with pytest.raises(
+        TypeError,
+        match="ContextBudget",
+    ):
+        build_agent_workflow(
+            plan,
+            QueueSelector([]),
+            ToolRegistry(),
+            reviewer=QueuedReviewer([]),
+            replanner=QueuedReplanner([]),
+            context_budget=object(),
         )
 
 
