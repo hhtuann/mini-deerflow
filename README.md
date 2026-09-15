@@ -6,7 +6,7 @@ This project is inspired by the architecture of [ByteDance DeerFlow](https://git
 
 ## Project status
 
-The project is under active development. It is a **bounded tool-using research agent prototype**, not a production-ready system.
+The 14-day learning MVP is complete. It is a **bounded tool-using research agent prototype**, not a production-ready system. The deterministic final acceptance scenario and the honest DeerFlow-style capability comparison are documented in [Day 14 MVP stabilization, demo, and comparison](docs/mvp-stabilization-demo-comparison-day-14.md).
 
 Mini DeerFlow plans a research goal into a strict multi-step schema, selects one structured action at a time, executes allowlisted workspace tools under explicit budgets, and synthesizes a final answer from the recorded evidence.
 
@@ -43,7 +43,7 @@ Implemented:
 - Depth-one bounded researcher delegation with parent-budget admission and deterministic fan-in
 - Typed public HTTP(S) target validation before every `web_fetch` provider call
 - Redacted structured execution traces with opt-in CLI JSON Lines output
-- Eight-case deterministic Day 13 invariant evaluation baseline
+- Nine-case deterministic Day 14 invariant evaluation baseline covering 36 declared invariants
 
 Not yet available:
 
@@ -179,7 +179,7 @@ After every completed step, the reviewer judges the accumulated evidence against
 
 ### Bounded researcher delegation (Day 12)
 
-The parent may select `delegate_research` for one depth-one fan-out wave containing exactly 2–3 tasks with unique branch IDs. Delegation concurrency defaults to `2`, is validated in the inclusive range `1–3`, and can be configured for `run` or `resume` with `--max-delegation-concurrency`.
+The parent may select `delegate_research` for a bounded depth-one fan-out wave containing exactly 2–3 tasks with unique branch IDs. Delegation concurrency defaults to `2`, is validated in the inclusive range `1–3`, and can be configured for `run` or `resume` with `--max-delegation-concurrency`.
 
 The parent workflow retains ownership of the original goal, per-step and total tool-call budgets, SQLite thread/checkpoint state, final citation validation, and final answer/artifact rendering. Each branch receives only its narrow task and a Day 11 hard-bounded projected context. Branch registries may contain only the read-only `web_search` and `web_fetch` tools: branches cannot write to the workspace, create artifacts, mutate parent state, or delegate again.
 
@@ -187,7 +187,7 @@ Before dispatch, the parent reserves the aggregate branch tool-call budgets plus
 
 The complete delegation record is persisted with the parent tool-node checkpoint. Resuming from SQLite reuses a completed record rather than dispatching those branches again. This is not an exactly-once guarantee for a crash during an external effect before that checkpoint is written.
 
-Delegation preserves the Day 09 evidence/citation and parent-only artifact boundaries and the Day 11 rule that compaction affects only LLM-facing projections, not durable state. The deterministic three-branch smoke with concurrency `2` passes, and the full suite reports **473 passed, 2 skipped**. This MVP makes no production-readiness claim: live model/network benchmarking, heterogeneous branch roles, nested or unbounded scheduling, and exactly-once external side effects remain out of scope.
+Delegation preserves the Day 09 evidence/citation and parent-only artifact boundaries and the Day 11 rule that compaction affects only LLM-facing projections, not durable state. Deterministic regression and final-acceptance coverage exercise concurrency `2`, partial failure, and checkpoint resume. This MVP makes no production-readiness claim: live model/network benchmarking, heterogeneous branch roles, nested or unbounded scheduling, and exactly-once external side effects remain out of scope.
 
 ### Bounded LLM context projections
 
@@ -398,6 +398,7 @@ uv run ruff format --check .
 - [Bounded agent loop (day 06)](docs/bounded-agent-loop-day-06.md)
 - [Day 13 threat model](docs/threat-model.md)
 - [Safety, observability, and deterministic evaluation (day 13)](docs/safety-observability-evaluation-day-13.md)
+- [MVP stabilization, deterministic demo, and DeerFlow-style comparison (day 14)](docs/mvp-stabilization-demo-comparison-day-14.md)
 
 ## Learning objective
 
@@ -409,13 +410,6 @@ plan → act → observe → review → re-plan → artifact
 
 DeerFlow is used only as a reference implementation and behavioral baseline.
 
-## Roadmap
+## Roadmap status
 
-The remaining roadmap progressively adds:
-
-1. Real web search/fetch provider composition and richer citations
-2. Re-planning and review
-3. Production checkpoint lifecycle management and storage
-4. Context management and source provenance
-5. A bounded research sub-agent
-6. Safety, tracing, and evaluation
+The bounded learning MVP now includes planning, real provider composition, evidence and citation validation, reviewer-driven replanning, bounded context projection, depth-one delegation, SQLite resume, safe tracing, and deterministic evaluations. Production hardening remains intentionally deferred; see the final table in the [Day 14 document](docs/mvp-stabilization-demo-comparison-day-14.md).
