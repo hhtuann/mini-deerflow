@@ -12,6 +12,10 @@
 > - Ngày 8 giữ nguyên hướng persistence; Ngày 9–14 phân bổ lại theo dependency order.
 > - Các mục chưa làm **không** bị đánh dấu hoàn thành; see "Cổng kiểm tra tiến độ" đã cập nhật.
 
+> **Cập nhật đóng roadmap ngày 15/09/2026, sau khi hoàn thành Ngày 14.**
+>
+> Trạng thái Ngày 08–14 dưới đây đã được đối chiếu với tài liệu kỹ thuật, báo cáo học tập, test và deterministic evaluation đã merge. Các khối kế hoạch gốc được giữ lại như lịch sử; ghi chú **Thực tế so với kế hoạch** mô tả kết quả cuối. Mini DeerFlow đã hoàn thành phạm vi **learning MVP**, nhưng không phải hệ thống production-ready và không tuyên bố tương đương tính năng với DeerFlow upstream. So sánh cuối khóa chỉ là đối chiếu các khái niệm theo phong cách kiến trúc DeerFlow.
+
 ## 1. Mục tiêu cuối khóa
 
 Sau 2 tuần, xây được một **Mini DeerFlow** bằng Python có thể:
@@ -26,7 +30,7 @@ Sau 2 tuần, xây được một **Mini DeerFlow** bằng Python có thể:
 8. Theo dõi được model call, tool call, token, thời gian và lỗi.
 9. Chạy qua CLI; nếu còn thời gian, có API FastAPI hoặc UI Streamlit tối giản.
 
-Đây là dự án **học kiến trúc qua việc tự xây một phiên bản nhỏ**. Repository DeerFlow đã cài ở Ngày 2 chỉ dùng để chạy baseline, trace implementation và đối chiếu hành vi. Code MVP nằm trong sibling repository riêng tại `D:\ViettelDigitalTalent\VAI\projects\mini-deerflow`.
+Đây là dự án **học kiến trúc qua việc tự xây một phiên bản nhỏ**. Repository DeerFlow đã cài ở Ngày 2 chỉ dùng để chạy baseline, trace implementation và đối chiếu hành vi. Code MVP nằm trong sibling repository riêng `projects/mini-deerflow`.
 
 ## 2. Phạm vi và tiêu chí thành công
 
@@ -71,8 +75,8 @@ flowchart LR
 
 - **Không tiếp tục tùy biến DeerFlow thành sản phẩm chính.** Hai patch ở Ngày 2 chỉ giúp reference system chạy đúng trên Windows và web fetch trả dữ liệu chính xác.
 - Hai repository có vòng đời Git độc lập:
-  - `D:\ViettelDigitalTalent\VAI\projects\deep-agent`: DeerFlow reference, remote `upstream`.
-  - `D:\ViettelDigitalTalent\VAI\projects\mini-deerflow`: sản phẩm MVP, branch `main` và GitHub repository riêng.
+  - `projects/deep-agent`: DeerFlow reference, remote `upstream`.
+  - `projects/mini-deerflow`: sản phẩm MVP, branch `main` và GitHub repository riêng.
 - Mỗi thành phần của Mini DeerFlow sẽ được code ở mức tối giản nhưng có schema, test và bằng chứng chạy được.
 - Chỉ quay lại đọc DeerFlow khi cần trả lời một câu hỏi kiến trúc cụ thể hoặc cần baseline để so sánh.
 - Definition of Done không giảm: vẫn phải có planning/re-planning, tool loop, workspace, checkpoint/resume, context management, error recovery, tracing/evaluation và ít nhất một sub-agent.
@@ -159,7 +163,7 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 **Đã làm:**
 
 - Chuẩn hóa Windows toolchain, Docker Desktop, Python 3.12, `uv` và `pnpm`.
-- Clone DeerFlow tại `D:\ViettelDigitalTalent\VAI\projects\deep-agent`, tạo nhánh `feature/deep-agent-mvp`.
+- Clone DeerFlow tại `projects/deep-agent`, tạo nhánh `feature/deep-agent-mvp`.
 - Cấu hình GLM-5.3, DuckDuckGo, Jina Reader và AIO container sandbox.
 - Khởi chạy DeerFlow tại `http://localhost:2026` và xác nhận HTTP 200.
 - Chạy smoke test end-to-end có planning, web tools, Bash sandbox, fallback và artifact.
@@ -251,7 +255,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** đạt — agent chạy end-to-end từ CLI với bằng chứng smoke thật; giới hạn (chưa multi-source web) được ghi rõ.
 
-### Ngày 8 — Checkpoint, thread và resume
+### Ngày 8 — Checkpoint, thread và resume — ĐÃ HOÀN THÀNH
+
+> **Thực tế so với kế hoạch:** runtime đã có SQLite checkpointer, định danh thread ổn định và CLI `run`/`resume`/`threads`. Test interruption/resume chứng minh các bước đã checkpoint hoàn tất không bị chạy lại. Đây là bảo đảm replay-safe trong phạm vi checkpoint của MVP, không phải cam kết exactly-once cho external side effects.
 
 **Mục tiêu:** run có thể bị gián đoạn và tiếp tục đúng chỗ dừng mà không thực thi lại các step đã hoàn tất.
 
@@ -274,7 +280,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** crash-resume test chạy xanh; resume không tăng tool-call counters của các step đã xong.
 
-### Ngày 9 — Real web providers, multi-source evidence và citation tracking
+### Ngày 9 — Real web providers, multi-source evidence và citation tracking — ĐÃ HOÀN THÀNH
+
+> **Thực tế so với kế hoạch:** runtime mặc định đã compose real Jina-backed search/fetch provider sau provider boundary, tạo evidence có logical provenance, chỉ chấp nhận citation là tập con của successful evidence và render artifact Markdown trong workspace. MVP không dùng timestamp hay content hash như bằng chứng về tính đúng của nội dung.
 
 **Mục tiêu:** agent nghiên cứu được từ nhiều nguồn web thật và truy ngược citation về bằng chứng.
 
@@ -299,7 +307,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** một run thật dùng ít nhất search + fetch, final answer chỉ cite URL có trong evidence records.
 
-### Ngày 10 — Reviewer/replanner và evidence-quality loop
+### Ngày 10 — Reviewer/replanner và evidence-quality loop — ĐÃ HOÀN THÀNH
+
+> **Thực tế so với kế hoạch:** reviewer trả typed verdict `continue | replan | finish`; replanner chỉ thay unfinished suffix, giữ completed work và bị chặn bởi budget độc lập. Đây là deterministic contract được kiểm thử, không phải live model-quality calibration.
 
 **Mục tiêu:** agent tự đánh giá tiến độ theo bằng chứng và quyết định tiếp tục, lập lại plan hoặc kết thúc.
 
@@ -320,7 +330,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** replan xảy ra đúng khi evidence thiếu và dừng sau khi đủ; không vòng lặp planner vô hạn.
 
-### Ngày 11 — Context management, token-aware truncation và long-run limits
+### Ngày 11 — Context management, token-aware truncation và long-run limits — ĐÃ HOÀN THÀNH (CHARACTER-BOUNDED)
+
+> **Thực tế so với kế hoạch:** raw state vẫn giữ evidence, citation, finding và provenance đầy đủ; action selector, reviewer và replanner nhận projection riêng được compact theo giới hạn ký tự xác định. Exact tokenizer và LLM-based summarization vẫn deferred, vì vậy không gọi kết quả này là token-exact.
 
 **Mục tiêu:** run dài không vượt context window và không đốt token vô ích.
 
@@ -341,7 +353,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** run dài (nhiều nguồn) hoàn thành mà không lỗi context length.
 
-### Ngày 12 — Bounded sub-agent và delegation
+### Ngày 12 — Bounded sub-agent và delegation — ĐÃ HOÀN THÀNH (BOUNDED DELEGATION)
+
+> **Thực tế so với kế hoạch:** delegation giới hạn depth-one, chỉ cấp web tools read-only cho researcher, reserve budget trước dispatch, giới hạn concurrency và fan-in theo thứ tự xác định. Partial branch failure được đưa thành limitation thay vì verified fact; chưa có live performance/cost benchmark.
 
 **Mục tiêu:** tách nhánh nghiên cứu độc lập cho sub-agent, lead agent tổng hợp.
 
@@ -362,7 +376,9 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** delegation bounded hoạt động; một nhánh fail vẫn ra report với ghi rõ nhánh thiếu.
 
-### Ngày 13 — Safety approvals, observability và evaluation
+### Ngày 13 — Safety approvals, observability và evaluation — ĐÃ HOÀN THÀNH (REALIGNED SAFETY/TRACE/EVAL)
+
+> **Thực tế so với kế hoạch:** public-target validation chặn các đích web không an toàn trong phạm vi MVP; trace đã redact, nằm ngoài `AgentState` và giải thích outcome theo `run_id`/`thread_id`. Baseline Ngày 13 đạt 8/8 cases và 26/26 invariants. HITL approval/clarification interrupt được ghi nhận là deferred thay vì tuyên bố đã hoàn thành.
 
 **Mục tiêu:** có approval boundary cho thao tác nhạy cảm, trace được toàn bộ run và bộ eval baseline.
 
@@ -384,13 +400,15 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 
 **Điều kiện hoàn thành:** mọi run ghi được trace theo `run_id`/`thread_id`; eval baseline có số liệu so sánh được.
 
-### Ngày 14 — End-to-end hardening, demo và tổng kết
+### Ngày 14 — End-to-end hardening, demo và tổng kết — ĐÃ HOÀN THÀNH (LEARNING MVP)
+
+> **Thực tế so với kế hoạch:** một offline deterministic acceptance trajectory duy nhất đã ghép real runtime composition với fake chỉ ở model/provider/researcher/resolver seams. Luồng chứng minh evidence, citation validation, reviewer-driven replan, bounded context, bounded delegation có partial failure, safe trace, deterministic artifact và SQLite interruption/resume không lặp completed work. Kết quả cuối là 509 passed, 2 skipped; deterministic evaluation đạt 9/9 cases và 36/36 invariants. Không tạo release/tag, UI hay API.
 
 **Mục tiêu:** đóng kỹ thuật còn lại ở mức MVP, demo ổn định và tổng kết khóa học.
 
 **Học:** hardest part của agent không phải happy path — failure, resume, và giới hạn hệ thống.
 
-**Làm:**
+**Kế hoạch lịch sử:**
 
 - Hardening các debt nhỏ còn lại nếu chưa xử lý ở Ngày 11: CLI formatting sạch cho API infrastructure errors; budget exhaustion cho phép complete-with-limitation thay vì cắt cụt.
 - Chạy 3 kịch bản demo: happy path, tool failure, resume after interruption.
@@ -399,18 +417,18 @@ Mỗi ngày chỉ kết thúc khi có một đầu ra chạy hoặc kiểm chứ
 - Ghi backlog 30 ngày tiếp theo; quay demo 5–10 phút nếu cần trình bày.
 - Tùy chọn (chỉ khi còn thời gian): FastAPI/Streamlit mỏng hiển thị plan/tool events — nếu không làm, ghi rõ deferred vào backlog.
 
-**Kiểm chứng:** ruff/mypy/pytest sạch; 3 kịch bản demo chạy được lặp lại; eval cuối so với baseline Ngày 13.
+**Kiểm chứng dự kiến trong kế hoạch lịch sử:** ruff/mypy/pytest sạch; 3 kịch bản demo chạy được lặp lại; eval cuối so với baseline Ngày 13.
 
 **Không làm trong ngày này:** không thêm capability mới ngoài hardening và demo.
 
-**Đầu ra:** release `v0.1.0`, báo cáo eval cuối, demo hoàn chỉnh, README đầy đủ với giới hạn và deferred work ghi rõ.
+**Đầu ra dự kiến trong kế hoạch lịch sử:** release `v0.1.0`, báo cáo eval cuối, demo hoàn chỉnh, README đầy đủ với giới hạn và deferred work ghi rõ. Thực tế không tạo release hoặc tag; đầu ra được chốt bằng acceptance test, eval baseline và tài liệu final-MVP.
 
 **Điều kiện hoàn thành:** Deep Agent MVP demo end-to-end ổn định — MVP hoàn thành, production hardening còn lại được liệt kê rõ là deferred.
 
 ## 7. Cấu trúc repository mục tiêu
 
 ```text
-D:\ViettelDigitalTalent\VAI\projects\
+projects/
 ├── deep-agent\       # DeerFlow reference implementation
 └── mini-deerflow\    # Deep Agent MVP tự xây
 ```
@@ -460,20 +478,36 @@ mini-deerflow/
 | Hết ngày 8 | Resume được run dang dở sau gián đoạn bằng `thread_id`, không chạy lại step đã xong |
 | Hết ngày 9 | Báo cáo nhiều nguồn có citation truy ngược được về evidence records |
 | Hết ngày 10 | Reviewer/replanner hoạt động theo structured verdict, re-plan có giới hạn |
+| Hết ngày 11 | Raw state giữ provenance đầy đủ; projection gửi LLM được compact theo hard character budget |
 | Hết ngày 12 | Delegation tối giản qua sub-agent bounded, xử lý partial failure |
-| Hết ngày 13 | Có trace theo `run_id`/`thread_id`, eval baseline định lượng và approval boundary tối giản |
-| Hết ngày 14 | Deep Agent MVP demo end-to-end ổn định, test xanh, README và deferred work ghi rõ |
+| Hết ngày 13 | Public-target safety và redacted trace ngoài `AgentState`; deterministic eval đạt 8/8 cases, 26/26 invariants |
+| Hết ngày 14 | Acceptance trajectory tích hợp evidence → review/replan → context → delegation → trace/artifact → SQLite resume; 509 passed, 2 skipped và eval 9/9 cases, 36/36 invariants |
 
-Phân biệt bắt buộc khi chốt ngày 14: **MVP phải hoàn thành** là everything trong các mốc trên; **hardening/production work còn lại** (multi-tenant, deployment bền vững, container sandbox cho shell, UI đầy đủ, context compaction tốt hơn) thuộc backlog sau 2 tuần.
+Trạng thái chốt Ngày 14: **learning MVP đã hoàn thành** các mốc planning, bounded tools, SQLite resume, web evidence/citation, reviewer/replanner, character-bounded context, bounded delegation, safety/trace/eval và final acceptance. **Production work vẫn deferred**; kết quả này không chứng minh production readiness hoặc upstream DeerFlow feature parity.
 
 Nếu trễ tiến độ, ưu tiên theo thứ tự: **correct agent loop → tools → workspace → checkpoint → evaluation → sub-agent → UI**. Không hy sinh tests và safety để làm giao diện đẹp.
 
 ## 10. Backlog sau 2 tuần
 
+### Ranh giới deferred production đã chốt
+
+- Production egress control; DNS pinning/rebinding và redirect defense độc lập với remote reader.
+- Authentication, authorization và multi-tenancy.
+- Deployment, production database, lifecycle/queue/streaming bền vững.
+- UI và API phục vụ người dùng.
+- Browser automation; container/process sandbox cho code hoặc shell execution.
+- Exact tokenizer và model-specific token/cost accounting.
+- Live model-quality, latency và cost benchmarks.
+- Exactly-once semantics cho external side effects.
+
+Các mục trên không nằm trong tuyên bố hoàn thành MVP. So sánh với DeerFlow chỉ nhằm học các concept lead agent, middleware, persistence, context, delegation, tracing và sandbox boundary; không phải tuyên bố feature parity.
+
+### Hướng mở rộng chức năng
+
 - Long-term user memory có scope và confidence.
 - Skills dạng thư mục/Markdown và dynamic loading.
 - MCP tool integration.
-- Docker sandbox thật sự cho code execution.
+- Container/process sandbox thật sự cho code execution.
 - Human-in-the-loop approval và clarification interrupt.
 - Context compaction tốt hơn.
 - Upload và xử lý PDF/Office.
