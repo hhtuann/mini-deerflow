@@ -1,8 +1,9 @@
-"""Run the deterministic Day 13 invariant suite without external services."""
+"""Run the deterministic final-MVP invariant suite without external services."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -32,6 +33,14 @@ def _run_case(repo_root: Path, case: dict[str, object]) -> dict[str, object]:
     ):
         raise ValueError("each evaluation case needs id, test, and invariants")
 
+    case_temp_root = (
+        repo_root
+        / ".mini-deerflow"
+        / "eval-tmp"
+        / hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:16]
+    )
+    case_temp_root.parent.mkdir(parents=True, exist_ok=True)
+
     completed = subprocess.run(
         [
             sys.executable,
@@ -40,6 +49,9 @@ def _run_case(repo_root: Path, case: dict[str, object]) -> dict[str, object]:
             node_id,
             "-q",
             "--tb=no",
+            "-p",
+            "no:cacheprovider",
+            f"--basetemp={case_temp_root}",
         ],
         cwd=repo_root,
         check=False,

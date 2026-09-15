@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
-  "suite": "mini-deerflow-day-13-deterministic-contracts",
+  "suite": "mini-deerflow-day-14-final-mvp-contracts",
   "limitations": [
-    "Uses deterministic fakes only at planner, selector, reviewer, replanner, provider, and researcher boundaries.",
+    "The final acceptance case uses deterministic fakes only at model, provider, researcher, and resolver seams; earlier focused contract cases retain their documented injected component boundaries.",
+    "No case calls a real model, Jina, network, DNS, or .env file.",
     "Measures invariant compliance, not factual-answer quality, benchmark superiority, model calibration, live latency, or live cost."
   ],
   "cases": [
@@ -78,6 +79,22 @@
         "completed step one is not selected again",
         "the resumed run has a new run identity under the same thread",
         "resume is traced and planner execution is absent from the resumed trajectory"
+      ]
+    },
+    {
+      "id": "final_mvp_acceptance",
+      "test": "tests/test_final_acceptance.py::test_final_mvp_acceptance_survives_interruption_and_resume",
+      "invariants": [
+        "the real default runtime composition completes through SQLite interruption and resume",
+        "safe web evidence is collected while an unsafe target is denied before provider transport",
+        "accepted citations remain a subset of successful evidence and unsupported citations are rejected",
+        "the reviewer drives one bounded replan before a later finish",
+        "raw evidence and provenance remain complete while every LLM projection stays bounded",
+        "a controlled delegation failure remains a limitation while successful sibling evidence survives",
+        "resume does not repeat completed provider, delegation, planner, or replanner work",
+        "redacted trace outcomes explain both run identities without entering AgentState",
+        "the parent renders exactly one deterministic artifact",
+        "unsafe URLs, invented citations, secrets, raw payload canaries, and machine paths do not leak to traces or rendered output"
       ]
     }
   ]

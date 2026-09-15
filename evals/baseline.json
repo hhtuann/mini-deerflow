@@ -1,16 +1,17 @@
 {
   "limitations": [
-    "Uses deterministic fakes only at planner, selector, reviewer, replanner, provider, and researcher boundaries.",
+    "The final acceptance case uses deterministic fakes only at model, provider, researcher, and resolver seams; earlier focused contract cases retain their documented injected component boundaries.",
+    "No case calls a real model, Jina, network, DNS, or .env file.",
     "Measures invariant compliance, not factual-answer quality, benchmark superiority, model calibration, live latency, or live cost."
   ],
   "metrics": {
     "case_pass_rate": 1.0,
     "cases_failed": 0,
-    "cases_passed": 8,
-    "cases_total": 8,
+    "cases_passed": 9,
+    "cases_total": 9,
     "invariant_pass_rate": 1.0,
-    "invariants_passed": 26,
-    "invariants_total": 26
+    "invariants_passed": 36,
+    "invariants_total": 36
   },
   "results": [
     {
@@ -68,8 +69,15 @@
       "invariants": 4,
       "passed": true,
       "passed_invariants": 4
+    },
+    {
+      "failure_code": null,
+      "id": "final_mvp_acceptance",
+      "invariants": 10,
+      "passed": true,
+      "passed_invariants": 10
     }
   ],
   "schema_version": 1,
-  "suite": "mini-deerflow-day-13-deterministic-contracts"
+  "suite": "mini-deerflow-day-14-final-mvp-contracts"
 }
