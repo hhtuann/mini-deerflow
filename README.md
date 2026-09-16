@@ -229,7 +229,7 @@ composition; there is no CLI flag for it yet. The reported token figure is
 only a conservative `characters / 4` estimate, not exact GLM token accounting.
 
 The deterministic hard-bound/context-pressure smoke passes, and the current
-test suite result is **473 passed, 2 skipped**. This does not establish
+test suite result is **509 passed, 2 skipped**. This does not establish
 production readiness. Exact tokenizer integration, LLM summarization of old
 context, and real-model context-pressure behavior remain untested or
 unimplemented.
