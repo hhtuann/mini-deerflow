@@ -1,150 +1,244 @@
 # Mini DeerFlow
 
-A minimal deep research agent built with Python, LangGraph, and OpenAI-compatible language models.
+> A bounded research-agent learning MVP, independently implemented to explore DeerFlow-style concepts: planning, typed tool execution, evidence, review and replanning, delegation, checkpoint/resume, safety, tracing, and deterministic evaluation.
 
-This project is inspired by the architecture of [ByteDance DeerFlow](https://github.com/bytedance/deer-flow), but it is an independent implementation and does not depend on DeerFlow source code.
+Mini DeerFlow is a local Python project with two entry points:
 
-## Project status
+- a live-capable CLI composed with an OpenAI-compatible model and Jina web provider;
+- a deterministic offline Streamlit mentor demo that needs no API key or network.
 
-The 14-day learning MVP is complete, and Day 15 adds a localhost-only deterministic Streamlit mentor demo. It remains a **bounded tool-using research agent prototype**, not a production-ready system. See [Day 14 MVP stabilization, demo, and comparison](docs/mvp-stabilization-demo-comparison-day-14.md) and the [Day 15 local Streamlit demo](docs/streamlit-local-demo-day-15.md).
+It is a completed learning MVP—not a production platform, DeerFlow clone, or upstream-compatible implementation.
 
-Mini DeerFlow plans a research goal into a strict multi-step schema, selects one structured action at a time, executes allowlisted workspace tools under explicit budgets, and synthesizes a final answer from the recorded evidence.
+## Project Status
 
-Implemented:
+| Area | Status |
+| --- | --- |
+| Core research-agent runtime | Complete |
+| Planning and typed action loop | Complete |
+| Evidence and citation membership | Complete |
+| Review and bounded replanning | Complete |
+| Depth-one bounded delegation | Complete |
+| SQLite checkpoint and resume | Complete |
+| Tool, workspace, and fetch safety boundaries | Complete |
+| Redacted execution tracing | Complete |
+| Deterministic Streamlit mentor demo | Complete |
+| Production deployment | Deferred |
+| Upstream DeerFlow parity | Not claimed |
 
-- Environment-based validated configuration (Pydantic Settings) and an OpenAI-compatible model factory
-- Strict structured `Plan` schema (unknown fields rejected, consecutive step numbers enforced)
-- Planner using GLM-compatible `json_mode` structured output
-- Bounded planner structured-output attempts
-- LangGraph stateful agent workflow
-- LLM structured action selection with `ToolCallAction` and `CompleteStepAction`
-- Per-step and total-run tool-call budgets
-- LangGraph recursion limit
-- `ToolRegistry` allowlist
-- `ToolRunner` input validation, timeout, and structured failure results
-- Workspace boundary enforcement
-- `list_files` and `read_file` in the default read-only runtime
-- Jina Search and Reader providers behind an injectable, size-bounded HTTP boundary
-- Multi-source evidence records with canonical URL deduplication and provenance
-- Citation validation against successful web tool observations
-- `write_file` only when `--allow-write` is enabled
-- Markdown research artifact generation when `--allow-write` is enabled
-- Completed-step summaries for cross-step continuity
-- Strict HTTP/HTTPS source contract for step completions
-- Bounded action-format retry with a static corrective message
-- Local SQLite checkpoints with stable thread identifiers
-- Persistent thread listing and resume support
-- Evidence-quality reviewer returning a structured `continue | replan | finish` verdict
-- Bounded replanner that replaces only the remaining plan steps and preserves completed work
-- Independent replan-cycle budget, distinct from the tool-call and recursion budgets
-- Review verdicts, findings, and replan history persisted in checkpoints
-- Final report includes review conclusions, evidence gaps, and limitations
-- Deterministic hard-bounded context projections for the action selector, reviewer, and replanner
-- Depth-one bounded researcher delegation with parent-budget admission and deterministic fan-in
-- Typed public HTTP(S) target validation before every `web_fetch` provider call
-- Redacted structured execution traces with opt-in CLI JSON Lines output
-- Nine-case deterministic Day 14 invariant evaluation baseline covering 36 declared invariants
-
-Not yet available:
-
-- Streaming progress
-- Human-in-the-loop review
-- Heterogeneous researcher roles and nested or unbounded delegation
-- Exact tokenizer-aware context accounting
-- LLM summarization of older context
-- Production DNS pinning, rebinding protection, and direct redirect-hop enforcement
-- Production-grade API error presentation
-
-### Capability distinction
-
-The default CLI runtime composes the read-only `list_files`, `read_file`, `web_search`, `web_fetch`, and parent-only `delegate_research` tools. Web access uses Jina Search/Reader through an injectable HTTP client. Jina Search requires `MINI_DEERFLOW_JINA_API_KEY`; Reader can use Jina's anonymous quota. `write_file` is added only with `--allow-write`, which also writes the deterministic final report to `reports/research-report.md` through the workspace boundary.
-
-## Current architecture
+## What It Does
 
 ```text
-CLI (plan | run | resume | threads)
- └── Settings → model factory (OpenAI-compatible)
-      └── Planner (json_mode structured output → validated Plan)
-           └── Runtime composition
-                ├── ToolRegistry allowlist + ToolRunner
-                ├── Workspace boundary + file tools
-                ├── Jina provider + web search/fetch tools
-                ├── Depth-one bounded researcher delegation (web-only branches)
-                ├── LLMActionSelector (structured action selection)
-                ├── LLMReviewer + replanner (evidence-quality loop)
-                ├── ContextBudget (bounded LLM-facing projections)
-                └── RuntimeLimits (step/total/replan budgets, recursion and delegation limits)
-                     └── LangGraph bounded agent workflow
-                          ├── SQLite checkpoint per stable thread ID
-                          ├── decide_action (select one action)
-                          ├── execute_tool (observation + evidence extraction)
-                          ├── complete_step (validate citations against evidence)
-                          ├── review (continue | replan | finish verdict)
-                          ├── replan (replace only remaining steps)
-                          └── synthesize → Markdown answer/artifact
+Goal
+  ↓
+Structured Plan
+  ↓
+Typed Action
+  ↓
+Allowlisted Tool
+  ↓
+Observation
+  ↓
+Evidence
+  ↓
+Citation Membership Check
+  ↓
+Review ──→ Continue / Replan / Finish
+  ↓
+Optional Delegation and Fan-in
+  ↓
+Deterministic Synthesis
+  ↓
+Markdown Artifact
 ```
 
-## Requirements
+1. The planner creates a validated plan with 3–7 consecutively numbered steps.
+2. The action selector emits either a typed tool call or a step-completion action.
+3. The runtime validates the selected tool, arguments, timeout, and remaining budgets.
+4. Successful web observations can become bounded `EvidenceRecord` values with provenance.
+5. Proposed citations are canonicalized and checked against successful evidence.
+6. The reviewer chooses `continue`, `replan`, or `finish`; replan replaces only unfinished work.
+7. The parent may run a bounded, depth-one research wave and deterministically fan results in.
+8. Synthesis produces deterministic Markdown and can optionally write it through the workspace boundary.
+
+### Evidence is not a raw provider result
+
+Evidence is a structured, bounded record extracted from a successful `web_search` or `web_fetch` observation. It retains source-tool, step, call, and optional delegation provenance.
+
+### Citation validation is not fact checking
+
+Citation validation establishes one narrow property: the proposed citation's canonical URL is a member of successful evidence. It does not prove factual correctness, semantic entailment, or absolute source quality.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Presentation
+        CLI[CLI]
+        UI[Streamlit demo]
+    end
+    subgraph Application
+        Jobs[Single-worker job manager]
+        Service[DemoRuntimeService]
+        Offline[OfflineDemoBackend]
+        Runtime[AgentRuntime]
+    end
+    subgraph Workflow
+        Graph[Compiled LangGraph]
+        State[AgentState and reducers]
+        Components[Planner, decision, tools, review, replan, delegation, synthesis]
+    end
+    subgraph Infrastructure
+        DB[(SQLite checkpoints)]
+        Workspace[Confined workspace]
+        Providers[Model and web provider seams]
+    end
+    subgraph CrossCutting[Cross-cutting boundaries]
+        Context[Context budget]
+        Evidence[Evidence and citations]
+        Safety[URL, tool, and path safety]
+        Trace[Redacted typed trace]
+    end
+
+    CLI --> Runtime
+    UI --> Jobs --> Service --> Offline --> Runtime
+    Runtime --> Graph <--> State
+    Graph --> Components
+    Runtime --> DB
+    Components --> Workspace
+    Components -. live CLI .-> Providers
+    Graph --> CrossCutting
+```
+
+The canonical runtime graph is [`src/mini_deerflow/agent_workflow.py`](src/mini_deerflow/agent_workflow.py). [`src/mini_deerflow/workflow.py`](src/mini_deerflow/workflow.py) is a smaller scaffold used by focused workflow tests; it is not the final runtime graph.
+
+Dependency injection is explicit through constructors and factories. There is no REST API or service container in the current project.
+
+## Core Workflow
+
+```mermaid
+flowchart TD
+    Start([START]) --> Planner[planner]
+    Planner --> Decide[decide_action]
+    Decide -->|ToolCallAction| Tool[execute_tool]
+    Tool --> Decide
+    Decide -->|CompleteStepAction| Complete[complete_step]
+    Complete --> Review[review]
+    Review -->|continue| Decide
+    Review -->|replan| Replan[replan]
+    Replan --> Decide
+    Review -->|finish| Synthesize[synthesize]
+    Decide -->|budget exhausted| Exhausted[budget_exhausted]
+    Exhausted --> Synthesize
+    Synthesize --> End([END])
+```
+
+`AgentState` is a checkpointed `TypedDict` with mutable container semantics. Graph nodes return partial updates, and reducers merge messages, lists, evidence, and citation sources. It is not an immutable state object.
+
+## Key Features
+
+| Area | Implemented capability | Boundary |
+| --- | --- | --- |
+| Agent execution | Structured planning, typed actions, controlled termination | Per-step, total-call, replan, and recursion limits |
+| Tools | Exact-name registry and validated input models | No arbitrary tool execution |
+| Evidence | Structured records, canonical URLs, provenance | Only successful schema-shaped web observations qualify |
+| Citations | Membership validation and invented-URL rejection | Does not prove truth or entailment |
+| Adaptation | Review and bounded replanning | Completed steps and durable evidence are preserved |
+| Delegation | 2–3 branches, depth one, budget 1–5 per branch | Web-only branches; no nested delegation or writes |
+| Fan-in | Stable branch ordering and citation revalidation | Failed-branch findings are not promoted |
+| Persistence | SQLite checkpoint and thread-based resume | No exactly-once guarantee for external effects |
+| Context | Deterministic LLM-facing projections | Character budget; token count is only `ceil(chars / 4)` |
+| Safety | Tool, workspace, fetch-target, and rendering boundaries | Application-level controls, not a production sandbox |
+| Observability | Typed ordered trace and safe projections | No raw payload or production telemetry backend |
+| Artifact | Deterministic Markdown and optional confined write | No production artifact serving |
+
+## Deterministic Mentor Demo
+
+The default Streamlit experience is **offline**, **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.
+
+External decision/data seams are replaced with scripted model, provider, resolver, and researcher behavior; trace identity/time is also deterministic. The offline backend constructs settings with `_env_file=None`, needs no model credentials, and does not fall back to a live provider.
+
+```mermaid
+flowchart LR
+    Unsafe[Unsafe fetch denied] --> Failure[Provider failure redacted]
+    Failure --> Evidence[Successful evidence]
+    Evidence --> Citation[Invented citation rejected]
+    Citation --> Replan[Reviewer requests replan]
+    Replan --> Wave[Delegation wave]
+    Wave --> A[Branch A succeeds]
+    Wave --> B[Branch B fails safely]
+    A --> FanIn[Deterministic fan-in]
+    B --> FanIn
+    FanIn --> Artifact[Markdown artifact]
+    Artifact --> Resume[Resume completed thread]
+    Resume --> NoReplay[No completed provider or delegation replay]
+```
+
+This scenario demonstrates contracts and failure handling. It is not a benchmark of live research quality.
+
+## Streamlit UI
+
+| Tab | Purpose |
+| --- | --- |
+| Overview | Goal, plan, current step, budgets, and limitations |
+| Evidence & Citations | Bounded evidence, provenance, accepted citations, and rejected count |
+| Delegation | Wave/branch status, budget accounting, and fan-in limitations |
+| Trace | Filtered, ordered, safe execution timeline |
+| Artifact | Structured preview, exact Markdown source, and download |
+
+```text
+Runtime state and trace
+        ↓
+Explicit projector
+        ↓
+Frozen, allowlisted view models
+        ↓
+Streamlit renderer
+```
+
+The UI does not directly receive raw messages, prompts, model responses, provider exception bodies, arbitrary tool arguments, checkpoints, SQLite internals, credentials, `.env` content, machine paths, rejected URLs, or raw trace payloads. This is a tested local-demo boundary, not a production frontend security claim.
+
+## Requirements and Setup
 
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
-- An OpenAI-compatible model endpoint
-
-The development configuration currently uses GLM-5.3 through the Z.AI OpenAI-compatible API.
-
-## Setup
-
-Clone the repository:
+- API credentials only for live CLI commands; the offline demo needs none
 
 ```bash
 git clone https://github.com/hhtuann/mini-deerflow.git
 cd mini-deerflow
-```
-
-Install dependencies:
-
-```bash
 uv sync
 ```
 
-Create the local environment file:
+For the live-capable CLI, copy the checked-in example and provide credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows PowerShell:
+PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Open `.env` and provide your API key:
+Minimum live-model configuration:
 
 ```dotenv
 MINI_DEERFLOW_API_KEY=replace-with-your-api-key
-MINI_DEERFLOW_JINA_API_KEY=replace-with-your-jina-api-key
 ```
 
-Never commit `.env`.
+The live CLI also supports model endpoint/name, request/retry settings, and an optional `MINI_DEERFLOW_JINA_API_KEY`. See [`.env.example`](.env.example). Never commit `.env`.
 
-## Usage
+## Run the Streamlit Demo
 
-The CLI exposes four commands:
-
-```text
-mini-deerflow plan
-mini-deerflow run
-mini-deerflow resume
-mini-deerflow threads
+```bash
+uv run streamlit run src/mini_deerflow/demo/app.py \
+  --server.address 127.0.0.1 \
+  --server.headless true \
+  --browser.gatherUsageStats false
 ```
 
-### Launch the deterministic mentor demo
-
-The Day 15 Streamlit demo runs fully offline with deterministic injected model,
-provider, resolver, and researcher seams. The offline backend does not read
-`.env` or use model/provider secrets already present in the process environment;
-it requires no API key and makes no model, DNS, or web-service call.
+PowerShell:
 
 ```powershell
 uv run streamlit run src/mini_deerflow/demo/app.py `
@@ -153,290 +247,218 @@ uv run streamlit run src/mini_deerflow/demo/app.py `
   --browser.gatherUsageStats false
 ```
 
-The repository also sets `browser.gatherUsageStats = false` in
-`.streamlit/config.toml`; the explicit flag makes the telemetry-safe demo launch
-self-documenting.
+The bind address is a launch configuration; the app does not enforce localhost by itself. The repository also disables Streamlit usage-stat gathering in `.streamlit/config.toml`.
 
-Use the sidebar to create a thread, run the mentor scenario, inspect the five
-safe views, then Resume the completed thread to demonstrate checkpoint reuse
-without replaying provider or delegation work, including after restarting the
-Streamlit process against the same local demo data. The UI exposes no
-credential, tool, path, database, write-capability, or cancellation controls.
-Full usage, security boundaries, and the 5–7 minute walkthrough are in the
-[Day 15 demo guide](docs/streamlit-local-demo-day-15.md).
+## CLI
 
-### Create a validated research plan
+Verified commands:
 
 ```bash
-uv run mini-deerflow plan "Compare LangGraph and CrewAI for a research agent."
+uv run mini-deerflow --help
+uv run mini-deerflow plan --help
+uv run mini-deerflow run --help
+uv run mini-deerflow resume --help
+uv run mini-deerflow threads --help
 ```
-
-`plan` only builds and validates a `Plan`; it does not execute tools.
-
-On Windows PowerShell:
-
-```powershell
-uv run mini-deerflow plan "Compare LangGraph and CrewAI for a research agent."
-```
-
-### Run the bounded research agent
 
 ```bash
+# Create a validated plan.
+uv run mini-deerflow plan "Compare two agent orchestration approaches."
+
+# Run a new persisted thread.
 uv run mini-deerflow run \
-  "Inspect the local workspace and summarize verified evidence." \
-  --thread-id "workspace-audit-001" \
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" \
-  --workspace ".mini-deerflow/workspace"
+  "Inspect the workspace and summarize verified evidence." \
+  --thread-id research-001
+
+# Resume without supplying a new goal.
+uv run mini-deerflow resume --thread-id research-001
+
+# List persisted thread IDs.
+uv run mini-deerflow threads
 ```
 
-On Windows PowerShell:
+`run` and `resume` also expose checkpoint/workspace paths, write opt-in, execution limits, delegation concurrency, and `--trace-json`. Use `uv run mini-deerflow <command> --help` for the verified option list. `write_file` is not model-selectable; when `--allow-write` is enabled, synthesis writes the fixed report artifact through the workspace boundary.
 
-```powershell
-uv run mini-deerflow run `
-  "Inspect the local workspace and summarize verified evidence." `
-  --thread-id "workspace-audit-001" `
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" `
-  --workspace ".mini-deerflow/workspace"
-```
+## Persistence and Resume
 
-`run` creates a new persisted thread and executes the full bounded agent: planning, tool selection, tool execution, evidence extraction, citation validation, step completion, evidence-quality review, bounded replanning, and final synthesis. The default tool registry is **read-only**; `--allow-write` remains an explicit opt-in that adds the `write_file` tool and writes `reports/research-report.md`.
+### Run
 
-After every completed step, the reviewer judges the accumulated evidence against the goal and returns one structured verdict: `continue` (keep the current plan), `replan` (replace only the remaining steps with better-targeted work), or `finish` (the evidence is sufficient, or the remaining budgets make further collection useless). The replanner never discards completed steps or validated evidence, and deterministic runtime guards force `finish` when the replan-cycle budget, the tool-call budget, or the seven-step plan limit leaves no useful work.
+`run` creates a new initial state for a validated thread ID. It rejects the request if that thread already has a checkpoint in the selected SQLite database.
 
-### Bounded researcher delegation (Day 12)
+### Resume
 
-The parent may select `delegate_research` for a bounded depth-one fan-out wave containing exactly 2–3 tasks with unique branch IDs. Delegation concurrency defaults to `2`, is validated in the inclusive range `1–3`, and can be configured for `run` or `resume` with `--max-delegation-concurrency`.
+`resume` restores the checkpointed LangGraph state without replacing the goal. Tests verify that completed work, including completed delegation, is not replayed on the exercised resume path. Resume is not retry semantics.
 
-The parent workflow retains ownership of the original goal, per-step and total tool-call budgets, SQLite thread/checkpoint state, final citation validation, and final answer/artifact rendering. Each branch receives only its narrow task and a Day 11 hard-bounded projected context. Branch registries may contain only the read-only `web_search` and `web_fetch` tools: branches cannot write to the workspace, create artifacts, mutate parent state, or delegate again.
+### External-effect limitation
 
-Before dispatch, the parent reserves the aggregate branch tool-call budgets plus the parent delegation call against both remaining tool-call limits. Fan-in sorts results by branch ID, canonical-deduplicates successful evidence, and revalidates citations against that merged evidence. A controlled failure, invalid result, or timeout cancellation becomes a bounded limitation; evidence and findings from successful sibling branches remain available.
-
-The complete delegation record is persisted with the parent tool-node checkpoint. Resuming from SQLite reuses a completed record rather than dispatching those branches again. This is not an exactly-once guarantee for a crash during an external effect before that checkpoint is written.
-
-Delegation preserves the Day 09 evidence/citation and parent-only artifact boundaries and the Day 11 rule that compaction affects only LLM-facing projections, not durable state. Deterministic regression and final-acceptance coverage exercise concurrency `2`, partial failure, and checkpoint resume. This MVP makes no production-readiness claim: live model/network benchmarking, heterogeneous branch roles, nested or unbounded scheduling, and exactly-once external side effects remain out of scope.
-
-### Bounded LLM context projections
-
-Mini DeerFlow separates complete checkpointed state from the context sent to
-LLM-facing seams. Raw evidence, validated citations, findings, completed-step
-summaries, review history, and replan history remain intact for audit, SQLite
-resume, and deterministic artifact rendering. Before each action-selector,
-reviewer, or replanner call, the runtime derives a separate, deterministic
-projection and compacts only that projection; it does not truncate the durable
-state.
-
-`ContextBudget` has four character-based limits:
-
-| Limit | Default | Meaning |
-| --- | ---: | --- |
-| `max_total_chars` | `60000` | Hard ceiling on the exact serialized LLM-facing payload. |
-| `max_item_chars` | `4000` | Per-item text limit during projection. |
-| `retained_recent_items` | `30` | Number of recent evidence records and observations retained before total-size pressure. |
-| `max_excerpt_chars` | `1500` | Per-evidence-excerpt limit in projected context. |
-
-Compaction is deterministic and priority-based. Current-step identity,
-remaining budgets, required tool identity, recent material, and relevant
-finding/replan identity are preserved first. Older lower-priority evidence,
-observations, summaries, findings, limitations, verbose tool schemas, and
-replaced-step detail are compacted or omitted as pressure increases. Shortened
-or replaced text carries explicit markers, while projection metadata records
-truncation and omission counts.
-
-Projection preserves provenance: compacted context cannot create a citation or
-promote arbitrary text into evidence, and citation validation still accepts
-only URLs backed by successful evidence. If mandatory context still cannot fit
-after all deterministic compaction tiers, the runtime raises
-`ContextBudgetExceededError` instead of sending an oversized prompt.
-
-This context budget is independent of per-step and total tool-call limits, the
-replan-cycle limit, and the LangGraph recursion limit. A custom
-`ContextBudget` can currently be injected programmatically through runtime
-composition; there is no CLI flag for it yet. The reported token figure is
-only a conservative `characters / 4` estimate, not exact GLM token accounting.
-
-The deterministic hard-bound/context-pressure smoke passes, and the current
-test suite result is **526 passed, 2 skipped**. This does not establish
-production readiness. Exact tokenizer integration, LLM summarization of old
-context, and real-model context-pressure behavior remain untested or
-unimplemented.
-
-Runtime options for `run` and `resume`:
-
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--thread-id` | required | Stable identifier for one thread in the selected checkpoint database. |
-| `--checkpoint-db` | `.mini-deerflow/checkpoints.sqlite` | Local SQLite database used for persisted checkpoints. |
-| `--workspace` | `.mini-deerflow/workspace` | Workspace directory available to file tools. Created if missing. |
-| `--allow-write` | off | Opt in to the `write_file` tool. |
-| `--max-tool-calls-per-step` | 5 | Maximum tool calls allowed in one plan step. |
-| `--max-total-tool-calls` | 20 | Maximum tool calls allowed in the entire run. |
-| `--max-replan-cycles` | 2 | Maximum evidence-review replan cycles per run. Independent of the tool-call budget. |
-| `--max-delegation-concurrency` | 2 | Maximum concurrent researcher branches; validated from 1 through 3. |
-| `--recursion-limit` | 100 | Maximum LangGraph execution steps. |
-
-### Resume a persisted thread
-
-```bash
-uv run mini-deerflow resume \
-  --thread-id "workspace-audit-001" \
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" \
-  --workspace ".mini-deerflow/workspace"
-```
-
-On Windows PowerShell:
-
-```powershell
-uv run mini-deerflow resume `
-  --thread-id "workspace-audit-001" `
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" `
-  --workspace ".mini-deerflow/workspace"
-```
-
-`resume` does not accept a goal. It loads the goal and workflow state from the selected thread's checkpoint, then continues an interrupted thread or reads the final result of a completed thread.
-
-### List persisted threads
-
-```bash
-uv run mini-deerflow threads \
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite"
-```
-
-On Windows PowerShell:
-
-```powershell
-uv run mini-deerflow threads `
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite"
-```
-
-Example output:
-
-```json
-{
-  "threads": [
-    "research-001",
-    "workspace-audit-001"
-  ],
-  "count": 2
-}
-```
-
-### Thread lifecycle and identity
-
-- `run` creates a new thread; it rejects a duplicate `thread_id` already present in the selected checkpoint database.
-- `threads` lists the persisted thread identifiers in that database.
-- `resume` continues an interrupted thread or reads the saved result of a completed thread.
-- A thread identity belongs to one checkpoint database. The same `thread_id` in another database is a separate namespace.
-- The default tool registry stays read-only. Use `--allow-write` only when the `write_file` tool is intentionally required.
-
-### Migration from the Day 07 runtime
-
-Requiring a stable thread identity is a breaking CLI and runtime contract change:
+Checkpoint reuse is not an exactly-once guarantee:
 
 ```text
-Before: mini-deerflow run "<goal>"
-Now:    mini-deerflow run "<goal>" --thread-id "<stable-id>"
+external effect succeeds
+        ↓
+process crashes before checkpoint persistence
+        ↓
+resume may repeat the effect
 ```
 
-The Python runtime changed from `AgentRuntime.run(goal)` to `AgentRuntime.run(goal, *, thread_id=...)`; callers must now supply `thread_id` explicitly.
+Fresh-backend resume is tested in-process. A separate OS-process restart has not been directly verified by the current suite.
 
-### Example with custom limits
+## Safety Boundaries
 
-```bash
-uv run mini-deerflow run \
-  "Inspect the local workspace and summarize verified evidence." \
-  --thread-id "bounded-audit-001" \
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" \
-  --workspace ".mini-deerflow/workspace" \
-  --max-tool-calls-per-step 2 \
-  --max-total-tool-calls 6 \
-  --recursion-limit 60
-```
+### Tool boundary
 
-On Windows PowerShell:
+Tool input/result models reject unknown fields, the registry is an exact-name allowlist, the runner applies timeouts, and failures are normalized. These are validated closed schemas, not arbitrary execution.
 
-```powershell
-uv run mini-deerflow run `
-  "Inspect the local workspace and summarize verified evidence." `
-  --thread-id "bounded-audit-001" `
-  --checkpoint-db ".mini-deerflow/checkpoints.sqlite" `
-  --workspace ".mini-deerflow/workspace" `
-  --max-tool-calls-per-step 2 `
-  --max-total-tool-calls 6 `
-  --recursion-limit 60
-```
+### Workspace boundary
 
-### Output and exit codes
+The workspace rejects absolute paths, traversal, symlink/junction escapes, and oversized reads/writes. This confines project file tools; it is not an OS sandbox or production artifact service.
 
-- `plan` prints the validated Plan JSON to stdout.
-- `run` prints the final research answer to stdout.
-- `resume` prints the resumed or previously completed research answer to stdout.
-- `threads` prints sorted thread identifiers and their count as JSON.
-- `run` and `resume` accept `--trace-json` to emit redacted JSON Lines to stderr; no trace file is written by default.
-- Domain and validation errors use controlled stderr messages and the process exits with code 1.
-- Argument parsing errors print argparse usage to stderr and exit with code 2.
+### Web boundary
 
-### Persistence limitations
+`web_fetch` accepts HTTP(S), rejects userinfo and local/non-public targets, requires resolved addresses to be public, and validates provider-declared redirect/final URL metadata before accepting content into a successful result. Search-result URLs use typed schema and canonicalization but do not pass through the fetch target validator.
 
-Persistence uses local SQLite and is intended for the MVP. It does not yet provide lifecycle status, delete/prune operations, or a multi-process atomic duplicate-thread guarantee. Checkpointing also does not guarantee exactly-once external side effects. Production deployment and multi-tenant storage are not implemented.
+This is an implemented application-level URL safety boundary, not a claim of complete SSRF, DNS-rebinding, redirect, or production egress protection.
 
-## Security
+### Trace boundary
 
-- Secrets are loaded from `.env`, which is ignored by Git; API keys use Pydantic `SecretStr`.
-- `ToolRegistry` is an allowlist; tools outside it cannot be executed.
-- Write access is opt-in through `--allow-write`.
-- The workspace rejects absolute paths and path traversal, and filters symlinks and junctions.
-- Tool inputs are validated with Pydantic before execution; tool failures are normalized into structured results.
-- Per-step and total-run budgets plus the recursion limit prevent unbounded loops.
-- Tool output, fetched content, and local files are treated as untrusted evidence; the agent is instructed not to follow instructions found inside them.
-- Reviewer and replanner prompts wrap their context in explicit untrusted-data framing; verdicts and findings cannot introduce citations — the report renders citations only from validated evidence records, and model-authored URLs in review text are sanitized.
-- The replan-cycle budget is enforced by deterministic runtime guards, not by model cooperation, and is independent of the tool-call and recursion budgets.
-- `HttpUrl` validates source structure, while the workflow separately requires every citation URL to occur in a successful `web_search` or `web_fetch` observation.
-- `web_fetch` validates a typed HTTP(S) target before provider invocation, denies local/non-public IP space, requires every DNS answer to be public, and revalidates final/declared redirect targets before accepting content.
-- Evidence and citations are bounded, canonicalized, deduplicated, and checkpointed with tool-call and step provenance.
-- Traces use a closed safe-field schema and never include goals, queries, URLs, headers, response bodies, excerpts, artifact content, or exception chains.
-- DNS pinning/rebinding protection and independent enforcement of redirects followed inside the remote Reader remain deferred production hardening; web URLs and fetched content remain untrusted input.
+Execution traces use a closed typed schema and exclude prompts, queries, URLs, response bodies, excerpts, artifact content, arbitrary payloads, exceptions, and tracebacks. The CLI can emit redacted JSON Lines to stderr; Streamlit consumes a projected FIFO trace queue.
 
-## Development checks
-
-Run unit tests:
+## Testing and Evaluation
 
 ```bash
 uv run pytest -q
-```
-
-Run lint checks:
-
-```bash
 uv run ruff check .
-```
-
-Check formatting:
-
-```bash
 uv run ruff format --check .
+uv lock --check
+uv run python evals/run_evals.py --dataset evals/dataset.json
 ```
+
+| Check | Latest verified result |
+| --- | --- |
+| Full pytest | 526 passed, 2 skipped |
+| Deterministic evaluator | 9/9 cases |
+| Evaluator invariants | 36/36 |
+| Ruff check | Pass |
+| Ruff format check | Pass |
+| Lock check | Pass |
+
+The two skipped tests require Windows symlink creation unavailable in the exercised environment. Results demonstrate tested contracts and failure behavior; they do not prove production readiness, live-provider quality, factual correctness, or absence of all bugs.
+
+Coverage includes unit contracts, graph integration, persistence/resume, URL and workspace safety, context pressure, delegation, trace redaction, final acceptance, Streamlit `AppTest`, offline no-network behavior, and deterministic evaluator cases.
+
+## Project Structure
+
+```text
+mini-deerflow/
+├── src/mini_deerflow/
+│   ├── cli.py                     # CLI entry point
+│   ├── runtime.py                 # composition and runtime lifecycle
+│   ├── agent_workflow.py          # canonical LangGraph workflow
+│   ├── state.py, actions.py       # state and typed actions
+│   ├── evidence.py                # evidence, citations, report rendering
+│   ├── review.py, replanner.py    # quality loop
+│   ├── delegation.py              # bounded research waves and fan-in
+│   ├── persistence.py             # SQLite checkpoint boundary
+│   ├── web_safety.py              # fetch-target validation
+│   ├── tracing.py, workspace.py   # observability and file boundary
+│   ├── tools/                     # contracts, registry, runner, tools
+│   └── demo/                      # Streamlit facade, jobs, projection, UI
+├── tests/                         # unit, integration, system, AppTest
+├── evals/                         # deterministic evaluator and dataset
+├── docs/                          # technical and learning documentation
+├── pyproject.toml
+├── uv.lock
+└── README.md
+```
+
+## Technology Stack
+
+| Layer | Technology and actual use |
+| --- | --- |
+| Language | Python 3.12+ and `asyncio` |
+| Agent orchestration | LangGraph 1.2.11+ |
+| Model integration | LangChain OpenAI 1.6+ |
+| Contracts/config | Pydantic 2.13+, pydantic-settings 2.15+ |
+| Persistence | SQLite, aiosqlite 0.22+, LangGraph SQLite checkpointer 3.1+ |
+| Frontend | Streamlit 1.64+ |
+| Background execution | Single-worker `ThreadPoolExecutor` |
+| Tests | pytest 9.1+ and Streamlit `AppTest` |
+| Quality/package management | Ruff 0.16+ and uv |
+
+## Important Engineering Decisions
+
+| Decision | Why | Trade-off |
+| --- | --- | --- |
+| LangGraph | Conditional durable workflow and resume | Framework coupling |
+| Typed actions/tools | Reject malformed decisions and inputs | More schema maintenance |
+| SQLite checkpoints | Simple local durability | Single-host lifecycle |
+| Bounded budgets | Deterministic termination | May stop before ideal evidence depth |
+| Context projections | Control exact serialized context size | Character-based, not semantic compression |
+| Citation membership | Reject URLs absent from evidence | Does not prove truth or entailment |
+| Depth-one delegation | Control amplification and capability | Limited specialization |
+| Deterministic fan-in | Stable ordering and failure semantics | Fixed aggregation policy |
+| Explicit UI projector | Keep raw runtime data behind an allowlist | Mapping maintenance |
+| One worker per session | Clear non-blocking demo state | No distributed throughput or cancellation |
+| Offline scenario | Reproducible mentor walkthrough | Does not validate live-provider quality |
+
+## DeerFlow Relationship
+
+Mini DeerFlow is an independent learning implementation inspired by DeerFlow-style research-agent concepts: planning, plan-act-observe, tool-mediated execution, evidence-backed synthesis, review/replanning, bounded delegation, checkpoint/resume, tracing, and artifact generation.
+
+It deliberately simplifies the problem to one local workflow, SQLite persistence, depth-one homogeneous web branches, deterministic fixtures, and a single-worker Streamlit demo. It has no browser/shell execution, production scheduler, tenancy layer, or upstream conformance suite.
+
+No claim is made about source compatibility, behavioral equivalence, feature parity, current upstream architecture, or production readiness.
+
+## Production Boundary
+
+| Current MVP | Production direction |
+| --- | --- |
+| Local SQLite | Managed persistence, migration, backup, retention, HA |
+| In-process worker | Durable queue, leases, and distributed workers |
+| One active job per session | Multi-user concurrency and quotas |
+| No authentication/authorization | Identity and resource policy |
+| Local workspace | Isolated, access-controlled artifact storage |
+| Offline Streamlit demo | Explicit live-backend and credential policy |
+| Local typed trace | Centralized telemetry and retention controls |
+| Application validation | Stronger sandbox and network egress enforcement |
+| No cancellation | Cooperative cancellation and compensation |
+| Local artifact download | Access-controlled artifact delivery |
+
+## Learning Outcomes
+
+This project exercises:
+
+- stateful agent architecture and LangGraph routing;
+- structured model output and tool contracts;
+- explicit dependency injection and async resource ownership;
+- bounded context projection and execution budgets;
+- evidence/citation provenance and deterministic synthesis;
+- reviewer-driven replanning and completed-work preservation;
+- bounded delegation, partial failure, and fan-in;
+- SQLite persistence and resume semantics;
+- application-level security boundaries and redacted observability;
+- Streamlit frontend/runtime separation;
+- deterministic failure-oriented tests and evaluation.
 
 ## Documentation
 
-- [DeerFlow request lifecycle](docs/deerflow-request-lifecycle.md)
-- [LangGraph workflow (day 04)](docs/langgraph-workflow-day-04.md)
-- [Tool execution layer (day 05)](docs/tool-execution-layer-day-05.md)
-- [Bounded agent loop (day 06)](docs/bounded-agent-loop-day-06.md)
-- [Day 13 threat model](docs/threat-model.md)
-- [Safety, observability, and deterministic evaluation (day 13)](docs/safety-observability-evaluation-day-13.md)
-- [MVP stabilization, deterministic demo, and DeerFlow-style comparison (day 14)](docs/mvp-stabilization-demo-comparison-day-14.md)
-- [Local deterministic Streamlit mentor demo (day 15)](docs/streamlit-local-demo-day-15.md)
+- [Project-level technical report](docs/project-report-mini-deerflow.md)
+- [Day 15 learning report](docs/report-ngay-15-mini-deerflow.md)
+- [Local deterministic Streamlit demo guide](docs/streamlit-local-demo-day-15.md)
 
-## Learning objective
+The project report is the architecture deep dive; this README is the GitHub entry point.
 
-The goal is to learn Deep Agent architecture by implementing and visualizing a small vertical slice containing:
+## Current Limitations
 
-```text
-plan → act → observe → review → re-plan → artifact
-```
+- Live-provider research quality, cost, and latency are not benchmarked by acceptance tests.
+- Citation membership does not establish factual correctness or semantic entailment.
+- Context accounting is character-based; exact tokenizer accounting is not implemented.
+- Semantic context compression or vector memory is not implemented.
+- External side effects do not have an exactly-once guarantee.
+- Distributed execution, durable queues, cancellation, auth, and multi-tenancy are absent.
+- Production artifact serving, access control, egress isolation, and telemetry are absent.
+- Separate OS-process restart behavior has not been directly exercised.
+- Two workspace symlink tests were skipped in the verified Windows environment.
+- Complete SSRF/DNS-rebinding protection is not claimed.
 
-DeerFlow is used only as a reference implementation and behavioral baseline.
-
-## Roadmap status
-
-The bounded learning MVP now includes planning, real provider composition, evidence and citation validation, reviewer-driven replanning, bounded context projection, depth-one delegation, SQLite resume, safe tracing, and deterministic evaluations. Production hardening remains intentionally deferred; see the final table in the [Day 14 document](docs/mvp-stabilization-demo-comparison-day-14.md).
+Mini DeerFlow has met its learning and mentor-demo goals. Production readiness and DeerFlow parity remain explicitly outside the verified scope.
