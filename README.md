@@ -6,7 +6,7 @@ This project is inspired by the architecture of [ByteDance DeerFlow](https://git
 
 ## Project status
 
-The 14-day learning MVP is complete. It is a **bounded tool-using research agent prototype**, not a production-ready system. The deterministic final acceptance scenario and the honest DeerFlow-style capability comparison are documented in [Day 14 MVP stabilization, demo, and comparison](docs/mvp-stabilization-demo-comparison-day-14.md).
+The 14-day learning MVP is complete, and Day 15 adds a localhost-only deterministic Streamlit mentor demo. It remains a **bounded tool-using research agent prototype**, not a production-ready system. See [Day 14 MVP stabilization, demo, and comparison](docs/mvp-stabilization-demo-comparison-day-14.md) and the [Day 15 local Streamlit demo](docs/streamlit-local-demo-day-15.md).
 
 Mini DeerFlow plans a research goal into a strict multi-step schema, selects one structured action at a time, executes allowlisted workspace tools under explicit budgets, and synthesizes a final answer from the recorded evidence.
 
@@ -139,6 +139,32 @@ mini-deerflow resume
 mini-deerflow threads
 ```
 
+### Launch the deterministic mentor demo
+
+The Day 15 Streamlit demo runs fully offline with deterministic injected model,
+provider, resolver, and researcher seams. The offline backend does not read
+`.env` or use model/provider secrets already present in the process environment;
+it requires no API key and makes no model, DNS, or web-service call.
+
+```powershell
+uv run streamlit run src/mini_deerflow/demo/app.py `
+  --server.address 127.0.0.1 `
+  --server.headless true `
+  --browser.gatherUsageStats false
+```
+
+The repository also sets `browser.gatherUsageStats = false` in
+`.streamlit/config.toml`; the explicit flag makes the telemetry-safe demo launch
+self-documenting.
+
+Use the sidebar to create a thread, run the mentor scenario, inspect the five
+safe views, then Resume the completed thread to demonstrate checkpoint reuse
+without replaying provider or delegation work, including after restarting the
+Streamlit process against the same local demo data. The UI exposes no
+credential, tool, path, database, write-capability, or cancellation controls.
+Full usage, security boundaries, and the 5–7 minute walkthrough are in the
+[Day 15 demo guide](docs/streamlit-local-demo-day-15.md).
+
 ### Create a validated research plan
 
 ```bash
@@ -229,7 +255,7 @@ composition; there is no CLI flag for it yet. The reported token figure is
 only a conservative `characters / 4` estimate, not exact GLM token accounting.
 
 The deterministic hard-bound/context-pressure smoke passes, and the current
-test suite result is **509 passed, 2 skipped**. This does not establish
+test suite result is **526 passed, 2 skipped**. This does not establish
 production readiness. Exact tokenizer integration, LLM summarization of old
 context, and real-model context-pressure behavior remain untested or
 unimplemented.
@@ -399,10 +425,11 @@ uv run ruff format --check .
 - [Day 13 threat model](docs/threat-model.md)
 - [Safety, observability, and deterministic evaluation (day 13)](docs/safety-observability-evaluation-day-13.md)
 - [MVP stabilization, deterministic demo, and DeerFlow-style comparison (day 14)](docs/mvp-stabilization-demo-comparison-day-14.md)
+- [Local deterministic Streamlit mentor demo (day 15)](docs/streamlit-local-demo-day-15.md)
 
 ## Learning objective
 
-The goal is to learn Deep Agent architecture by implementing a small vertical slice containing:
+The goal is to learn Deep Agent architecture by implementing and visualizing a small vertical slice containing:
 
 ```text
 plan → act → observe → review → re-plan → artifact
