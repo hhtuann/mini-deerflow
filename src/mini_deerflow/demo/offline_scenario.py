@@ -21,21 +21,26 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
+from mini_deerflow.conversation import ConversationRecord, SQLiteConversationRepository
 from mini_deerflow.delegation import BranchFinding, BranchResult, ResearchTaskContext
 from mini_deerflow.demo.service import (
     DEFAULT_DEMO_GOAL,
+    ContinueDemoCommand,
     ResumeDemoCommand,
     RunDemoCommand,
     _BackendResult,
 )
-from mini_deerflow.persistence import list_thread_ids, open_sqlite_checkpointer
 from mini_deerflow.review import (
     ReplacementWork,
     ReviewDecision,
     ReviewFinding,
     ReviewVerdict,
 )
-from mini_deerflow.runtime import RuntimeLimits, open_default_agent_runtime
+from mini_deerflow.runtime import (
+    ConversationSnapshot,
+    RuntimeLimits,
+    open_default_agent_runtime,
+)
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.tools import ToolResult
 from mini_deerflow.tracing import ExecutionTrace, ExecutionTracer, TraceSink
@@ -521,9 +526,11 @@ class OfflineDemoBackend:
         self._storage_root = Path(storage_root).resolve(strict=False)
         self._checkpoint_path = self._storage_root / "checkpoints.sqlite"
         self._workspaces_root = self._storage_root / "workspaces"
-        self._resources: dict[str, _ScenarioResources] = {}
-        self._traces: defaultdict[str, list[ExecutionTrace]] = defaultdict(list)
-        self._operation_counts: Counter[tuple[str, str]] = Counter()
+        self._resources: dict[tuple[str, str], _ScenarioResources] = {}
+        self._traces: defaultdict[tuple[str, str], list[ExecutionTrace]] = defaultdict(
+            list
+        )
+        self._operation_counts: Counter[tuple[str, str, str]] = Counter()
         self._interrupt_after_delegation = interrupt_after_delegation
         self._settings = Settings(
             api_key="offline-demo-placeholder",
@@ -538,14 +545,19 @@ class OfflineDemoBackend:
             _env_file=None,
         )
 
+    @property
+    def limits(self) -> RuntimeLimits:
+        return DEMO_LIMITS
+
     async def run(
         self,
         command: RunDemoCommand,
         *,
         trace_sink: TraceSink | None = None,
     ) -> _BackendResult:
+        resource_key = (command.thread_id, command.turn_id)
         resources = self._resources.setdefault(
-            command.thread_id,
+            resource_key,
             _ScenarioResources.create(
                 command.goal,
                 interrupt_after_delegation=self._interrupt_after_delegation,
@@ -555,6 +567,27 @@ class OfflineDemoBackend:
             operation="run",
             thread_id=command.thread_id,
             goal=command.goal,
+            turn_id=command.turn_id,
+            resources=resources,
+            trace_sink=trace_sink,
+        )
+
+    async def continue_thread(
+        self,
+        command: ContinueDemoCommand,
+        *,
+        trace_sink: TraceSink | None = None,
+    ) -> _BackendResult:
+        resource_key = (command.thread_id, command.turn_id)
+        resources = self._resources.setdefault(
+            resource_key,
+            _ScenarioResources.create(command.user_message),
+        )
+        return await self._execute(
+            operation="continue",
+            thread_id=command.thread_id,
+            goal=command.user_message,
+            turn_id=command.turn_id,
             resources=resources,
             trace_sink=trace_sink,
         )
@@ -565,30 +598,66 @@ class OfflineDemoBackend:
         *,
         trace_sink: TraceSink | None = None,
     ) -> _BackendResult:
+        repository = SQLiteConversationRepository(self._checkpoint_path)
+        active = await repository.get_active_turn(command.thread_id)
+        if active is None:
+            turns = await repository.list_turns(command.thread_id)
+            active = turns[-1]
+        resource_key = (command.thread_id, active.turn_id)
         resources = self._resources.setdefault(
-            command.thread_id,
+            resource_key,
             _ScenarioResources.create(
-                DEFAULT_DEMO_GOAL,
-                interrupt_after_delegation=self._interrupt_after_delegation,
+                active.user_message or DEFAULT_DEMO_GOAL,
             ),
         )
         return await self._execute(
             operation="resume",
             thread_id=command.thread_id,
             goal=None,
+            turn_id=active.turn_id,
             resources=resources,
             trace_sink=trace_sink,
         )
 
     async def list_threads(self) -> tuple[str, ...]:
-        async with open_sqlite_checkpointer(self._checkpoint_path) as checkpointer:
-            return await list_thread_ids(checkpointer)
+        records = await self.list_conversations()
+        return tuple(record.thread_id for record in records)
+
+    async def list_conversations(self) -> tuple[ConversationRecord, ...]:
+        repository = SQLiteConversationRepository(self._checkpoint_path)
+        return await repository.list_conversations()
+
+    async def load_conversation(self, thread_id: str) -> ConversationSnapshot:
+        async with open_default_agent_runtime(
+            self._settings,
+            self._workspaces_root / thread_id,
+            self._checkpoint_path,
+            allow_write=True,
+            limits=DEMO_LIMITS,
+            context_budget=DEMO_CONTEXT_BUDGET,
+            artifact_path=_ARTIFACT_PATH,
+        ) as runtime:
+            return await runtime.load_conversation(thread_id)
 
     def diagnostics(self, thread_id: str) -> OfflineScenarioDiagnostics | None:
         """Return count-only diagnostics without exposing prompts or payloads."""
 
-        resources = self._resources.get(thread_id)
-        return None if resources is None else resources.diagnostics()
+        diagnostics = [
+            resources.diagnostics()
+            for (resource_thread_id, _), resources in self._resources.items()
+            if resource_thread_id == thread_id
+        ]
+        if not diagnostics:
+            return None
+        return OfflineScenarioDiagnostics(
+            model_calls=sum(item.model_calls for item in diagnostics),
+            web_search_calls=sum(item.web_search_calls for item in diagnostics),
+            web_fetch_calls=sum(item.web_fetch_calls for item in diagnostics),
+            resolver_calls=sum(item.resolver_calls for item in diagnostics),
+            researcher_branches=tuple(
+                branch for item in diagnostics for branch in item.researcher_branches
+            ),
+        )
 
     async def _execute(
         self,
@@ -596,13 +665,14 @@ class OfflineDemoBackend:
         operation: str,
         thread_id: str,
         goal: str | None,
+        turn_id: str,
         resources: _ScenarioResources,
         trace_sink: TraceSink | None,
     ) -> _BackendResult:
-        self._operation_counts[(thread_id, operation)] += 1
-        operation_number = self._operation_counts[(thread_id, operation)]
+        self._operation_counts[(thread_id, turn_id, operation)] += 1
+        operation_number = self._operation_counts[(thread_id, turn_id, operation)]
         run_id = f"day15-{operation}-{operation_number:03d}"
-        events = self._traces[thread_id]
+        events = self._traces[(thread_id, turn_id)]
         recorder = _RecordingTraceSink(events, trace_sink)
         tracer = ExecutionTracer(
             recorder,
@@ -629,12 +699,29 @@ class OfflineDemoBackend:
             artifact_path=_ARTIFACT_PATH,
             tracer=tracer,
         ) as runtime:
-            if operation == "run":
-                if goal is None:
-                    raise AssertionError("run requires a goal")
-                state = await runtime.run(goal, thread_id=thread_id)
-            else:
-                state = await runtime.resume(thread_id=thread_id)
+            try:
+                if operation == "run":
+                    if goal is None:
+                        raise AssertionError("run requires a goal")
+                    state = await runtime.run(
+                        goal,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                    )
+                elif operation == "continue":
+                    if goal is None:
+                        raise AssertionError("continue requires a user message")
+                    state = await runtime.continue_thread(
+                        thread_id,
+                        goal,
+                        turn_id=turn_id,
+                    )
+                else:
+                    state = await runtime.resume(thread_id=thread_id)
+            except BaseException:
+                await runtime.record_turn_traces(thread_id, turn_id, tuple(events))
+                raise
+            await runtime.record_turn_traces(thread_id, turn_id, tuple(events))
 
         return _BackendResult(
             state=state,

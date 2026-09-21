@@ -238,7 +238,7 @@ def test_safe_evidence_citation_and_artifact_outcomes_are_traced(
     assert [record.canonical_url for record in state["evidence"]] == [source]
     assert state["sources"] == [source]
     assert state["artifact_path"] == "reports/evaluation.md"
-    assert workspace.read_text("reports/evaluation.md") == state["final_answer"]
+    assert workspace.read_text("reports/evaluation.md") == state["research_report"]
     assert any(
         event.kind is TraceKind.TOOL and event.outcome is TraceOutcome.SUCCEEDED
         for event in sink.events

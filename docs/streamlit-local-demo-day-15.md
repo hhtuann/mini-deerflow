@@ -1,177 +1,125 @@
-# Day 15: Local Deterministic Streamlit Mentor Demo
+# Persistent Streamlit Research Chat
 
 ## Outcome and scope
 
-Day 15 adds a localhost-only Streamlit interface around the completed Mini
-DeerFlow learning MVP. The UI is a deterministic mentor walkthrough, not a
-production API, hosted service, or claim of parity with upstream DeerFlow.
+The Streamlit application is a persistent multi-turn chat over the canonical
+Mini DeerFlow runtime. It is a local learning and mentor-demo interface, not a
+production service or an upstream DeerFlow compatibility claim.
 
-The default backend uses the real runtime, LangGraph workflow, SQLite
-checkpointer, tool registry, evidence and citation rules, reviewer/replanner,
-bounded context, bounded delegation, redacted tracing, and workspace artifact
-boundary. Only the model, web provider, hostname resolver, and researcher
-seams are deterministic local fixtures. The offline backend does not read
-`.env` or use model/provider secrets already present in the process environment;
-it requires no API key, resolves no DNS, and calls no model or web service.
+Two modes are explicit:
+
+- **Live web** uses the model endpoint and Jina provider configured in `.env`.
+  A model API key is required for inference and a Jina key is required for
+  `web_search`. The badge reports configuration mode, not provider readiness;
+  model and web readiness is confirmed only when the trace/evidence shows a
+  successful web-tool outcome.
+- **Offline walkthrough** makes no network calls. It replaces only external
+  model/provider/resolver/researcher seams with deterministic fixtures while
+  exercising the real conversation ledger, runtime, workflow, checkpoints,
+  evidence, reviewer/replanner, delegation, tracing, and artifact path.
 
 ## Install and launch
 
-Install the locked project dependencies:
-
 ```powershell
 uv sync
-```
-
-Launch Streamlit on the loopback interface without automatically opening a
-browser:
-
-```powershell
 uv run streamlit run src/mini_deerflow/demo/app.py `
   --server.address 127.0.0.1 `
   --server.headless true `
   --browser.gatherUsageStats false
 ```
 
-The checked-in `.streamlit/config.toml` also disables Streamlit usage-stat
-collection. Keeping the explicit launch flag above makes that telemetry-safe
-boundary visible during setup and remains safe if the command is copied into a
-different local environment.
+Open the localhost URL printed by Streamlit. The checked-in
+`.streamlit/config.toml` also disables usage-stat gathering.
 
-Open the localhost URL printed by Streamlit. The app exposes no API-key,
-checkpoint, workspace, artifact-path, tool-picker, write-toggle, database, or
-cancel control.
+For live mode, verify these values before presenting:
 
-## Offline walkthrough
-
-1. Confirm the sidebar says `Offline deterministic — no network` and
-   `Mentor walkthrough v1`.
-2. Enter a new valid thread identifier, or keep the sample identifier.
-3. Keep the sample research goal and select **Run**.
-4. Watch the typed trace progress while the worker runs independently of the
-   Streamlit render loop.
-5. Inspect the plan, budgets, evidence, accepted citations, rejected-citation
-   count, review/replan history, delegation fan-in, and final artifact.
-6. Refresh the thread list, select the completed thread, and choose
-   **Resume selected thread**.
-7. Confirm the resumed trace contains the checkpoint/resume lifecycle but no
-   repeated provider or delegation work.
-
-The deterministic trajectory visibly covers:
-
-```text
-unsafe-target denial
-→ redacted provider failure
-→ successful evidence
-→ invented-citation rejection
-→ reviewer replan
-→ partial delegation failure with successful sibling fan-in
-→ completion and one Markdown artifact
-→ completed-thread resume without replay
+```dotenv
+MINI_DEERFLOW_API_KEY=...
+MINI_DEERFLOW_BASE_URL=...
+MINI_DEERFLOW_MODEL_NAME=...
+MINI_DEERFLOW_JINA_API_KEY=...
 ```
 
-## Run and Resume semantics
+Never show or commit `.env`.
 
-**Run** creates a new SQLite-backed thread. Reusing an existing identifier is
-rejected before workflow execution and does not overwrite its checkpoint.
+## Mentor runbook
 
-**Resume** supplies no replacement goal. LangGraph restores the selected
-thread from its checkpoint. Resuming a completed thread returns its persisted
-result without repeating already checkpointed model, provider, tool, or
-delegation work.
+1. Keep **Live web** selected for a real provider demonstration, or explicitly
+   select **Offline walkthrough** for a deterministic rehearsal.
+2. Click **New chat**.
+3. Submit a specific, publicly verifiable research question, for example:
+   `Tìm nguồn chính thức mô tả các thay đổi nổi bật của Python 3.13; chỉ kết
+   luận từ nguồn tìm thấy và nêu rõ giới hạn.`
+4. Confirm the user bubble appears immediately and the assistant shows a
+   bounded research status while the worker runs.
+5. Inspect the completed sanitized Markdown answer. Open the collapsed
+   **🔎 Agent details** panel to show only the detail tabs relevant to that turn.
+6. Ask a follow-up such as `Nguồn nào là nguồn trực tiếp và giới hạn của kết
+   luận là gì?` without creating a new chat.
+7. Confirm the same public `thread_id` remains in the header and a new turn is
+   added. Evidence, trace, budgets, and artifact remain separate by turn.
+8. Reload Streamlit and reopen the conversation from the sidebar to prove that
+   SQLite, rather than session memory, owns the transcript.
 
-The UI lists persisted thread identifiers through the application service. It
-does not inspect raw SQLite records or checkpoint channel values. After a
-fresh Streamlit process starts against the same local demo data, the SQLite
-thread is listed as persisted and its detailed safe view is available after
-Resume. That fresh-process Resume follows the same no-replay guarantee: it does
-not repeat completed model, provider, tool, or delegation work.
+Expected success signals in live mode are a completed assistant answer,
+evidence/citation entries, and tool outcomes in the trace. Authentication,
+rate-limit, transport, or configuration failures are shown as controlled
+messages; switch to Offline only if you intend to demonstrate deterministic
+behavior rather than live connectivity.
 
-## One-page interface
+## Turn and resume semantics
 
-The page has a sidebar, a status strip, and exactly five tabs:
+- The first message creates a conversation and turn.
+- Each follow-up calls `continue_thread` with the same public `thread_id` and
+  a new `turn_id`.
+- Duplicate submission of the same turn ID and same message is idempotent.
+  Reusing a turn ID for different content is rejected.
+- `resume` never means “new message.” It continues the active interrupted turn
+  (including a `running` ledger row left by a hard process stop).
+  A completed conversation has no Resume button.
+- A committed turn that has no first LangGraph checkpoint can be rebuilt from
+  its durable ledger input during recovery.
 
-1. **Overview** — plain-text goal, plan progress, current step, bounded tool,
-   replan, and delegation budgets, plus an explicit local-MVP limitation.
-2. **Evidence & Citations** — bounded plain-text evidence cards, canonical URL
-   text, provenance, accepted citations, rejected count only, and review/replan
-   chronology.
-3. **Delegation** — wave and branch status, reserved/used/charged accounting,
-   deterministic fan-in, and controlled limitations. Raw branch observations
-   and failed-branch findings are not exposed.
-4. **Trace** — filters and an ordered timeline projected only from the closed
-   `ExecutionTrace` schema. There is no generic JSON, log, prompt, or payload
-   viewer.
-5. **Artifact** — a structured preview rebuilt from safe view models and the
-   exact Markdown source in a code block. The source is never rendered as
-   arbitrary HTML or active external content.
+Each turn owns a fresh `AgentState`, isolated root checkpoint key, evidence,
+citations, trace, budget counters, and artifact. Only bounded completed
+user/assistant pairs are projected into the next turn; prior evidence is not
+promoted into current-turn citation membership.
 
-## Non-blocking execution
+## Chat and per-turn details
 
-Run and Resume execute in a single-worker background manager. The worker owns
-its event loop, runtime, SQLite connection, and workspace lifetime and never
-calls Streamlit. The main Streamlit thread polls the future and drains a
-thread-safe typed trace queue.
+The main page uses native `st.chat_message` and `st.chat_input`. The assistant
+bubble renders only the durable, user-facing `final_answer`. The deterministic
+`research_report` stays in the collapsed **🔎 Agent details** panel. That panel
+creates only the tabs for which the current turn has data:
 
-Only one job may be active in a session. Run, Resume, and mutable controls are
-disabled while it is active, and the manager independently rejects a racing
-double submission. The last completed safe view remains visible until the new
-job completes. Cancellation is intentionally absent because the runtime has
-no cancellation/checkpoint contract to support it honestly.
+1. **Execution** — goal, plan, progress, budgets, and limitations.
+2. **Evidence & Citations** — bounded evidence, provenance, accepted citations,
+   and rejected count.
+3. **Delegation** — branch status, budget accounting, fan-in, and limitations.
+4. **Review & Replan** — structured verdict/finding and replacement-step
+   metadata, without raw reviewer rationale.
+5. **Trace** — a filterable timeline from the closed redacted trace schema.
+6. **Research report** — a safe structured preview and exact internal Markdown
+   source in a code block.
 
-## Security and untrusted-content boundaries
+The background worker never calls `st.*`. It owns its event loop, runtime,
+SQLite connection, and workspace lifetime. Only one job may run per UI session.
 
-The Streamlit layer receives immutable, allowlisted view models rather than
-raw `AgentState`. Explicit projection excludes:
+## Security boundary
 
-- messages, prompts, structured model responses, and pending actions;
-- raw tool observations and result payloads;
-- checkpoints, SQLite internals, credentials, `.env` data, and machine paths;
-- provider exception text, bodies, headers, and tracebacks;
-- rejected URLs and failed-branch false findings;
-- arbitrary filesystem paths and tool arguments.
+The renderer receives frozen allowlisted projections, never raw `AgentState`.
+It excludes prompts, model payloads, raw tool observations, arbitrary arguments,
+provider exception bodies, credentials, paths, checkpoint internals, rejected
+URLs, failed-branch findings, and reviewer rationale. User messages remain plain
+text. Assistant answers use sanitized Markdown: raw HTML and remote image syntax
+are removed, and only validated citation URLs remain active. The research report
+is never used as the primary chat answer or follow-up context; it appears only as
+inert source plus download inside the **Research report** tab.
 
-Goal text, evidence text, review rationale, and delegation limitations are
-untrusted. They are bounded and displayed only with plain-text components.
-Canonical evidence/citation URLs are displayed as text rather than embedded or
-automatically fetched resources. Errors are mapped to short controlled
-messages. Trace rendering accepts only typed redacted fields.
+## Remaining limitations
 
-The Markdown artifact source is shown in a code block. The preview is rebuilt
-from already projected fields; the app does not enable `unsafe_allow_html`,
-iframes, custom browser components, or arbitrary Markdown rendering.
-
-## Five-to-seven-minute mentor script
-
-| Time | Demonstration |
-| --- | --- |
-| 0:00–0:45 | Establish offline/no-network mode and the non-production scope. |
-| 0:45–1:30 | Create a thread and start Run; point out the non-blocking status strip. |
-| 1:30–2:30 | Show safe/provider outcomes and bounded context events in Trace. |
-| 2:30–3:30 | Walk the plan, current step, and independent budgets in Overview. |
-| 3:30–4:30 | Show evidence provenance, accepted citations, and rejected count. |
-| 4:30–5:20 | Explain reviewer replanning and partial delegation fan-in. |
-| 5:20–6:10 | Show the structured artifact preview and exact Markdown source. |
-| 6:10–7:00 | Resume the completed thread and verify that tool/delegation work is absent. |
-
-## Verification and evaluator scope
-
-Day 15 adds focused projector, job-manager, offline integration, and Streamlit
-smoke tests. The Day 14 deterministic evaluator remains the system-level
-baseline. No evaluator case is added because Streamlit widget structure is a
-presentation detail, not a stable runtime invariant.
-
-## Deferred production work
-
-- authentication, authorization, multi-tenancy, and public deployment;
-- production databases, lifecycle retention, archive/delete, and distributed
-  locking;
-- durable job queues, cross-process state, cancellation, and exactly-once
-  external effects;
-- live credential management, automatic live fallback, and live-mode UI;
-- general browser/shell execution or arbitrary tool configuration;
-- production telemetry, alerting, cost/latency benchmarks, and a general
-  Markdown/HTML sanitizer.
-
-This remains an independent learning implementation inspired by DeerFlow
-concepts. It is not production-ready and does not claim source compatibility,
-behavioral equivalence, or upstream feature parity.
+- no authentication, tenancy, public deployment, archive/delete, or retention;
+- no distributed job queue, cancellation contract, or exactly-once external
+  effects;
+- no automatic provider readiness probe, latency guarantee, or live fallback;
+- deterministic evaluation measures contract compliance, not factual quality.

@@ -11,6 +11,10 @@ from mini_deerflow.review import (
     ReviewVerdict,
     coerce_review_verdict,
 )
+from mini_deerflow.structured_output import (
+    StructuredOutputMode,
+    create_structured_output_runnable,
+)
 
 REVIEWER_SYSTEM_PROMPT = """
 You are the evidence reviewer of a bounded deep research agent.
@@ -111,15 +115,19 @@ class LLMReviewer:
     def __init__(
         self,
         model: StructuredReviewModel,
+        *,
+        structured_output_mode: StructuredOutputMode = "native",
     ) -> None:
         if not isinstance(model, StructuredReviewModel):
             raise TypeError(
                 "model must support structured output",
             )
 
-        structured_model = model.with_structured_output(
+        structured_model = create_structured_output_runnable(
+            model,
             ReviewDecision,
             method="json_mode",
+            mode=structured_output_mode,
         )
 
         if not isinstance(

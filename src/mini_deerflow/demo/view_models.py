@@ -14,7 +14,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from mini_deerflow.runtime import RuntimeLimits
+from mini_deerflow.conversation import ConversationRecord, TurnStatus
+from mini_deerflow.evidence import is_research_report, render_user_answer
+from mini_deerflow.runtime import ConversationSnapshot, RuntimeLimits
 from mini_deerflow.state import AgentState
 from mini_deerflow.tracing import ExecutionTrace, TraceKind
 
@@ -28,6 +30,10 @@ MAX_LIMITATION_CHARS = 500
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\(https?://[^)]+\)", re.IGNORECASE)
 _HTTP_URL = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+_MARKDOWN_IMAGE = re.compile(r"!\[([^\]\n]*)\]\(([^)\n]+)\)")
+_MARKDOWN_REFERENCE_IMAGE = re.compile(r"!\[([^\]\n]*)\]\[[^\]\n]*\]")
+_ANY_MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\n]+)\)")
+_HTML_TAG = re.compile(r"<[^>\n]*>")
 
 PlanStepStatus = Literal["completed", "current", "pending"]
 WorkflowStatus = Literal["completed", "incomplete"]
@@ -88,7 +94,6 @@ class ReviewFindingView:
 class ReviewCycleView:
     review_number: int
     route: str
-    rationale: str
     findings: tuple[ReviewFindingView, ...]
 
 
@@ -97,7 +102,6 @@ class ReplanView:
     replan_number: int
     replaced_step_numbers: tuple[int, ...]
     replacement_step_titles: tuple[str, ...]
-    review_rationale: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +163,7 @@ class TraceEventView:
     context_estimated_tokens: int | None
     error_category: str | None
     error_code: str | None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +193,105 @@ class DemoRunView:
     traces: tuple[TraceEventView, ...]
     artifact: ArtifactView
     limitations: tuple[str, ...]
+    turn_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSummaryView:
+    """Small allowlisted row for the chat-history sidebar."""
+
+    thread_id: str
+    title: str
+    status: str
+    updated_at: str
+    session_tool_calls: int
+    session_tool_call_limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnView:
+    """One durable user/assistant exchange and its safe execution details."""
+
+    turn_id: str
+    sequence: int
+    user_message: str
+    assistant_message: str | None
+    status: TurnStatus
+    safe_error: str | None
+    run: DemoRunView | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSessionView:
+    """The complete UI-safe conversation source of truth."""
+
+    conversation: ConversationSummaryView
+    turns: tuple[ChatTurnView, ...]
+
+
+def project_conversation_summary(
+    record: ConversationRecord,
+) -> ConversationSummaryView:
+    return ConversationSummaryView(
+        thread_id=_plain_text(record.thread_id, 128, omit_urls=True),
+        title=_plain_text(record.title, 80, omit_urls=True),
+        status=record.status,
+        updated_at=_plain_text(record.updated_at, 64, omit_urls=True),
+        session_tool_calls=record.session_tool_calls,
+        session_tool_call_limit=record.session_tool_call_limit,
+    )
+
+
+def project_chat_session(
+    snapshot: ConversationSnapshot,
+    *,
+    limits: RuntimeLimits,
+) -> ChatSessionView:
+    """Project ledger/checkpoints without exposing raw state or payloads."""
+
+    turns: list[ChatTurnView] = []
+    for item in snapshot.turns:
+        record = item.record
+        run = (
+            None
+            if item.state is None
+            else project_demo_run(
+                item.state,
+                item.traces,
+                thread_id=record.thread_id,
+                limits=limits,
+            )
+        )
+        turns.append(
+            ChatTurnView(
+                turn_id=_plain_text(record.turn_id, 128, omit_urls=True),
+                sequence=record.sequence,
+                user_message=_plain_text(
+                    record.user_message,
+                    MAX_GOAL_CHARS,
+                    omit_urls=False,
+                ),
+                assistant_message=(
+                    None
+                    if record.assistant_response is None
+                    else _answer_markdown(
+                        item.state,
+                        record.assistant_response,
+                    )
+                ),
+                status=record.status,
+                safe_error=(
+                    None
+                    if record.safe_error is None
+                    else _plain_text(record.safe_error, 240, omit_urls=True)
+                ),
+                run=run,
+            )
+        )
+    return ChatSessionView(
+        conversation=project_conversation_summary(snapshot.conversation),
+        turns=tuple(turns),
+    )
 
 
 def project_trace_event(event: ExecutionTrace) -> TraceEventView:
@@ -229,6 +333,7 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
             event.error_category.value if event.error_category is not None else None
         ),
         error_code=event.error_code.value if event.error_code is not None else None,
+        turn_id=event.turn_id,
     )
 
 
@@ -314,11 +419,6 @@ def project_demo_run(
         ReviewCycleView(
             review_number=index,
             route=verdict.verdict,
-            rationale=_plain_text(
-                verdict.rationale,
-                MAX_REVIEW_TEXT_CHARS,
-                omit_urls=True,
-            ),
             findings=tuple(
                 ReviewFindingView(
                     category=finding.category,
@@ -341,11 +441,6 @@ def project_demo_run(
             replacement_step_titles=tuple(
                 _plain_text(step.title, MAX_TITLE_CHARS, omit_urls=True)
                 for step in replan.replacement_steps
-            ),
-            review_rationale=_plain_text(
-                replan.review_rationale,
-                MAX_REVIEW_TEXT_CHARS,
-                omit_urls=True,
             ),
         )
         for replan in state.get("replans", ())
@@ -405,7 +500,10 @@ def project_demo_run(
         if finding.branch_id is None or finding.branch_id not in failed_branch_ids
     )
     limitations = _limitation_notices(trace_events, tuple(delegation_views))
-    artifact_source = _artifact_source(state.get("final_answer"))
+    report_candidate = state.get("research_report")
+    if not report_candidate and is_research_report(state.get("final_answer")):
+        report_candidate = state.get("final_answer")
+    artifact_source = _artifact_source(report_candidate)
     operation = next(
         (
             event.operation
@@ -452,6 +550,7 @@ def project_demo_run(
             markdown_source=artifact_source,
         ),
         limitations=limitations,
+        turn_id=state.get("turn_id"),
     )
 
 
@@ -523,9 +622,95 @@ def _limitation_notices(
     )
 
 
-def _artifact_source(final_answer: object) -> str:
-    if not isinstance(final_answer, str):
+def _answer_markdown(state: AgentState | None, persisted_answer: str) -> str:
+    """Project controlled answer Markdown and strip active untrusted content."""
+
+    candidate = persisted_answer
+    allowed_urls: set[str] = set()
+    if state is not None:
+        evidence = list(state.get("evidence", ()))
+        allowed_urls = {
+            record.canonical_url for record in evidence if record.status == "success"
+        }
+        state_answer = state.get("final_answer")
+        if isinstance(state_answer, str):
+            candidate = state_answer
+        if is_research_report(candidate):
+            review_notes = list(
+                dict.fromkeys(
+                    finding.description
+                    for verdict in state.get("review_verdicts", ())
+                    for finding in verdict.findings
+                    if finding.category
+                    in {
+                        "gap",
+                        "contradiction",
+                        "relevance",
+                        "direct_support",
+                        "citation_validity",
+                    }
+                )
+            )
+            candidate = render_user_answer(
+                findings=list(state.get("findings", ())),
+                evidence=evidence,
+                review_notes=review_notes,
+                has_collection_failures=bool(state.get("errors"))
+                or any(
+                    not observation.result.success
+                    for observation in state.get("tool_observations", ())
+                ),
+            )
+    elif is_research_report(candidate):
+        candidate = (
+            "## Answer\n\nThis legacy turn completed, but only its internal "
+            "research report is available. A concise public answer cannot be "
+            "reconstructed without its checkpoint."
+        )
+
+    return sanitize_answer_markdown(candidate, allowed_urls=allowed_urls)
+
+
+def sanitize_answer_markdown(
+    value: str,
+    *,
+    allowed_urls: Iterable[str] = (),
+) -> str:
+    """Preserve answer structure while denying remote images, HTML, and links."""
+
+    allowed_url_set = set(allowed_urls)
+    text = _CONTROL_CHARACTERS.sub("", value)
+    text = _MARKDOWN_IMAGE.sub(
+        lambda match: _plain_text(match.group(1), 200, omit_urls=True),
+        text,
+    )
+    text = _MARKDOWN_REFERENCE_IMAGE.sub(
+        lambda match: _plain_text(match.group(1), 200, omit_urls=True),
+        text,
+    )
+    text = _HTML_TAG.sub("[embedded HTML omitted]", text)
+
+    def project_link(match: re.Match[str]) -> str:
+        label = _plain_text(match.group(1), 500, omit_urls=True)
+        url = match.group(2).strip()
+        return f"[{label}]({url})" if url in allowed_url_set else label
+
+    text = _ANY_MARKDOWN_LINK.sub(project_link, text)
+    text = _HTTP_URL.sub(
+        lambda match: (
+            match.group(0)
+            if match.group(0).rstrip(".,;:") in allowed_url_set
+            else "[untrusted URL omitted]"
+        ),
+        text,
+    )
+    return text[:200_000].strip()
+
+
+def _artifact_source(research_report: object) -> str:
+    if not isinstance(research_report, str):
         return ""
     # This must be byte-for-character identical to the runtime's already-safe
-    # deterministic artifact.  The renderer displays it only inside ``st.code``.
-    return final_answer
+    # deterministic artifact. The renderer uses plain text in chat and
+    # ``st.code`` in the per-turn Artifact tab, never active Markdown/HTML.
+    return research_report

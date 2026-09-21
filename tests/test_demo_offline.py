@@ -8,11 +8,11 @@ from pydantic_settings.sources.providers.dotenv import DotEnvSettingsSource
 
 from mini_deerflow.demo.offline_scenario import OfflineDemoBackend
 from mini_deerflow.demo.service import (
+    ContinueDemoCommand,
     DemoRuntimeService,
     ResumeDemoCommand,
     RunDemoCommand,
 )
-from mini_deerflow.persistence import ThreadAlreadyExistsError
 
 
 def test_offline_run_list_duplicate_and_completed_resume_without_replay(
@@ -41,16 +41,16 @@ def test_offline_run_list_duplicate_and_completed_resume_without_replay(
         first = await service.run(command)
         diagnostics = backend.diagnostics(command.thread_id)
         threads = await service.list_threads()
-        with pytest.raises(ThreadAlreadyExistsError):
-            await service.run(command)
+        duplicate = await service.run(command)
         resumed = await service.resume(ResumeDemoCommand(command.thread_id))
-        return backend, first, diagnostics, threads, resumed
+        return backend, first, diagnostics, threads, duplicate, resumed
 
-    backend, first, before, threads, resumed = asyncio.run(scenario())
+    backend, first, before, threads, duplicate, resumed = asyncio.run(scenario())
     after = backend.diagnostics("offline-test")
 
     assert threads == ("offline-test",)
     assert before == after
+    assert duplicate.artifact.markdown_source == first.artifact.markdown_source
     assert first.artifact.markdown_source == resumed.artifact.markdown_source
     outcomes = {(event.kind, event.outcome) for event in first.traces}
     assert ("tool", "safety_denied") in outcomes
@@ -65,11 +65,71 @@ def test_offline_run_list_duplicate_and_completed_resume_without_replay(
     resume_events = [
         event for event in resumed.traces if event.run_id.startswith("day15-resume-")
     ]
-    assert any(
-        event.kind == "checkpoint" and event.outcome == "resumed"
-        for event in resume_events
-    )
+    # A completed conversational turn is loaded idempotently; resume executes
+    # only when the durable ledger has an interrupted active turn.
+    assert resume_events == []
     assert not any(event.kind in {"tool", "delegation"} for event in resume_events)
+
+
+def test_offline_service_persists_two_isolated_turns_on_one_thread(
+    tmp_path: Path,
+) -> None:
+    async def scenario():
+        backend = OfflineDemoBackend(tmp_path / "multi-turn")
+        service = DemoRuntimeService(backend)
+        first = await service.run(
+            RunDemoCommand(
+                thread_id="same-public-thread",
+                turn_id="turn-first",
+                goal="Research the first bounded public topic.",
+            )
+        )
+        second = await service.continue_thread(
+            ContinueDemoCommand(
+                thread_id="same-public-thread",
+                turn_id="turn-second",
+                user_message="Now compare it with a second public topic.",
+            )
+        )
+        chat = await service.load_conversation("same-public-thread")
+        raw = await backend.load_conversation("same-public-thread")
+        return first, second, chat, raw
+
+    first, second, chat, raw = asyncio.run(scenario())
+
+    assert first.thread_id == second.thread_id == "same-public-thread"
+    assert first.turn_id == "turn-first"
+    assert second.turn_id == "turn-second"
+    assert [turn.turn_id for turn in chat.turns] == ["turn-first", "turn-second"]
+    assert all(turn.status == "completed" for turn in chat.turns)
+    assert all(turn.run is not None for turn in chat.turns)
+    assert all(turn.assistant_message for turn in chat.turns)
+    assert all(
+        "# Research Report" not in (turn.assistant_message or "")
+        and "Tool calls:" not in (turn.assistant_message or "")
+        for turn in chat.turns
+    )
+    assert all(
+        turn.record.assistant_response == turn.state["final_answer"]
+        for turn in raw.turns
+        if turn.state is not None
+    )
+    assert all(
+        turn.state["research_report"] != turn.state["final_answer"]
+        for turn in raw.turns
+        if turn.state is not None
+    )
+    artifact_paths = [
+        turn.state["artifact_path"] for turn in raw.turns if turn.state is not None
+    ]
+    assert artifact_paths[0] == "reports/day-15-demo.md"
+    assert artifact_paths[1] == "reports/day-15-demo-turn-second.md"
+    assert all(
+        event.turn_id == turn.turn_id
+        for turn in chat.turns
+        if turn.run is not None
+        for event in turn.run.traces
+    )
 
 
 def test_offline_run_ignores_all_runtime_environment_settings(
@@ -137,10 +197,11 @@ def test_fresh_backend_resumes_interrupted_checkpoint_deterministically(
         resumed = await resumed_service.resume(
             ResumeDemoCommand(thread_id="restart-thread")
         )
+        chat = await resumed_service.load_conversation("restart-thread")
         after_restart = resumed_backend.diagnostics("restart-thread")
-        return baseline, before_restart, resumed, after_restart
+        return baseline, before_restart, resumed, after_restart, chat
 
-    baseline, before_restart, resumed, after_restart = asyncio.run(scenario())
+    baseline, before_restart, resumed, after_restart, chat = asyncio.run(scenario())
 
     assert before_restart is not None
     assert before_restart.web_search_calls == 2
@@ -155,3 +216,8 @@ def test_fresh_backend_resumes_interrupted_checkpoint_deterministically(
     assert resumed.artifact.markdown_source == baseline.artifact.markdown_source
     assert all(event.run_id.startswith("day15-resume-") for event in resumed.traces)
     assert not any(event.kind in {"tool", "delegation"} for event in resumed.traces)
+    durable_run_ids = {
+        event.run_id
+        for event in chat.turns[0].run.traces  # type: ignore[union-attr]
+    }
+    assert durable_run_ids == {"day15-run-001", "day15-resume-001"}

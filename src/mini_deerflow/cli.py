@@ -8,11 +8,13 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from mini_deerflow.config import Settings
+from mini_deerflow.conversation import SQLiteConversationRepository
 from mini_deerflow.model import create_chat_model
 from mini_deerflow.persistence import (
     PersistenceError,
     ThreadAlreadyExistsError,
     ThreadNotFoundError,
+    create_thread_config,
     list_thread_ids,
     normalize_thread_id,
     open_sqlite_checkpointer,
@@ -261,8 +263,26 @@ async def list_research_threads(
 ) -> tuple[str, ...]:
     """Open the SQLite checkpointer and list its persisted threads."""
 
+    repository = SQLiteConversationRepository(checkpoint_path)
+    conversations = await repository.list_conversations()
+    internal_turn_threads: set[str] = set()
+    for conversation in conversations:
+        for turn in await repository.list_turns(conversation.thread_id):
+            config = create_thread_config(
+                conversation.thread_id,
+                recursion_limit=1,
+                checkpoint_namespace=turn.checkpoint_namespace,
+            )
+            configurable = config.get("configurable", {})
+            internal_id = configurable.get("thread_id")
+            if isinstance(internal_id, str):
+                internal_turn_threads.add(internal_id)
+
     async with open_sqlite_checkpointer(checkpoint_path) as checkpointer:
-        return await list_thread_ids(checkpointer)
+        checkpoint_threads = await list_thread_ids(checkpointer)
+    legacy_threads = set(checkpoint_threads) - internal_turn_threads
+    public_threads = {record.thread_id for record in conversations}
+    return tuple(sorted(legacy_threads | public_threads))
 
 
 def _safe_cli_error(error: BaseException) -> str:

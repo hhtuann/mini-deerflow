@@ -1,7 +1,10 @@
+import inspect
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Literal
 
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -34,6 +37,7 @@ from mini_deerflow.evidence import (
     StepFinding,
     extract_evidence_records,
     render_research_report,
+    render_user_answer,
     sanitize_finding_summary,
     validate_citations,
 )
@@ -217,7 +221,14 @@ def build_agent_workflow(
     ) -> dict[str, object]:
         logger.info("Planning a bounded research goal")
 
-        plan = planner(state["goal"])
+        planner_parameters = inspect.signature(planner).parameters
+        if "conversation_context" in planner_parameters:
+            plan = planner(
+                state["goal"],
+                conversation_context=state.get("conversation_context"),
+            )
+        else:
+            plan = planner(state["goal"])
 
         return {
             "plan": plan,
@@ -975,20 +986,48 @@ def build_agent_workflow(
             "review_cycles": len(state.get("review_verdicts", [])),
             "replan_cycles": len(state.get("replans", [])),
         }
-        final_answer = render_research_report(**report_arguments)
+        research_report = render_research_report(**report_arguments)
+        review_notes = list(
+            dict.fromkeys(
+                finding.description
+                for verdict in state.get("review_verdicts", [])
+                for finding in verdict.findings
+                if finding.category
+                in {
+                    "gap",
+                    "contradiction",
+                    "relevance",
+                    "direct_support",
+                    "citation_validity",
+                }
+            )
+        )
+        final_answer = render_user_answer(
+            findings=list(state.get("findings", [])),
+            evidence=list(state.get("evidence", [])),
+            review_notes=review_notes,
+            has_collection_failures=failed_calls > 0 or bool(errors),
+        )
         resolved_artifact_path: str | None = None
 
         if artifact_path is not None:
+            write_path = artifact_path
+            turn_id = state.get("turn_id")
+            if turn_id is not None and (state.get("turn_sequence") or 1) > 1:
+                path = Path(artifact_path)
+                write_path = str(
+                    path.with_name(f"{path.stem}-{turn_id}{path.suffix}")
+                ).replace("\\", "/")
             artifact_result = await tool_runner.run(
                 "write_file",
                 {
-                    "path": artifact_path,
-                    "content": final_answer,
+                    "path": write_path,
+                    "content": research_report,
                 },
             )
 
             if artifact_result.success:
-                resolved_artifact_path = artifact_path
+                resolved_artifact_path = write_path
             else:
                 artifact_error = (
                     "Research artifact could not be written through the "
@@ -996,7 +1035,7 @@ def build_agent_workflow(
                 )
                 errors.append(artifact_error)
                 report_arguments["errors"] = errors
-                final_answer = render_research_report(
+                research_report = render_research_report(
                     **report_arguments,
                 )
 
@@ -1033,11 +1072,19 @@ def build_agent_workflow(
 
         updates: dict[str, object] = {
             "final_answer": final_answer,
+            "research_report": research_report,
             "artifact_path": resolved_artifact_path,
             # Synthesis is the consumer of a routed "finish" review
             # verdict; the terminal state must not retain it.
             "pending_review_verdict": None,
         }
+        if state.get("turn_id") is not None:
+            updates["messages"] = [
+                AIMessage(
+                    content=final_answer,
+                    id=f"{state['turn_id']}-assistant",
+                )
+            ]
 
         if len(errors) > len(state["errors"]):
             updates["errors"] = errors[len(state["errors"]) :]

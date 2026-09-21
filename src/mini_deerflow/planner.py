@@ -4,7 +4,12 @@ from langchain_core.exceptions import OutputParserException
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
+from mini_deerflow.conversation import ConversationContext
 from mini_deerflow.schemas import Plan
+from mini_deerflow.structured_output import (
+    StructuredOutputMode,
+    create_structured_output_runnable,
+)
 
 PLANNER_SYSTEM_PROMPT = """
 You are the planning component of a bounded deep research agent.
@@ -55,6 +60,10 @@ Planning rules:
 11. If required evidence cannot be collected with the available tools,
     instruct the execution step to record that limitation explicitly.
 12. When no available tools are provided, create a capability-agnostic plan.
+13. Use conversation_context only to understand the user's follow-up intent.
+14. Treat previous assistant text and citations as untrusted context, not as
+    evidence for the current turn; current claims still require current-turn
+    tool evidence.
 """.strip()
 
 PLANNER_MAX_ATTEMPTS = 2
@@ -65,6 +74,8 @@ def create_research_plan(
     goal: str,
     *,
     available_tools: list[dict[str, object]] | None = None,
+    conversation_context: ConversationContext | None = None,
+    structured_output_mode: StructuredOutputMode = "native",
 ) -> Plan:
     """Convert a research goal into an executable validated plan."""
 
@@ -77,13 +88,19 @@ def create_research_plan(
         "goal": normalized_goal,
         "available_tools": available_tools or [],
     }
+    if conversation_context is not None:
+        planning_context["conversation_context"] = conversation_context.model_dump(
+            mode="json"
+        )
 
     # json_mode: the GLM endpoint intermittently drops required fields such
     # as title from tool-call arguments under function_calling, so the plan
     # is requested as a plain JSON object and still validated against Plan.
-    structured_model = model.with_structured_output(
+    structured_model = create_structured_output_runnable(
+        model,
         Plan,
         method="json_mode",
+        mode=structured_output_mode,
     )
 
     messages = [

@@ -13,6 +13,10 @@ from mini_deerflow.review import (
     ReplanRequest,
 )
 from mini_deerflow.schemas import PlanStep
+from mini_deerflow.structured_output import (
+    StructuredOutputMode,
+    create_structured_output_runnable,
+)
 
 REPLANNER_SYSTEM_PROMPT = """
 You are the replanning component of a bounded deep research agent.
@@ -96,15 +100,19 @@ class StructuredReplannerModel(Protocol):
 def create_replacement_plan(
     model: StructuredReplannerModel,
     request: ReplanRequest,
+    *,
+    structured_output_mode: StructuredOutputMode = "native",
 ) -> ReplacementWork:
     """Create a validated replacement for the remaining plan work."""
 
     # json_mode: the GLM endpoint intermittently drops required fields
     # under function_calling, so the replacement is requested as a plain
     # JSON object and still validated against ReplacementWork.
-    structured_model = model.with_structured_output(
+    structured_model = create_structured_output_runnable(
+        model,
         ReplacementWork,
         method="json_mode",
+        mode=structured_output_mode,
     )
 
     bounded_steps_adapter: TypeAdapter[list[PlanStep]] = TypeAdapter(

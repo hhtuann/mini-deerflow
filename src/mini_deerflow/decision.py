@@ -22,6 +22,7 @@ from mini_deerflow.context_budget import (
     project_observations,
     project_summaries,
 )
+from mini_deerflow.conversation import ConversationContext
 from mini_deerflow.evidence import EvidenceRecord
 from mini_deerflow.schemas import PlanStep
 from mini_deerflow.state import AgentState
@@ -44,6 +45,7 @@ class ActionContext(BaseModel):
     )
 
     goal: ResearchGoal
+    conversation_context: ConversationContext | None = None
     step: PlanStep
     completed_step_summaries: list[CompletionSummary] = Field(
         default_factory=list,
@@ -163,9 +165,14 @@ def build_action_context(
         list(state["notes"]),
         resolved_budget,
     )
+    projected_conversation, conversation_metadata = _project_conversation_context(
+        state.get("conversation_context"),
+        max_characters=resolved_budget.max_total_chars // 3,
+    )
 
     context = ActionContext(
         goal=state["goal"],
+        conversation_context=projected_conversation,
         step=step,
         completed_step_summaries=projected_summaries,
         available_tools=registry.definitions(),
@@ -184,8 +191,40 @@ def build_action_context(
                 evidence_metadata,
                 observation_metadata,
                 summary_metadata,
+                conversation_metadata,
             ),
         ),
+    )
+
+
+def _project_conversation_context(
+    context: ConversationContext | None,
+    *,
+    max_characters: int,
+) -> tuple[ConversationContext | None, ProjectionMetadata]:
+    """Keep newest complete turn pairs within the action-context share."""
+
+    if context is None:
+        return None, ProjectionMetadata()
+    messages = list(context.messages)
+    omitted_turns = context.omitted_turns
+    newly_omitted = 0
+    while (
+        messages and sum(len(message.content) for message in messages) > max_characters
+    ):
+        oldest_turn_id = messages[0].turn_id
+        messages = [
+            message for message in messages if message.turn_id != oldest_turn_id
+        ]
+        omitted_turns += 1
+        newly_omitted += 1
+    projected = ConversationContext(
+        messages=tuple(messages),
+        omitted_turns=omitted_turns,
+        estimated_characters=sum(len(message.content) for message in messages),
+    )
+    return projected, ProjectionMetadata(
+        omitted_items=context.omitted_turns + newly_omitted,
     )
 
 

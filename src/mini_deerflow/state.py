@@ -1,10 +1,11 @@
 from operator import add
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
 from mini_deerflow.actions import AgentAction, ToolObservation
+from mini_deerflow.conversation import ConversationContext
 from mini_deerflow.delegation import DelegationRecord
 from mini_deerflow.evidence import (
     EvidenceRecord,
@@ -24,6 +25,9 @@ class AgentState(TypedDict):
     """Shared state passed between nodes in the research workflow."""
 
     goal: str
+    turn_id: NotRequired[str | None]
+    turn_sequence: NotRequired[int | None]
+    conversation_context: NotRequired[ConversationContext | None]
     messages: Annotated[list[AnyMessage], add_messages]
     plan: Plan | None
     current_step: int
@@ -43,11 +47,18 @@ class AgentState(TypedDict):
     evidence: Annotated[list[EvidenceRecord], merge_evidence_records]
     sources: Annotated[list[str], merge_citation_sources]
     final_answer: str | None
+    research_report: NotRequired[str | None]
     artifact_path: str | None
     errors: Annotated[list[str], add]
 
 
-def create_initial_state(goal: str) -> AgentState:
+def create_initial_state(
+    goal: str,
+    *,
+    turn_id: str | None = None,
+    turn_sequence: int | None = None,
+    conversation_context: ConversationContext | None = None,
+) -> AgentState:
     """Create a complete and independent state for a new research run."""
 
     normalized_goal = goal.strip()
@@ -55,9 +66,23 @@ def create_initial_state(goal: str) -> AgentState:
     if not normalized_goal:
         raise ValueError("goal must not be empty")
 
-    return AgentState(
+    messages: list[AnyMessage] = []
+    if conversation_context is not None:
+        for message in conversation_context.messages:
+            message_type = HumanMessage if message.role == "user" else AIMessage
+            messages.append(
+                message_type(content=message.content, id=message.message_id)
+            )
+        messages.append(
+            HumanMessage(
+                content=normalized_goal,
+                id=f"{turn_id or 'turn'}-user",
+            )
+        )
+
+    state = AgentState(
         goal=normalized_goal,
-        messages=[],
+        messages=messages,
         plan=None,
         current_step=0,
         pending_action=None,
@@ -73,6 +98,14 @@ def create_initial_state(goal: str) -> AgentState:
         evidence=[],
         sources=[],
         final_answer=None,
+        research_report=None,
         artifact_path=None,
         errors=[],
     )
+    if turn_id is not None:
+        state["turn_id"] = turn_id
+    if turn_sequence is not None:
+        state["turn_sequence"] = turn_sequence
+    if conversation_context is not None:
+        state["conversation_context"] = conversation_context
+    return state

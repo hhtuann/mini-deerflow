@@ -1,10 +1,11 @@
 import sqlite3
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -12,6 +13,18 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
+from mini_deerflow.conversation import (
+    ActiveTurnError,
+    ConversationAlreadyExistsError,
+    ConversationContext,
+    ConversationNotFoundError,
+    ConversationRecord,
+    IdempotencyConflictError,
+    SessionBudgetExceededError,
+    SQLiteConversationRepository,
+    TurnNotFoundError,
+    TurnRecord,
+)
 from mini_deerflow.decision import ActionSelector
 from mini_deerflow.delegation import (
     BoundedResearcherSubagent,
@@ -27,6 +40,7 @@ from mini_deerflow.persistence import (
     CheckpointUnavailableError,
     ThreadAlreadyExistsError,
     ThreadNotFoundError,
+    checkpoint_lookup_config,
     create_thread_config,
     open_sqlite_checkpointer,
 )
@@ -44,6 +58,7 @@ from mini_deerflow.tools import (
     WriteFileTool,
 )
 from mini_deerflow.tracing import (
+    ExecutionTrace,
     ExecutionTracer,
     TraceErrorCategory,
     TraceErrorCode,
@@ -76,6 +91,8 @@ class RuntimeLimits:
     max_replan_cycles: int = 2
     recursion_limit: int = 100
     max_delegation_concurrency: int = 2
+    max_session_tool_calls: int = 100
+    max_conversation_context_chars: int = 12_000
 
     def __post_init__(self) -> None:
         for name in (
@@ -83,6 +100,8 @@ class RuntimeLimits:
             "max_total_tool_calls",
             "max_replan_cycles",
             "recursion_limit",
+            "max_session_tool_calls",
+            "max_conversation_context_chars",
         ):
             value = getattr(self, name)
 
@@ -114,6 +133,23 @@ class AgentGraph(Protocol):
         """Execute or resume the graph."""
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationTurnSnapshot:
+    """One persisted turn with its isolated checkpointed state and safe trace."""
+
+    record: TurnRecord
+    state: AgentState | None
+    traces: tuple[ExecutionTrace, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSnapshot:
+    """A persisted conversation assembled from ledger and turn checkpoints."""
+
+    conversation: ConversationRecord
+    turns: tuple[ConversationTurnSnapshot, ...]
+
+
 async def _read_checkpoint(
     checkpointer: AsyncCheckpointReader,
     config: dict[str, object],
@@ -136,6 +172,7 @@ class AgentRuntime:
     limits: RuntimeLimits = field(default_factory=RuntimeLimits)
     checkpointer: AsyncCheckpointReader | None = None
     tracer: ExecutionTracer = field(default_factory=ExecutionTracer)
+    conversation_repository: SQLiteConversationRepository | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph, AgentGraph):
@@ -154,16 +191,66 @@ class AgentRuntime:
 
         if not isinstance(self.tracer, ExecutionTracer):
             raise TypeError("tracer must be ExecutionTracer")
+        if self.conversation_repository is not None and not isinstance(
+            self.conversation_repository,
+            SQLiteConversationRepository,
+        ):
+            raise TypeError(
+                "conversation_repository must be SQLiteConversationRepository"
+            )
 
     async def run(
         self,
         goal: str,
         *,
         thread_id: str,
+        turn_id: str | None = None,
     ) -> AgentState:
         """Run one research goal and return its final state."""
 
-        with self.tracer.run_scope(thread_id, "run"):
+        if self.conversation_repository is not None:
+            resolved_turn_id = turn_id or _new_turn_id()
+            if self.checkpointer is not None:
+                legacy_config = create_thread_config(
+                    thread_id,
+                    recursion_limit=self.limits.recursion_limit,
+                )
+                if await _read_checkpoint(self.checkpointer, legacy_config) is not None:
+                    raise ThreadAlreadyExistsError(
+                        f"thread {thread_id!r} already has a checkpoint"
+                    )
+            try:
+                turn = await self.conversation_repository.create_conversation_with_turn(
+                    thread_id=thread_id,
+                    turn_id=resolved_turn_id,
+                    user_message=goal,
+                    session_tool_call_limit=self.limits.max_session_tool_calls,
+                    reserved_tool_calls=self.limits.max_total_tool_calls,
+                )
+            except ConversationAlreadyExistsError as error:
+                try:
+                    existing = await self.conversation_repository.get_turn(
+                        thread_id,
+                        resolved_turn_id,
+                    )
+                except TurnNotFoundError:
+                    raise ThreadAlreadyExistsError(
+                        f"thread {thread_id!r} already has a checkpoint"
+                    ) from error
+                if existing.user_message != goal.strip():
+                    raise IdempotencyConflictError(
+                        "turn_id is already bound to a different goal"
+                    ) from error
+                if existing.status == "completed":
+                    return await self._load_turn_state(existing)
+                raise ActiveTurnError("the first turn is already active") from error
+            return await self._execute_reserved_turn(
+                turn,
+                operation="run",
+                context=ConversationContext(),
+            )
+
+        with self.tracer.run_scope(thread_id, "run", turn_id=turn_id):
             initial_state = create_initial_state(goal)
 
             config = create_thread_config(
@@ -207,12 +294,90 @@ class AgentRuntime:
 
             return _validate_agent_state_result(result)
 
+    async def continue_thread(
+        self,
+        thread_id: str,
+        user_message: str,
+        *,
+        turn_id: str | None = None,
+    ) -> AgentState:
+        """Create a new conversational turn on one persisted public thread."""
+
+        if self.conversation_repository is None:
+            raise CheckpointUnavailableError(
+                "continue_thread requires a configured conversation repository"
+            )
+        resolved_turn_id = turn_id or _new_turn_id()
+        turn, created = await self.conversation_repository.reserve_follow_up(
+            thread_id=thread_id,
+            turn_id=resolved_turn_id,
+            user_message=user_message,
+            reserved_tool_calls=self.limits.max_total_tool_calls,
+        )
+        if not created:
+            if turn.status == "completed":
+                return await self._load_turn_state(turn)
+            raise ActiveTurnError("the submitted turn is already active")
+        try:
+            context = await self.conversation_repository.load_context(
+                thread_id,
+                before_sequence=turn.sequence,
+                max_characters=self.limits.max_conversation_context_chars,
+            )
+        except BaseException:
+            await self.conversation_repository.mark_turn_failed(
+                thread_id=thread_id,
+                turn_id=turn.turn_id,
+                safe_error="Turn context could not be prepared.",
+            )
+            raise
+        return await self._execute_reserved_turn(
+            turn,
+            operation="continue",
+            context=context,
+        )
+
     async def resume(
         self,
         *,
         thread_id: str,
     ) -> AgentState:
         """Continue an existing persisted thread."""
+
+        if self.conversation_repository is not None:
+            try:
+                turns = await self.conversation_repository.list_turns(thread_id)
+            except ConversationNotFoundError:
+                pass
+            else:
+                active = next(
+                    (
+                        turn
+                        for turn in reversed(turns)
+                        if turn.status in {"running", "interrupted"}
+                    ),
+                    None,
+                )
+                if active is None:
+                    if not turns:
+                        raise ThreadNotFoundError(f"thread {thread_id!r} has no turns")
+                    return await self._load_turn_state(turns[-1])
+                if self.limits.max_total_tool_calls > active.reserved_tool_calls:
+                    raise SessionBudgetExceededError(
+                        "resume limit exceeds the turn's durable reservation"
+                    )
+                context = await self.conversation_repository.load_context(
+                    thread_id,
+                    before_sequence=active.sequence,
+                    max_characters=self.limits.max_conversation_context_chars,
+                )
+                if await self._try_load_turn_state(active) is None:
+                    return await self._execute_reserved_turn(
+                        active,
+                        operation="resume",
+                        context=context,
+                    )
+                return await self._resume_conversation_turn(active, context)
 
         with self.tracer.run_scope(thread_id, "resume"):
             config = create_thread_config(
@@ -265,6 +430,211 @@ class AgentRuntime:
 
             return _validate_agent_state_result(result)
 
+    async def list_conversations(self) -> tuple[ConversationRecord, ...]:
+        if self.conversation_repository is None:
+            return ()
+        return await self.conversation_repository.list_conversations()
+
+    async def load_conversation(self, thread_id: str) -> ConversationSnapshot:
+        if self.conversation_repository is None:
+            raise CheckpointUnavailableError(
+                "conversation loading requires a configured repository"
+            )
+        conversation = await self.conversation_repository.get_conversation(thread_id)
+        turns = await self.conversation_repository.list_turns(thread_id)
+        snapshots: list[ConversationTurnSnapshot] = []
+        for turn in turns:
+            state = await self._try_load_turn_state(turn)
+            traces = tuple(
+                ExecutionTrace.model_validate_json(item) for item in turn.trace_events
+            )
+            snapshots.append(
+                ConversationTurnSnapshot(
+                    record=turn,
+                    state=state,
+                    traces=traces,
+                )
+            )
+        return ConversationSnapshot(
+            conversation=conversation,
+            turns=tuple(snapshots),
+        )
+
+    async def record_turn_traces(
+        self,
+        thread_id: str,
+        turn_id: str,
+        events: tuple[ExecutionTrace, ...],
+    ) -> None:
+        if self.conversation_repository is None:
+            return
+        existing = await self.conversation_repository.get_turn(thread_id, turn_id)
+        serialized = tuple(event.model_dump_json() for event in events)
+        merged = tuple(dict.fromkeys(existing.trace_events + serialized))
+        await self.conversation_repository.store_trace_events(
+            thread_id,
+            turn_id,
+            merged,
+        )
+
+    async def _execute_reserved_turn(
+        self,
+        turn: TurnRecord,
+        *,
+        operation: Literal["run", "continue", "resume"],
+        context: ConversationContext,
+    ) -> AgentState:
+        config = create_thread_config(
+            turn.thread_id,
+            recursion_limit=self.limits.recursion_limit,
+            checkpoint_namespace=turn.checkpoint_namespace,
+        )
+        state = create_initial_state(
+            turn.user_message,
+            turn_id=turn.turn_id,
+            turn_sequence=turn.sequence,
+            conversation_context=context,
+        )
+        run_id = ""
+        try:
+            with self.tracer.run_scope(
+                turn.thread_id,
+                operation,
+                turn_id=turn.turn_id,
+            ) as run_id:
+                self.tracer.emit(
+                    kind=TraceKind.CHECKPOINT,
+                    phase=TracePhase.OUTCOME,
+                    outcome=TraceOutcome.READY,
+                    operation=operation,
+                )
+                result = _validate_agent_state_result(
+                    await self.graph.ainvoke(state, config=config)
+                )
+        except BaseException:
+            interrupted = await self._try_checkpoint_state(config)
+            await self.record_turn_traces(
+                turn.thread_id,
+                turn.turn_id,
+                self.tracer.events_for_run(run_id),
+            )
+            await self.conversation_repository.mark_turn_interrupted(
+                thread_id=turn.thread_id,
+                turn_id=turn.turn_id,
+                total_tool_calls=(
+                    interrupted.get("total_tool_calls", 0)
+                    if interrupted is not None
+                    else 0
+                ),
+            )
+            raise
+        assert self.conversation_repository is not None
+        await self.conversation_repository.complete_turn(
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            assistant_response=result.get("final_answer") or "",
+            total_tool_calls=result.get("total_tool_calls", 0),
+        )
+        await self.record_turn_traces(
+            turn.thread_id,
+            turn.turn_id,
+            self.tracer.events_for_run(run_id),
+        )
+        return result
+
+    async def _resume_conversation_turn(
+        self,
+        turn: TurnRecord,
+        context: ConversationContext,
+    ) -> AgentState:
+        del context  # The interrupted checkpoint already owns its projected context.
+        config = create_thread_config(
+            turn.thread_id,
+            recursion_limit=self.limits.recursion_limit,
+            checkpoint_namespace=turn.checkpoint_namespace,
+        )
+        run_id = ""
+        try:
+            with self.tracer.run_scope(
+                turn.thread_id,
+                "resume",
+                turn_id=turn.turn_id,
+            ) as run_id:
+                self.tracer.emit(
+                    kind=TraceKind.CHECKPOINT,
+                    phase=TracePhase.OUTCOME,
+                    outcome=TraceOutcome.RESUMED,
+                    operation="resume",
+                )
+                result = _validate_agent_state_result(
+                    await self.graph.ainvoke(None, config=config)
+                )
+        except BaseException:
+            interrupted = await self._try_checkpoint_state(config)
+            await self.record_turn_traces(
+                turn.thread_id,
+                turn.turn_id,
+                self.tracer.events_for_run(run_id),
+            )
+            assert self.conversation_repository is not None
+            await self.conversation_repository.mark_turn_interrupted(
+                thread_id=turn.thread_id,
+                turn_id=turn.turn_id,
+                total_tool_calls=(
+                    interrupted.get("total_tool_calls", 0)
+                    if interrupted is not None
+                    else turn.total_tool_calls
+                ),
+            )
+            raise
+        assert self.conversation_repository is not None
+        await self.conversation_repository.complete_turn(
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            assistant_response=result.get("final_answer") or "",
+            total_tool_calls=result.get("total_tool_calls", 0),
+        )
+        await self.record_turn_traces(
+            turn.thread_id,
+            turn.turn_id,
+            self.tracer.events_for_run(run_id),
+        )
+        return result
+
+    async def _load_turn_state(self, turn: TurnRecord) -> AgentState:
+        state = await self._try_load_turn_state(turn)
+        if state is None:
+            raise CheckpointUnavailableError("turn checkpoint is unavailable")
+        return state
+
+    async def _try_load_turn_state(self, turn: TurnRecord) -> AgentState | None:
+        config = create_thread_config(
+            turn.thread_id,
+            recursion_limit=self.limits.recursion_limit,
+            checkpoint_namespace=turn.checkpoint_namespace,
+        )
+        return await self._try_checkpoint_state(config)
+
+    async def _try_checkpoint_state(
+        self,
+        config: dict[str, object],
+    ) -> AgentState | None:
+        if self.checkpointer is None:
+            return None
+        checkpoint_tuple = await _read_checkpoint(
+            self.checkpointer,
+            checkpoint_lookup_config(config),
+        )
+        if checkpoint_tuple is None:
+            return None
+        checkpoint = getattr(checkpoint_tuple, "checkpoint", None)
+        if not isinstance(checkpoint, dict):
+            return None
+        channel_values = checkpoint.get("channel_values")
+        if not isinstance(channel_values, dict):
+            return None
+        return cast(AgentState, channel_values)
+
 
 def _validate_agent_state_result(
     result: object,
@@ -288,6 +658,7 @@ def build_agent_runtime(
     context_budget: ContextBudget | None = None,
     artifact_path: str | None = None,
     tracer: ExecutionTracer | None = None,
+    conversation_repository: SQLiteConversationRepository | None = None,
 ) -> AgentRuntime:
     """Build a testable runtime from explicitly supplied dependencies."""
 
@@ -315,6 +686,7 @@ def build_agent_runtime(
         limits=resolved_limits,
         checkpointer=checkpointer,
         tracer=resolved_tracer,
+        conversation_repository=conversation_repository,
     )
 
 
@@ -332,6 +704,7 @@ def create_default_agent_runtime(
     researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
     tracer: ExecutionTracer | None = None,
+    conversation_repository: SQLiteConversationRepository | None = None,
 ) -> AgentRuntime:
     """Create the default local Mini DeerFlow runtime."""
 
@@ -339,6 +712,9 @@ def create_default_agent_runtime(
         raise TypeError("allow_write must be a boolean")
 
     model = model_factory(settings)
+    structured_output_mode = (
+        settings.structured_output_mode if isinstance(model, ChatOpenAI) else "native"
+    )
     workspace = Workspace(workspace_root)
     resolved_web_provider = (
         web_provider
@@ -363,7 +739,10 @@ def create_default_agent_runtime(
     branch_registry = ToolRegistry([web_search_tool, web_fetch_tool])
     resolved_context_budget = context_budget or ContextBudget()
     resolved_researcher = researcher_subagent or BoundedResearcherSubagent(
-        LLMActionSelector(model),
+        LLMActionSelector(
+            model,
+            structured_output_mode=structured_output_mode,
+        ),
         branch_registry,
         context_budget=resolved_context_budget,
     )
@@ -395,13 +774,21 @@ def create_default_agent_runtime(
         create_research_plan,
         model,
         available_tools=action_registry.definitions(),
+        structured_output_mode=structured_output_mode,
     )
 
-    action_selector = LLMActionSelector(model)
-    reviewer = LLMReviewer(model)
+    action_selector = LLMActionSelector(
+        model,
+        structured_output_mode=structured_output_mode,
+    )
+    reviewer = LLMReviewer(
+        model,
+        structured_output_mode=structured_output_mode,
+    )
     replanner = partial(
         create_replacement_plan,
         model,
+        structured_output_mode=structured_output_mode,
     )
 
     return build_agent_runtime(
@@ -416,6 +803,7 @@ def create_default_agent_runtime(
         context_budget=resolved_context_budget,
         artifact_path=artifact_path if allow_write else None,
         tracer=tracer,
+        conversation_repository=conversation_repository,
     )
 
 
@@ -438,6 +826,7 @@ async def open_default_agent_runtime(
     """Open a persistent runtime and close its checkpointer on exit."""
 
     async with open_sqlite_checkpointer(checkpoint_path) as checkpointer:
+        conversation_repository = SQLiteConversationRepository(checkpoint_path)
         yield create_default_agent_runtime(
             settings,
             workspace_root,
@@ -451,4 +840,9 @@ async def open_default_agent_runtime(
             researcher_subagent=researcher_subagent,
             artifact_path=artifact_path,
             tracer=tracer,
+            conversation_repository=conversation_repository,
         )
+
+
+def _new_turn_id() -> str:
+    return f"t-{uuid.uuid4().hex}"

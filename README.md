@@ -5,7 +5,7 @@
 Mini DeerFlow is a local Python project with two entry points:
 
 - a live-capable CLI composed with an OpenAI-compatible model and Jina web provider;
-- a deterministic offline Streamlit mentor demo that needs no API key or network.
+- a Streamlit interface with an explicit live-web mode and a deterministic offline walkthrough.
 
 It is a completed learning MVP—not a production platform, DeerFlow clone, or upstream-compatible implementation.
 
@@ -19,6 +19,7 @@ It is a completed learning MVP—not a production platform, DeerFlow clone, or u
 | Review and bounded replanning | Complete |
 | Depth-one bounded delegation | Complete |
 | SQLite checkpoint and resume | Complete |
+| Persistent multi-turn conversations | Complete |
 | Tool, workspace, and fetch safety boundaries | Complete |
 | Redacted execution tracing | Complete |
 | Deterministic Streamlit mentor demo | Complete |
@@ -47,8 +48,8 @@ Review ──→ Continue / Replan / Finish
 Optional Delegation and Fan-in
   ↓
 Deterministic Synthesis
-  ↓
-Markdown Artifact
+  ├──→ Concise final_answer (chat + next-turn context)
+  └──→ Detailed research_report (artifact + Agent details)
 ```
 
 1. The planner creates a validated plan with 3–7 consecutively numbered steps.
@@ -58,7 +59,8 @@ Markdown Artifact
 5. Proposed citations are canonicalized and checked against successful evidence.
 6. The reviewer chooses `continue`, `replan`, or `finish`; replan replaces only unfinished work.
 7. The parent may run a bounded, depth-one research wave and deterministically fan results in.
-8. Synthesis produces deterministic Markdown and can optionally write it through the workspace boundary.
+8. Synthesis produces a concise public Markdown answer and a separate deterministic
+   internal report; only the report can be written through the workspace boundary.
 
 ### Evidence is not a raw provider result
 
@@ -79,6 +81,8 @@ flowchart TB
     subgraph Application
         Jobs[Single-worker job manager]
         Service[DemoRuntimeService]
+        Conversation[SQLite conversation and turn ledger]
+        Live[LiveDemoBackend]
         Offline[OfflineDemoBackend]
         Runtime[AgentRuntime]
     end
@@ -100,12 +104,16 @@ flowchart TB
     end
 
     CLI --> Runtime
-    UI --> Jobs --> Service --> Offline --> Runtime
+    UI --> Jobs --> Service
+    Service --> Offline --> Runtime
+    Service --> Live --> Runtime
+    Service --> Conversation
+    Runtime --> Conversation
     Runtime --> Graph <--> State
     Graph --> Components
     Runtime --> DB
     Components --> Workspace
-    Components -. live CLI .-> Providers
+    Components -. live CLI and LiveDemoBackend .-> Providers
     Graph --> CrossCutting
 ```
 
@@ -145,15 +153,27 @@ flowchart TD
 | Adaptation | Review and bounded replanning | Completed steps and durable evidence are preserved |
 | Delegation | 2–3 branches, depth one, budget 1–5 per branch | Web-only branches; no nested delegation or writes |
 | Fan-in | Stable branch ordering and citation revalidation | Failed-branch findings are not promoted |
-| Persistence | SQLite checkpoint and thread-based resume | No exactly-once guarantee for external effects |
+| Persistence | SQLite conversation/turn ledger plus turn-isolated checkpoints | No exactly-once guarantee for external effects |
 | Context | Deterministic LLM-facing projections | Character budget; token count is only `ceil(chars / 4)` |
 | Safety | Tool, workspace, fetch-target, and rendering boundaries | Application-level controls, not a production sandbox |
 | Observability | Typed ordered trace and safe projections | No raw payload or production telemetry backend |
+| User answer | Concise evidence-based Markdown with validated links | No raw execution counters, prompts, or report dump |
 | Artifact | Deterministic Markdown and optional confined write | No production artifact serving |
 
-## Deterministic Mentor Demo
+## Streamlit modes
 
-The default Streamlit experience is **offline**, **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.
+The Streamlit app starts in **Live web** mode. It reads the model and Jina settings from
+the local environment or `.env`, then uses the real runtime and real `web_search`/
+`web_fetch` providers. The UI never displays credentials. Its checkpoints and workspace
+are isolated under `.mini-deerflow/live`.
+
+Choose **Offline walkthrough** from the `Execution mode` selector to use the original
+deterministic mentor scenario. It is network-free and stores its data under
+`.mini-deerflow/demo`.
+
+## Deterministic Mentor Walkthrough
+
+The offline walkthrough is **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.
 
 External decision/data seams are replaced with scripted model, provider, resolver, and researcher behavior; trace identity/time is also deterministic. The offline backend constructs settings with `_env_file=None`, needs no model credentials, and does not fall back to a live provider.
 
@@ -168,22 +188,33 @@ flowchart LR
     Wave --> B[Branch B fails safely]
     A --> FanIn[Deterministic fan-in]
     B --> FanIn
-    FanIn --> Artifact[Markdown artifact]
-    Artifact --> Resume[Resume completed thread]
-    Resume --> NoReplay[No completed provider or delegation replay]
+    FanIn --> Answer[Concise user answer]
+    FanIn --> Artifact[Internal research report]
+    Answer --> FollowUp[Follow-up on the same public thread]
+    FollowUp --> NewTurn[New isolated turn and bounded prior context]
 ```
 
 This scenario demonstrates contracts and failure handling. It is not a benchmark of live research quality.
 
 ## Streamlit UI
 
-| Tab | Purpose |
+The main surface is a persistent chat. `New chat` creates a conversation when the first
+message is submitted; later messages call `continue_thread` with the same public
+`thread_id` and a new idempotent `turn_id`. Reloading the app reconstructs the transcript
+from SQLite rather than from Streamlit session memory.
+
+Each completed assistant message contains only the concise, evidence-based
+`final_answer`. A collapsed `🔎 Agent details` expander keeps the execution material
+separate. Detail tabs are created only when that turn has relevant data:
+
+| Per-turn tab | Purpose |
 | --- | --- |
-| Overview | Goal, plan, current step, budgets, and limitations |
+| Execution | Goal, plan, current step, budgets, and limitations |
 | Evidence & Citations | Bounded evidence, provenance, accepted citations, and rejected count |
 | Delegation | Wave/branch status, budget accounting, and fan-in limitations |
+| Review & Replan | Structured verdicts/findings and replacement-step metadata; no raw rationale |
 | Trace | Filtered, ordered, safe execution timeline |
-| Artifact | Structured preview, exact Markdown source, and download |
+| Research report | Structured preview, exact internal Markdown report, and download |
 
 ```text
 Runtime state and trace
@@ -195,13 +226,44 @@ Frozen, allowlisted view models
 Streamlit renderer
 ```
 
-The UI does not directly receive raw messages, prompts, model responses, provider exception bodies, arbitrary tool arguments, checkpoints, SQLite internals, credentials, `.env` content, machine paths, rejected URLs, or raw trace payloads. This is a tested local-demo boundary, not a production frontend security claim.
+The user answer is rendered as sanitized Markdown with HTML disabled, remote images
+removed, and links restricted to validated citation URLs. The internal research report
+is rendered only as inert code inside the collapsed details panel. The UI does not
+directly receive raw prompts, provider exception bodies, arbitrary tool arguments,
+checkpoints, SQLite internals, credentials, `.env` content, machine paths, rejected
+URLs, or raw trace payloads. This is a tested local-demo boundary, not a production
+frontend security claim.
+
+## Multi-turn Runtime Semantics
+
+- `AgentState` belongs to exactly one turn. It is never reused as mutable conversation
+  state.
+- `run(goal, thread_id, turn_id=...)` creates the conversation and its first turn.
+- `continue_thread(thread_id, user_message, turn_id=...)` reserves and executes a new
+  turn. Repeating a completed `(thread_id, turn_id)` returns its persisted checkpoint
+  without replaying tools.
+- `resume(thread_id=...)` only resumes the conversation's active interrupted turn. If
+  all turns are complete, it loads the last completed turn for backward compatibility;
+  it does not create a follow-up.
+- Previous completed user/assistant pairs are projected into a bounded context window
+  for planning the next turn. Previous evidence is not promoted into current-turn
+  evidence or citation membership.
+- `AgentState.final_answer` and the durable ledger response contain only the public
+  answer. `AgentState.research_report` retains the deterministic execution report used
+  by the confined artifact and `Agent details`; it is never fed into a new turn.
+- The SQLite ledger owns conversation metadata, ordered turns, status, tool-call budget,
+  safe response text, and redacted trace JSON. LangGraph owns the execution checkpoint
+  for each turn.
+- Installed LangGraph resets `checkpoint_ns` on a root graph. The runtime therefore
+  derives a deterministic internal saver `thread_id` from the public thread and turn
+  namespace. The public `thread_id` remains stable in every API, ledger row, trace, and
+  UI projection, while root checkpoints remain isolated per turn.
 
 ## Requirements and Setup
 
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
-- API credentials only for live CLI commands; the offline demo needs none
+- API credentials for live CLI and Streamlit web mode; the offline walkthrough needs none
 
 ```bash
 git clone https://github.com/hhtuann/mini-deerflow.git
@@ -227,7 +289,9 @@ Minimum live-model configuration:
 MINI_DEERFLOW_API_KEY=replace-with-your-api-key
 ```
 
-The live CLI also supports model endpoint/name, request/retry settings, and an optional `MINI_DEERFLOW_JINA_API_KEY`. See [`.env.example`](.env.example). Never commit `.env`.
+The live CLI also supports model endpoint/name and request/retry settings.
+`MINI_DEERFLOW_JINA_API_KEY` is required when a live run uses `web_search`.
+See [`.env.example`](.env.example). Never commit `.env`.
 
 ## Run the Streamlit Demo
 
@@ -246,6 +310,12 @@ uv run streamlit run src/mini_deerflow/demo/app.py `
   --server.headless true `
   --browser.gatherUsageStats false
 ```
+
+For a live mentor demo, keep the default **Live web** mode, click **New chat**, submit a
+specific research request, wait for the cited answer, then ask a follow-up in the same
+chat. The sidebar badge distinguishes a configured live runtime from the network-free
+deterministic walkthrough; live-provider readiness is only confirmed by a successful
+web-tool outcome in the per-turn trace or evidence.
 
 The bind address is a launch configuration; the app does not enforce localhost by itself. The repository also disables Streamlit usage-stat gathering in `.streamlit/config.toml`.
 
@@ -335,7 +405,7 @@ uv run python evals/run_evals.py --dataset evals/dataset.json
 
 | Check | Latest verified result |
 | --- | --- |
-| Full pytest | 526 passed, 2 skipped |
+| Full pytest | 542 passed, 2 skipped |
 | Deterministic evaluator | 9/9 cases |
 | Evaluator invariants | 36/36 |
 | Ruff check | Pass |
@@ -418,7 +488,7 @@ No claim is made about source compatibility, behavioral equivalence, feature par
 | One active job per session | Multi-user concurrency and quotas |
 | No authentication/authorization | Identity and resource policy |
 | Local workspace | Isolated, access-controlled artifact storage |
-| Offline Streamlit demo | Explicit live-backend and credential policy |
+| Local live/offline Streamlit demo | Explicit live-backend and credential policy |
 | Local typed trace | Centralized telemetry and retention controls |
 | Application validation | Stronger sandbox and network egress enforcement |
 | No cancellation | Cooperative cancellation and compensation |
@@ -444,7 +514,7 @@ This project exercises:
 
 - [Project-level technical report](docs/project-report-mini-deerflow.md)
 - [Day 15 learning report](docs/report-ngay-15-mini-deerflow.md)
-- [Local deterministic Streamlit demo guide](docs/streamlit-local-demo-day-15.md)
+- [Persistent live/offline Streamlit chat guide](docs/streamlit-local-demo-day-15.md)
 
 The project report is the architecture deep dive; this README is the GitHub entry point.
 

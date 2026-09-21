@@ -13,6 +13,10 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.context_budget import render_llm_payload
 from mini_deerflow.decision import ActionContext
+from mini_deerflow.structured_output import (
+    StructuredOutputMode,
+    create_structured_output_runnable,
+)
 
 ACTION_SELECTOR_SYSTEM_PROMPT = """
 You are the action-selection component of a bounded deep research agent.
@@ -115,15 +119,19 @@ class LLMActionSelector:
     def __init__(
         self,
         model: StructuredOutputModel,
+        *,
+        structured_output_mode: StructuredOutputMode = "native",
     ) -> None:
         if not isinstance(model, StructuredOutputModel):
             raise TypeError(
                 "model must support structured output",
             )
 
-        structured_model = model.with_structured_output(
+        structured_model = create_structured_output_runnable(
+            model,
             ActionDecision,
             method="json_mode",
+            mode=structured_output_mode,
         )
 
         if not isinstance(

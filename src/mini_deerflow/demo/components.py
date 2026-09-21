@@ -35,7 +35,7 @@ def render_empty_demo() -> None:
     st.info("Run a new thread or resume an existing thread to populate the demo.")
 
 
-def render_overview(view: DemoRunView) -> None:
+def render_overview(view: DemoRunView, *, key_prefix: str = "demo") -> None:
     """Render goal, plan, limits, and public limitations."""
 
     st.subheader("Goal")
@@ -55,7 +55,7 @@ def render_overview(view: DemoRunView) -> None:
         ],
         hide_index=True,
         width="stretch",
-        key="demo-plan-table",
+        key=f"{key_prefix}-plan-table",
     )
 
     budget = view.budget
@@ -84,7 +84,7 @@ def render_overview(view: DemoRunView) -> None:
 
 
 def render_evidence_and_citations(view: DemoRunView) -> None:
-    """Render bounded evidence, accepted citations, and review chronology."""
+    """Render bounded evidence and accepted citations."""
 
     st.subheader("Evidence")
     if not view.evidence:
@@ -112,12 +112,12 @@ def render_evidence_and_citations(view: DemoRunView) -> None:
         st.text("No citations were accepted.")
     st.metric("Rejected citation count", view.rejected_citation_count)
 
-    st.subheader("Review and replan chronology")
-    if not view.reviews:
-        st.text("No review cycles were recorded.")
+
+def render_review_and_replan(view: DemoRunView) -> None:
+    """Render structured review outcomes without model rationale or prompts."""
+
     for review in view.reviews:
         st.text(f"Review {review.review_number}: {review.route}")
-        st.text(review.rationale)
         for finding in review.findings:
             st.text(f"Finding ({finding.category}): {finding.description}")
             st.text(
@@ -131,10 +131,9 @@ def render_evidence_and_citations(view: DemoRunView) -> None:
             + ", ".join(str(number) for number in replan.replaced_step_numbers)
         )
         st.text("Replacement steps: " + ", ".join(replan.replacement_step_titles))
-        st.text(replan.review_rationale)
 
 
-def render_delegation(view: DemoRunView) -> None:
+def render_delegation(view: DemoRunView, *, key_prefix: str = "demo") -> None:
     """Render safe branch summaries and fan-in results."""
 
     if not view.delegations:
@@ -157,7 +156,7 @@ def render_delegation(view: DemoRunView) -> None:
             ],
             hide_index=True,
             width="stretch",
-            key=f"demo-delegation-table-{wave_number}",
+            key=f"{key_prefix}-delegation-table-{wave_number}",
         )
         budget_columns = st.columns(3)
         budget_columns[0].metric("Reserved", wave.reserved_tool_calls)
@@ -220,6 +219,7 @@ def render_trace(
         [
             {
                 "Thread": event.thread_id,
+                "Turn": event.turn_id or "",
                 "Run": event.run_id,
                 "Sequence": event.sequence,
                 "Kind": event.kind,
@@ -248,7 +248,7 @@ def render_trace(
     )
 
 
-def render_artifact(view: DemoRunView) -> None:
+def render_artifact(view: DemoRunView, *, key_prefix: str = "demo") -> None:
     """Render a structured preview and the exact source without executing Markdown."""
 
     artifact = view.artifact
@@ -272,7 +272,7 @@ def render_artifact(view: DemoRunView) -> None:
         data=artifact.markdown_source,
         file_name="deterministic-mentor-report.md",
         mime="text/markdown",
-        key="demo-download-artifact",
+        key=f"{key_prefix}-download-artifact",
         on_click="ignore",
     )
 
@@ -281,27 +281,44 @@ def render_demo_tabs(
     view: DemoRunView | None,
     *,
     live_traces: Sequence[TraceEventView] | None = None,
+    key_prefix: str = "demo",
 ) -> None:
-    """Render the one-page demo's exactly five required tabs."""
+    """Render only the execution-detail sections relevant to this turn."""
 
-    overview, evidence, delegation, trace, artifact = st.tabs(
-        [
-            "Overview",
-            "Evidence & Citations",
-            "Delegation",
-            "Trace",
-            "Artifact",
-        ]
-    )
-    with overview:
-        render_empty_demo() if view is None else render_overview(view)
-    with evidence:
-        render_empty_demo() if view is None else render_evidence_and_citations(view)
-    with delegation:
-        render_empty_demo() if view is None else render_delegation(view)
-    with trace:
-        completed_traces = () if view is None else tuple(view.traces)
-        traces = completed_traces if live_traces is None else tuple(live_traces)
-        render_trace(traces)
-    with artifact:
-        render_empty_demo() if view is None else render_artifact(view)
+    if view is None:
+        render_empty_demo()
+        return
+
+    traces = tuple(view.traces) if live_traces is None else tuple(live_traces)
+    sections: list[tuple[str, object]] = [
+        ("Execution", lambda: render_overview(view, key_prefix=key_prefix))
+    ]
+    if view.evidence or view.accepted_citations or view.rejected_citation_count:
+        sections.append(
+            ("Evidence & Citations", lambda: render_evidence_and_citations(view))
+        )
+    if view.delegations:
+        sections.append(
+            ("Delegation", lambda: render_delegation(view, key_prefix=key_prefix))
+        )
+    if view.reviews or view.replans:
+        sections.append(("Review & Replan", lambda: render_review_and_replan(view)))
+    if traces:
+        sections.append(
+            (
+                "Trace",
+                lambda: render_trace(traces, key_prefix=f"{key_prefix}-trace"),
+            )
+        )
+    if view.artifact.available:
+        sections.append(
+            (
+                "Research report",
+                lambda: render_artifact(view, key_prefix=key_prefix),
+            )
+        )
+
+    tabs = st.tabs([label for label, _ in sections])
+    for tab, (_, renderer) in zip(tabs, sections, strict=True):
+        with tab:
+            renderer()

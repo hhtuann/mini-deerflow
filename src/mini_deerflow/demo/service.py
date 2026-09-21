@@ -3,10 +3,26 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+from uuid import uuid4
 
-from mini_deerflow.demo.view_models import DemoRunView, project_demo_run
+from mini_deerflow.conversation import (
+    ActiveTurnError,
+    ConversationAlreadyExistsError,
+    ConversationNotFoundError,
+    ConversationRecord,
+    IdempotencyConflictError,
+    SessionBudgetExceededError,
+)
+from mini_deerflow.demo.view_models import (
+    ChatSessionView,
+    ConversationSummaryView,
+    DemoRunView,
+    project_chat_session,
+    project_conversation_summary,
+    project_demo_run,
+)
 from mini_deerflow.persistence import (
     CheckpointPathError,
     CheckpointStorageError,
@@ -16,7 +32,7 @@ from mini_deerflow.persistence import (
     ThreadNotFoundError,
     normalize_thread_id,
 )
-from mini_deerflow.runtime import RuntimeLimits
+from mini_deerflow.runtime import ConversationSnapshot, RuntimeLimits
 from mini_deerflow.state import AgentState
 from mini_deerflow.tracing import ExecutionTrace, TraceSink
 
@@ -59,10 +75,26 @@ class RunDemoCommand:
 
     thread_id: str
     goal: str = DEFAULT_DEMO_GOAL
+    turn_id: str = field(default_factory=lambda: f"turn-{uuid4().hex}")
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", _validated_thread_id(self.thread_id))
         object.__setattr__(self, "goal", _validated_goal(self.goal))
+        object.__setattr__(self, "turn_id", _validated_thread_id(self.turn_id))
+
+
+@dataclass(frozen=True, slots=True)
+class ContinueDemoCommand:
+    """A validated follow-up on one existing conversation."""
+
+    thread_id: str
+    user_message: str
+    turn_id: str = field(default_factory=lambda: f"turn-{uuid4().hex}")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "thread_id", _validated_thread_id(self.thread_id))
+        object.__setattr__(self, "user_message", _validated_goal(self.user_message))
+        object.__setattr__(self, "turn_id", _validated_thread_id(self.turn_id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +120,10 @@ class _BackendResult:
 class DemoBackend(Protocol):
     """Backend seam for offline mode and a future explicitly configured live mode."""
 
+    @property
+    def limits(self) -> RuntimeLimits:
+        """Return public execution limits used for safe projection."""
+
     async def run(
         self,
         command: RunDemoCommand,
@@ -104,8 +140,22 @@ class DemoBackend(Protocol):
     ) -> _BackendResult:
         """Resume a persisted thread and return an internal runtime result."""
 
+    async def continue_thread(
+        self,
+        command: ContinueDemoCommand,
+        *,
+        trace_sink: TraceSink | None = None,
+    ) -> _BackendResult:
+        """Execute one new turn on an existing conversation."""
+
     async def list_threads(self) -> tuple[str, ...]:
         """List persisted thread identifiers in deterministic order."""
+
+    async def list_conversations(self) -> tuple[ConversationRecord, ...]:
+        """List durable conversation metadata."""
+
+    async def load_conversation(self, thread_id: str) -> ConversationSnapshot:
+        """Load durable turns and isolated per-turn projections."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,8 +196,34 @@ class DemoRuntimeService:
             limits=result.limits,
         )
 
+    async def continue_thread(
+        self,
+        command: ContinueDemoCommand,
+        *,
+        trace_sink: TraceSink | None = None,
+    ) -> DemoRunView:
+        result = await self.backend.continue_thread(
+            command,
+            trace_sink=trace_sink,
+        )
+        return project_demo_run(
+            result.state,
+            result.traces,
+            thread_id=command.thread_id,
+            limits=result.limits,
+        )
+
     async def list_threads(self) -> tuple[str, ...]:
         return await self.backend.list_threads()
+
+    async def list_conversations(self) -> tuple[ConversationSummaryView, ...]:
+        records = await self.backend.list_conversations()
+        return tuple(project_conversation_summary(record) for record in records)
+
+    async def load_conversation(self, thread_id: str) -> ChatSessionView:
+        normalized = _validated_thread_id(thread_id)
+        snapshot = await self.backend.load_conversation(normalized)
+        return project_chat_session(snapshot, limits=self.backend.limits)
 
 
 def map_demo_error(error: BaseException, reference_id: str = "demo") -> str:
@@ -157,6 +233,16 @@ def map_demo_error(error: BaseException, reference_id: str = "demo") -> str:
         return "Input validation failed."
     if isinstance(error, ThreadAlreadyExistsError):
         return "Thread already exists. Choose Resume or a new ID."
+    if isinstance(error, ConversationAlreadyExistsError):
+        return "Conversation already exists. Open it and send a follow-up."
+    if isinstance(error, ActiveTurnError):
+        return "This conversation already has an active turn."
+    if isinstance(error, IdempotencyConflictError):
+        return "That turn ID is already bound to a different message."
+    if isinstance(error, SessionBudgetExceededError):
+        return "This conversation has reached its session tool-call limit."
+    if isinstance(error, ConversationNotFoundError):
+        return "Conversation was not found."
     if isinstance(error, ThreadNotFoundError):
         return "No checkpoint exists for this thread."
     if isinstance(

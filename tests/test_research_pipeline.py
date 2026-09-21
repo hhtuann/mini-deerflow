@@ -155,7 +155,7 @@ def test_pipeline_tracks_multiple_sources_deduplicates_and_rejects_unknown(
     evidence_counts = [len(context.evidence) for context in selector.contexts]
     assert evidence_counts == [0, 2, 2, 2]
 
-    report = result["final_answer"]
+    report = result["research_report"]
     assert report is not None
     assert "## Findings" in report
     assert "## Evidence" in report
@@ -174,7 +174,7 @@ def test_artifact_is_written_only_when_enabled(tmp_path: Path) -> None:
     assert writable_result["artifact_path"] == "reports/research.md"
     assert (
         writable_workspace.read_text("reports/research.md")
-        == (writable_result["final_answer"])
+        == (writable_result["research_report"])
     )
     assert writable_workspace.list_files() == ("reports/research.md",)
 
@@ -242,7 +242,8 @@ def test_artifact_path_traversal_is_a_controlled_execution_error(
     assert result["artifact_path"] is None
     assert not (tmp_path / "escaped.md").exists()
     assert "Research artifact could not be written" in result["errors"][-1]
-    assert "Research artifact could not be written" in result["final_answer"]
+    assert "Research artifact could not be written" in result["research_report"]
+    assert "Research artifact could not be written" not in result["final_answer"]
 
 
 class CrashAfterEvidenceSelector:

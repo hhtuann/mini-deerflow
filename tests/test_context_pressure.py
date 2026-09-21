@@ -8,6 +8,7 @@ from mini_deerflow.context_budget import (
     fit_context_to_budget,
     payload_size,
 )
+from mini_deerflow.conversation import ConversationContext, ConversationMessage
 from mini_deerflow.decision import build_action_context
 from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
 from mini_deerflow.review import (
@@ -187,6 +188,53 @@ def test_selector_context_hard_bound_under_all_tier_pressure() -> None:
     assert len(state["evidence"][0].excerpt) > 3_500
     assert len(state["notes"][0]) == 4_000
     assert len(state["tool_observations"][0].result.data["content"]) > 5_000
+
+
+def test_selector_compacts_persisted_conversation_before_total_pressure() -> None:
+    budget = all_tier_budget()
+    state = create_initial_state("Compare two bounded research topics.")
+    state["plan"] = Plan(
+        goal=state["goal"],
+        steps=[
+            PlanStep(
+                step_number=number,
+                title=f"Step {number}",
+                objective="Collect bounded evidence.",
+                success_criteria="Record one bounded result.",
+            )
+            for number in range(1, 4)
+        ],
+    )
+    messages = tuple(
+        ConversationMessage(
+            message_id=f"message-{index}",
+            turn_id=f"turn-{index // 2}",
+            role="user" if index % 2 == 0 else "assistant",
+            content=("C" * 450),
+        )
+        for index in range(12)
+    )
+    state["conversation_context"] = ConversationContext(
+        messages=messages,
+        estimated_characters=sum(len(message.content) for message in messages),
+    )
+
+    context = build_action_context(
+        state,
+        ToolRegistry(),
+        max_tool_calls_per_step=5,
+        max_total_tool_calls=20,
+        context_budget=budget,
+    )
+
+    assert payload_size(context) <= budget.max_total_chars
+    assert context.conversation_context is not None
+    assert len(context.conversation_context.messages) < len(messages)
+    assert context.conversation_context.estimated_characters <= (
+        budget.max_total_chars // 3
+    )
+    assert context.context_projection is not None
+    assert context.context_projection.omitted_items >= 1
 
 
 def test_reviewer_context_hard_bound_under_all_tier_pressure() -> None:

@@ -1,4 +1,4 @@
-"""One-page localhost Streamlit application for the deterministic mentor demo."""
+"""Persistent multi-turn Streamlit chat for the Mini DeerFlow runtime."""
 
 from __future__ import annotations
 
@@ -6,63 +6,105 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import streamlit as st
 
-from mini_deerflow.demo.components import render_demo_tabs, render_status_strip
+from mini_deerflow.demo.components import render_demo_tabs, render_trace
 from mini_deerflow.demo.jobs import DemoJobManager, JobSnapshot, JobState
+from mini_deerflow.demo.live_backend import LiveDemoBackend
 from mini_deerflow.demo.offline_scenario import OfflineDemoBackend
 from mini_deerflow.demo.service import (
+    ContinueDemoCommand,
     DemoRuntimeService,
     ResumeDemoCommand,
     RunDemoCommand,
     map_demo_error,
 )
-from mini_deerflow.demo.view_models import DemoRunView, TraceEventView
+from mini_deerflow.demo.view_models import (
+    ChatSessionView,
+    ConversationSummaryView,
+    DemoRunView,
+    sanitize_answer_markdown,
+)
 from mini_deerflow.tracing import TraceSink
-
-SAMPLE_GOAL = "Demonstrate the bounded Mini DeerFlow MVP with verifiable evidence."
-DEFAULT_THREAD_ID = "day-15-mentor-demo"
 
 _SERVICE_KEY = "demo-runtime-service"
 _MANAGER_KEY = "demo-job-manager"
-_THREADS_KEY = "demo-thread-options"
-_VIEW_KEY = "demo-last-completed-view"
-_TRACES_KEY = "demo-live-traces"
-_MESSAGE_KEY = "demo-user-message"
+_CONVERSATIONS_KEY = "demo-conversations"
+_SELECTED_THREAD_KEY = "demo-selected-thread"
+_SESSION_KEY = "demo-chat-session"
 _ERROR_KEY = "demo-user-error"
 _HANDLED_JOB_KEY = "demo-handled-job"
+_LIVE_TRACES_KEY = "demo-live-traces"
+_PENDING_MESSAGE_KEY = "demo-pending-message"
+_MODE_KEY = "demo-execution-mode"
+_ACTIVE_MODE_KEY = "demo-active-execution-mode"
+
+_LIVE_MODE = "Live web"
+_OFFLINE_MODE = "Offline walkthrough"
 
 
 def _run_async(operation: Awaitable[object]) -> object:
-    """Run a short async façade operation from the Streamlit script thread."""
-
     return asyncio.run(operation)
 
 
-def _refresh_threads(service: DemoRuntimeService) -> tuple[str, ...]:
-    threads = _run_async(service.list_threads())
-    assert isinstance(threads, tuple)
-    st.session_state[_THREADS_KEY] = threads
-    return threads
+def _new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex}"
 
 
-def _default_dependencies() -> tuple[DemoRuntimeService, DemoJobManager]:
-    """Create local dependencies lazily; importing this module has no side effects."""
+def _default_dependencies(mode: str) -> tuple[DemoRuntimeService, DemoJobManager]:
+    """Create local dependencies lazily without doing network work."""
 
-    if _SERVICE_KEY not in st.session_state:
-        demo_root = Path.cwd() / ".mini-deerflow" / "demo"
-        st.session_state[_SERVICE_KEY] = DemoRuntimeService(
-            OfflineDemoBackend(demo_root)
+    if mode not in {_LIVE_MODE, _OFFLINE_MODE}:
+        raise ValueError("unknown execution mode")
+    if _ACTIVE_MODE_KEY not in st.session_state and _SERVICE_KEY in st.session_state:
+        st.session_state[_ACTIVE_MODE_KEY] = mode
+    if st.session_state.get(_ACTIVE_MODE_KEY) != mode:
+        root_name = "live" if mode == _LIVE_MODE else "demo"
+        storage_root = Path.cwd() / ".mini-deerflow" / root_name
+        backend = (
+            LiveDemoBackend(storage_root)
+            if mode == _LIVE_MODE
+            else OfflineDemoBackend(storage_root)
         )
+        st.session_state[_SERVICE_KEY] = DemoRuntimeService(backend)
+        st.session_state[_ACTIVE_MODE_KEY] = mode
+        for key in (
+            _CONVERSATIONS_KEY,
+            _SELECTED_THREAD_KEY,
+            _SESSION_KEY,
+            _HANDLED_JOB_KEY,
+            _LIVE_TRACES_KEY,
+        ):
+            st.session_state.pop(key, None)
     if _MANAGER_KEY not in st.session_state:
         st.session_state[_MANAGER_KEY] = DemoJobManager(
-            error_mapper=lambda error, job_id: map_demo_error(
-                error,
-                reference_id=job_id,
-            )
+            error_mapper=lambda error, job_id: map_demo_error(error, job_id)
         )
     return st.session_state[_SERVICE_KEY], st.session_state[_MANAGER_KEY]
+
+
+def _refresh_conversations(
+    service: DemoRuntimeService,
+) -> tuple[ConversationSummaryView, ...]:
+    records = _run_async(service.list_conversations())
+    assert isinstance(records, tuple)
+    st.session_state[_CONVERSATIONS_KEY] = records
+    return records
+
+
+def _load_selected_conversation(
+    service: DemoRuntimeService,
+) -> ChatSessionView | None:
+    thread_id = st.session_state.get(_SELECTED_THREAD_KEY)
+    if not isinstance(thread_id, str):
+        st.session_state[_SESSION_KEY] = None
+        return None
+    session = _run_async(service.load_conversation(thread_id))
+    assert isinstance(session, ChatSessionView)
+    st.session_state[_SESSION_KEY] = session
+    return session
 
 
 def _submit(
@@ -70,33 +112,64 @@ def _submit(
     *,
     operation: str,
     thread_id: str,
+    turn_id: str | None,
     task: Callable[[TraceSink], DemoRunView],
 ) -> None:
     st.session_state[_ERROR_KEY] = None
-    st.session_state[_MESSAGE_KEY] = None
-    st.session_state[_TRACES_KEY] = ()
-    manager.submit(operation=operation, thread_id=thread_id, task=task)
+    st.session_state[_LIVE_TRACES_KEY] = ()
+    manager.submit(
+        operation=operation,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        task=task,
+    )
 
 
-def _submit_run(
+def _submit_message(
     service: DemoRuntimeService,
     manager: DemoJobManager,
-    *,
-    thread_id: str,
-    goal: str,
+    message: str,
 ) -> None:
-    command = RunDemoCommand(thread_id=thread_id, goal=goal)
-
-    def task(trace_sink: TraceSink) -> DemoRunView:
-        return cast(
-            DemoRunView,
-            _run_async(service.run(command, trace_sink=trace_sink)),
+    selected = st.session_state.get(_SELECTED_THREAD_KEY)
+    st.session_state[_PENDING_MESSAGE_KEY] = message
+    turn_id = _new_id("turn")
+    if isinstance(selected, str):
+        follow_up = ContinueDemoCommand(
+            thread_id=selected,
+            turn_id=turn_id,
+            user_message=message,
         )
+
+        def task(trace_sink: TraceSink) -> DemoRunView:
+            return cast(
+                DemoRunView,
+                _run_async(service.continue_thread(follow_up, trace_sink=trace_sink)),
+            )
+
+        operation = "continue"
+        thread_id = selected
+    else:
+        thread_id = _new_id("chat")
+        first_turn = RunDemoCommand(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            goal=message,
+        )
+
+        def task(trace_sink: TraceSink) -> DemoRunView:
+            return cast(
+                DemoRunView,
+                _run_async(service.run(first_turn, trace_sink=trace_sink)),
+            )
+
+        operation = "run"
+        st.session_state[_SELECTED_THREAD_KEY] = thread_id
 
     _submit(
         manager,
-        operation="run",
-        thread_id=command.thread_id,
+        operation=operation,
+        thread_id=thread_id,
+        turn_id=turn_id,
         task=task,
     )
 
@@ -104,10 +177,9 @@ def _submit_run(
 def _submit_resume(
     service: DemoRuntimeService,
     manager: DemoJobManager,
-    *,
     thread_id: str,
 ) -> None:
-    command = ResumeDemoCommand(thread_id=thread_id)
+    command = ResumeDemoCommand(thread_id)
 
     def task(trace_sink: TraceSink) -> DemoRunView:
         return cast(
@@ -118,72 +190,53 @@ def _submit_resume(
     _submit(
         manager,
         operation="resume",
-        thread_id=command.thread_id,
+        thread_id=thread_id,
+        turn_id=None,
         task=task,
     )
 
 
-def _remember_traces(new_events: tuple[TraceEventView, ...]) -> None:
-    previous = tuple(st.session_state.get(_TRACES_KEY, ()))
-    st.session_state[_TRACES_KEY] = previous + new_events
-
-
 def _consume_terminal_snapshot(
     service: DemoRuntimeService,
+    manager: DemoJobManager,
     snapshot: JobSnapshot,
 ) -> bool:
-    """Copy one terminal result into UI state, including very fast jobs."""
-
     if snapshot.active or st.session_state.get(_HANDLED_JOB_KEY) == snapshot.job_id:
         return False
-    if snapshot.state is JobState.SUCCEEDED and snapshot.view is not None:
-        st.session_state[_VIEW_KEY] = snapshot.view
-        st.session_state[_TRACES_KEY] = tuple(snapshot.view.traces)
-        st.session_state[_MESSAGE_KEY] = (
-            f"{snapshot.operation.title()} completed for thread {snapshot.thread_id}."
-        )
-        st.session_state[_ERROR_KEY] = None
-        try:
-            _refresh_threads(service)
-        except Exception as error:  # noqa: BLE001 - converted at the UI boundary
-            st.session_state[_ERROR_KEY] = map_demo_error(error)
-    elif snapshot.state is JobState.FAILED:
-        st.session_state[_ERROR_KEY] = snapshot.error_message
+    st.session_state[_LIVE_TRACES_KEY] = manager.trace_history()
+    st.session_state[_PENDING_MESSAGE_KEY] = None
+    st.session_state[_ERROR_KEY] = (
+        snapshot.error_message if snapshot.state is JobState.FAILED else None
+    )
+    try:
+        _refresh_conversations(service)
+        _load_selected_conversation(service)
+    except Exception as error:  # noqa: BLE001 - safe UI boundary
+        st.session_state[_ERROR_KEY] = map_demo_error(error, snapshot.job_id)
     st.session_state[_HANDLED_JOB_KEY] = snapshot.job_id
     return True
 
 
 @st.fragment(run_every=0.5, key="demo-active-job-poll")
-def _poll_active_job(
-    service: DemoRuntimeService,
-    manager: DemoJobManager,
-) -> None:
-    """Poll and redraw the complete active-job surface as traces arrive."""
+def _poll_active_job(service: DemoRuntimeService, manager: DemoJobManager) -> None:
+    """Show live progress and refresh the durable transcript when work ends."""
 
-    _remember_traces(manager.drain_trace_views())
     snapshot = manager.snapshot()
     if snapshot is None:
         return
     if snapshot.active:
-        render_status_strip(
-            operation=snapshot.operation.title(),
-            state=snapshot.state.value,
-            thread_id=snapshot.thread_id,
-        )
-        view = st.session_state.get(_VIEW_KEY)
-        if isinstance(view, DemoRunView):
-            st.caption(
-                f"Overview, evidence, delegation, and artifact retain the last "
-                f"completed safe result for thread {view.thread_id}; Trace shows "
-                f"the active {snapshot.operation} for thread {snapshot.thread_id}."
-            )
-        render_demo_tabs(
-            view if isinstance(view, DemoRunView) else None,
-            live_traces=tuple(st.session_state.get(_TRACES_KEY, ())),
-        )
+        events = manager.trace_history()
+        with st.status(
+            f"{snapshot.operation.title()} · {snapshot.state.value}",
+            state="running",
+            expanded=bool(events),
+        ):
+            st.caption(f"Thread: {snapshot.thread_id}")
+        if events:
+            with st.expander("Live execution trace", expanded=False):
+                render_trace(events, key_prefix=f"live-{snapshot.job_id}")
         return
-
-    _consume_terminal_snapshot(service, snapshot)
+    _consume_terminal_snapshot(service, manager, snapshot)
     st.rerun(scope="app")
 
 
@@ -193,163 +246,216 @@ def _render_sidebar(
     *,
     active: bool,
 ) -> None:
-    st.sidebar.header("Demo controls")
-    st.sidebar.badge("Offline deterministic — no network", color="green")
-    st.sidebar.text("Scenario: Mentor walkthrough v1")
-
-    thread_id = st.sidebar.text_input(
-        "New thread ID",
-        value=DEFAULT_THREAD_ID,
-        key="demo-new-thread-id",
-        disabled=active,
-    )
-    goal = st.sidebar.text_area(
-        "Goal",
-        value=SAMPLE_GOAL,
-        key="demo-goal",
-        disabled=active,
-    )
-
-    threads = tuple(st.session_state.get(_THREADS_KEY, ()))
-    selected_thread = st.sidebar.selectbox(
-        "Existing thread",
-        options=threads,
-        index=0 if threads else None,
-        key="demo-selected-thread",
-        disabled=active or not threads,
-        placeholder="No persisted threads",
-    )
+    mode = st.session_state[_ACTIVE_MODE_KEY]
+    st.sidebar.title("Mini DeerFlow")
+    if mode == _LIVE_MODE:
+        st.sidebar.badge("LIVE mode · configured runtime", color="blue")
+        st.sidebar.caption(
+            "Readiness is confirmed only by a successful web-tool outcome; "
+            "Jina key is required for web_search."
+        )
+    else:
+        st.sidebar.badge("OFFLINE · deterministic", color="green")
+        st.sidebar.caption("No network calls; intended only for a walkthrough.")
 
     if st.sidebar.button(
-        "Run",
+        "New chat",
         type="primary",
-        key="demo-run",
+        key="demo-new-chat",
         disabled=active,
-        use_container_width=True,
+        width="stretch",
     ):
-        try:
-            _submit_run(
-                service,
-                manager,
-                thread_id=thread_id,
-                goal=goal,
-            )
-        except Exception as error:  # noqa: BLE001 - converted at the UI boundary
-            st.session_state[_ERROR_KEY] = map_demo_error(error)
+        st.session_state[_SELECTED_THREAD_KEY] = None
+        st.session_state[_SESSION_KEY] = None
+        st.session_state[_ERROR_KEY] = None
         st.rerun()
 
     if st.sidebar.button(
-        "Resume selected thread",
-        key="demo-resume",
-        disabled=active or selected_thread is None,
-        use_container_width=True,
-    ):
-        try:
-            assert selected_thread is not None
-            _submit_resume(
-                service,
-                manager,
-                thread_id=selected_thread,
-            )
-        except Exception as error:  # noqa: BLE001 - converted at the UI boundary
-            st.session_state[_ERROR_KEY] = map_demo_error(error)
-        st.rerun()
-
-    if st.sidebar.button(
-        "Refresh threads",
-        key="demo-refresh-threads",
+        "Refresh",
+        key="demo-refresh-conversations",
         disabled=active,
-        use_container_width=True,
+        width="stretch",
     ):
         try:
-            _refresh_threads(service)
-            st.session_state[_MESSAGE_KEY] = "Thread list refreshed."
+            _refresh_conversations(service)
+            _load_selected_conversation(service)
             st.session_state[_ERROR_KEY] = None
-        except Exception as error:  # noqa: BLE001 - converted at the UI boundary
+        except Exception as error:  # noqa: BLE001 - safe UI boundary
             st.session_state[_ERROR_KEY] = map_demo_error(error)
         st.rerun()
 
-    st.sidebar.info(
-        "Local learning demo. Not production-ready. Not DeerFlow upstream parity."
+    st.sidebar.subheader("Chats")
+    conversations = tuple(st.session_state.get(_CONVERSATIONS_KEY, ()))
+    selected = st.session_state.get(_SELECTED_THREAD_KEY)
+    if not conversations:
+        st.sidebar.caption("No conversations yet.")
+    for record in conversations:
+        label = record.title
+        if record.thread_id == selected:
+            label = f"● {label}"
+        if st.sidebar.button(
+            label,
+            key=f"conversation-{record.thread_id}",
+            disabled=active,
+            width="stretch",
+            help=record.thread_id,
+        ):
+            st.session_state[_SELECTED_THREAD_KEY] = record.thread_id
+            try:
+                _load_selected_conversation(service)
+                st.session_state[_ERROR_KEY] = None
+            except Exception as error:  # noqa: BLE001 - safe UI boundary
+                st.session_state[_ERROR_KEY] = map_demo_error(error)
+            st.rerun()
+
+    st.sidebar.divider()
+    st.sidebar.caption(
+        "Local learning MVP. Each turn has isolated evidence, trace, artifact, "
+        "budget, and checkpoint state."
     )
 
 
-def render_page(
+def _render_turn(turn) -> None:
+    with st.chat_message("user"):
+        st.text(turn.user_message)
+    with st.chat_message("assistant"):
+        if turn.status == "completed" and turn.assistant_message:
+            allowed_urls = () if turn.run is None else turn.run.accepted_citations
+            st.markdown(
+                sanitize_answer_markdown(
+                    turn.assistant_message,
+                    allowed_urls=allowed_urls,
+                ),
+                unsafe_allow_html=False,
+            )
+        elif turn.status == "completed":
+            st.info("Turn completed without a displayable answer.")
+        elif turn.status == "interrupted":
+            st.warning("This turn was interrupted and can be resumed.")
+        elif turn.status == "failed":
+            st.error(turn.safe_error or "This turn failed safely.")
+        else:
+            st.info("This turn is still running.")
+
+        if turn.run is not None:
+            with st.expander("🔎 Agent details", expanded=False):
+                render_demo_tabs(
+                    turn.run,
+                    key_prefix=f"turn-{turn.turn_id}",
+                )
+
+
+def _render_chat(
     service: DemoRuntimeService,
     manager: DemoJobManager,
+    *,
+    active: bool,
 ) -> None:
-    """Render the complete one-page UI using injected dependencies."""
+    session = st.session_state.get(_SESSION_KEY)
+    if isinstance(session, ChatSessionView):
+        st.header(session.conversation.title)
+        conversation = session.conversation
+        st.caption(
+            f"{conversation.thread_id} · session tool calls "
+            f"{conversation.session_tool_calls}/{conversation.session_tool_call_limit}"
+        )
+        for turn in session.turns:
+            _render_turn(turn)
+    else:
+        st.header("New research chat")
+        st.caption(
+            "Ask a research question. Follow-up messages keep the same public "
+            "thread while executing as isolated turns."
+        )
+        st.info("Start with a specific question that can be verified on the web.")
 
-    st.set_page_config(page_title="Mini DeerFlow Mentor Demo", layout="wide")
-    st.title("Mini DeerFlow Mentor Demo")
-    st.caption("A bounded, localhost-only walkthrough of the learning MVP.")
+    snapshot = manager.snapshot()
+    has_resumable_turn = (
+        isinstance(session, ChatSessionView)
+        and bool(session.turns)
+        and session.turns[-1].status in {"running", "interrupted"}
+    )
+    if active:
+        pending = st.session_state.get(_PENDING_MESSAGE_KEY)
+        if isinstance(pending, str):
+            with st.chat_message("user"):
+                st.text(pending)
+            with st.chat_message("assistant"):
+                st.info("Researching with bounded tools…")
+        _poll_active_job(service, manager)
+    elif has_resumable_turn:
+        if st.button(
+            "Resume active turn",
+            key="demo-resume-turn",
+            width="stretch",
+        ):
+            try:
+                _submit_resume(
+                    service,
+                    manager,
+                    session.conversation.thread_id,
+                )
+            except Exception as error:  # noqa: BLE001 - safe UI boundary
+                st.session_state[_ERROR_KEY] = map_demo_error(error)
+            st.rerun()
+    elif snapshot is not None and snapshot.state is JobState.FAILED:
+        traces = tuple(st.session_state.get(_LIVE_TRACES_KEY, ()))
+        if traces:
+            with st.expander("Failed turn trace"):
+                render_trace(traces, key_prefix=f"failed-{snapshot.job_id}")
 
-    if _THREADS_KEY not in st.session_state:
+    prompt = st.chat_input(
+        "Ask a follow-up or start a new research task",
+        key="demo-chat-input",
+        disabled=active or has_resumable_turn,
+        submit_mode="disable",
+        max_chars=1_000,
+    )
+    if prompt:
         try:
-            _refresh_threads(service)
-        except Exception as error:  # noqa: BLE001 - converted at the UI boundary
-            st.session_state[_THREADS_KEY] = ()
+            _submit_message(service, manager, prompt)
+        except Exception as error:  # noqa: BLE001 - safe UI boundary
+            st.session_state[_ERROR_KEY] = map_demo_error(error)
+        st.rerun()
+
+
+def render_page(service: DemoRuntimeService, manager: DemoJobManager) -> None:
+    """Render the chat from durable conversation projections."""
+
+    if _CONVERSATIONS_KEY not in st.session_state:
+        try:
+            conversations = _refresh_conversations(service)
+            if conversations and _SELECTED_THREAD_KEY not in st.session_state:
+                st.session_state[_SELECTED_THREAD_KEY] = conversations[0].thread_id
+            _load_selected_conversation(service)
+        except Exception as error:  # noqa: BLE001 - safe UI boundary
+            st.session_state[_CONVERSATIONS_KEY] = ()
             st.session_state[_ERROR_KEY] = map_demo_error(error)
 
     snapshot = manager.snapshot()
     active = snapshot is not None and snapshot.active
     if snapshot is not None and not active:
-        # A job can finish before the first timed-fragment poll. Drain its
-        # already-redacted queue so a failed operation still has a timeline.
-        _remember_traces(manager.drain_trace_views())
-        _consume_terminal_snapshot(service, snapshot)
-    _render_sidebar(service, manager, active=active)
+        _consume_terminal_snapshot(service, manager, snapshot)
 
-    message = st.session_state.get(_MESSAGE_KEY)
+    _render_sidebar(service, manager, active=active)
     error_message = st.session_state.get(_ERROR_KEY)
-    if message:
-        st.success(message)
     if error_message:
         st.error(error_message)
-
-    view = st.session_state.get(_VIEW_KEY)
-    if active:
-        _poll_active_job(service, manager)
-        return
-
-    if snapshot is not None and snapshot.state is JobState.FAILED:
-        render_status_strip(
-            operation=snapshot.operation.title(),
-            state=snapshot.state.value,
-            thread_id=snapshot.thread_id,
-        )
-        if isinstance(view, DemoRunView):
-            st.caption(
-                f"Status and Trace refer to the failed {snapshot.operation} for "
-                f"thread {snapshot.thread_id}. Other tabs retain the last completed "
-                f"safe result for thread {view.thread_id}."
-            )
-        render_demo_tabs(
-            view if isinstance(view, DemoRunView) else None,
-            live_traces=tuple(st.session_state.get(_TRACES_KEY, ())),
-        )
-    elif isinstance(view, DemoRunView):
-        render_status_strip(
-            operation=(
-                snapshot.operation.title() if snapshot is not None else "Completed"
-            ),
-            state=(
-                snapshot.state.value if snapshot is not None else view.workflow_status
-            ),
-            thread_id=view.thread_id,
-            current_step=view.budget.current_step,
-            total_steps=view.budget.total_steps,
-        )
-        render_demo_tabs(view)
-    else:
-        render_status_strip(operation="-", state="idle", thread_id="")
-        render_demo_tabs(None)
+    _render_chat(service, manager, active=active)
 
 
 def main() -> None:
-    """Create default local dependencies and render the Streamlit page."""
-
-    service, manager = _default_dependencies()
+    st.set_page_config(page_title="Mini DeerFlow Chat", page_icon="🦌", layout="wide")
+    manager = st.session_state.get(_MANAGER_KEY)
+    mode_change_disabled = isinstance(manager, DemoJobManager) and manager.is_active
+    mode = st.sidebar.selectbox(
+        "Execution mode",
+        options=(_LIVE_MODE, _OFFLINE_MODE),
+        key=_MODE_KEY,
+        disabled=mode_change_disabled,
+        help="Live mode uses your configured APIs; offline mode never uses the web.",
+    )
+    service, manager = _default_dependencies(mode)
     render_page(service, manager)
 
 

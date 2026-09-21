@@ -262,7 +262,7 @@ def test_continue_verdict_keeps_current_plan_and_finishes() -> None:
     assert reviewer.contexts[0].remaining_total_tool_calls == 19
     assert reviewer.contexts[0].remaining_replan_cycles == 2
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "## Review conclusions" in report
@@ -350,7 +350,7 @@ def test_replan_replaces_remaining_steps_and_preserves_completed_work() -> None:
     assert request.remaining_total_tool_calls == 19  # type: ignore[attr-defined]
     assert request.remaining_replan_cycles == 2  # type: ignore[attr-defined]
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "- Replan cycles: 1" in report
@@ -386,8 +386,8 @@ def test_replan_budget_exhaustion_forces_finish() -> None:
     assert any("replan budget was exhausted" in error for error in result["errors"])
     assert result["pending_review_verdict"] is None
     assert result["final_answer"] is not None
-    assert "- Replan cycles: 1" in result["final_answer"]
-    assert "replan budget was exhausted" in result["final_answer"]
+    assert "- Replan cycles: 1" in result["research_report"]
+    assert "replan budget was exhausted" in result["research_report"]
 
 
 def test_replan_with_exhausted_tool_budget_forces_finish() -> None:
@@ -483,7 +483,7 @@ def test_reviewer_cannot_introduce_citations() -> None:
         "findings",
     }
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "evil.example.com" not in report
@@ -547,11 +547,12 @@ def test_review_loop_reports_findings_as_gaps_and_limitations() -> None:
         web_registry(provider),
     )
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "## Review conclusions" in report
     assert "**Review 1 — finish:**" in report
+    assert "Two sources support the goal" not in report
     assert "[gap] No evidence covers the cost dimension" in report
     assert "[source_diversity]" in report
     assert "[budget_limitation]" in report
@@ -650,7 +651,7 @@ def test_review_state_survives_checkpoint_resume(tmp_path: Path) -> None:
     assert result["current_step"] == 3
     assert result["pending_review_verdict"] is None
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "- Review cycles: 3" in report
@@ -679,8 +680,8 @@ def test_budget_exhaustion_skips_review_like_day_09() -> None:
     assert reviewer.contexts == []
     assert result["review_verdicts"] == []
     assert result["pending_review_verdict"] is None
-    assert "No review verdicts were recorded." in result["final_answer"]
-    assert "- Tool calls: 1" in result["final_answer"]
+    assert "No review verdicts were recorded." in result["research_report"]
+    assert "- Tool calls: 1" in result["research_report"]
 
 
 def test_review_loop_preserves_artifact_and_action_boundaries(
@@ -737,7 +738,7 @@ def test_review_loop_preserves_artifact_and_action_boundaries(
 
     assert result["artifact_path"] == "reports/research.md"
     assert result["pending_review_verdict"] is None
-    assert workspace.read_text("reports/research.md") == (result["final_answer"])
+    assert workspace.read_text("reports/research.md") == (result["research_report"])
     assert workspace.list_files() == ("reports/research.md",)
     assert not (workspace.root / "model-controlled.md").exists()
 
@@ -936,7 +937,7 @@ def test_llm_contexts_are_bounded_under_pressure() -> None:
     assert result["pending_review_verdict"] is None
     assert result["total_tool_calls"] == 1
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "closing tail marker." in report
@@ -1020,7 +1021,7 @@ def test_terminal_state_never_retains_unconsumed_review_verdict() -> None:
         assert len(result["review_verdicts"]) == expected_history_lengths[index], label
         assert len(result["replans"]) == expected_replan_lengths[index], label
         assert result["final_answer"] is not None, label
-        assert "## Review conclusions" in result["final_answer"], label
+        assert "## Review conclusions" in result["research_report"], label
 
 
 def test_pending_continue_verdict_survives_checkpoint_until_consumed(
@@ -1118,7 +1119,7 @@ def test_pending_continue_verdict_survives_checkpoint_until_consumed(
     assert result["current_step"] == 3
     assert result["pending_review_verdict"] is None
 
-    report = result["final_answer"]
+    report = result["research_report"]
 
     assert report is not None
     assert "**Review 1 — continue:**" in report

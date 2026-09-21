@@ -99,7 +99,8 @@ class ExecutionTrace(BaseModel):
     kind: TraceKind
     phase: TracePhase
     outcome: TraceOutcome
-    operation: Literal["run", "resume"] | None = None
+    operation: Literal["run", "continue", "resume"] | None = None
+    turn_id: TraceIdentifier | None = None
     node: TraceName | None = None
     tool_name: TraceName | None = None
     route: Literal["continue", "replan", "finish"] | None = None
@@ -162,7 +163,8 @@ class JsonLinesTraceSink:
 class _ActiveTrace:
     run_id: str
     thread_id: str
-    operation: Literal["run", "resume"]
+    operation: Literal["run", "continue", "resume"]
+    turn_id: str | None = None
     sequence: int = 0
 
 
@@ -188,17 +190,26 @@ class ExecutionTracer:
         self._sink = resolved_sink
         self._clock = clock
         self._run_id_factory = run_id_factory
+        self._events: list[ExecutionTrace] = []
+
+    def events_for_run(self, run_id: str) -> tuple[ExecutionTrace, ...]:
+        """Return the already-redacted events captured for one run."""
+
+        return tuple(event for event in self._events if event.run_id == run_id)
 
     @contextmanager
     def run_scope(
         self,
         thread_id: str,
-        operation: Literal["run", "resume"],
+        operation: Literal["run", "continue", "resume"],
+        *,
+        turn_id: str | None = None,
     ):
         active = _ActiveTrace(
             run_id=self._run_id_factory(),
             thread_id=thread_id,
             operation=operation,
+            turn_id=turn_id,
         )
         token = _active_trace.set(active)
         started_at = self._clock()
@@ -207,6 +218,7 @@ class ExecutionTracer:
             phase=TracePhase.START,
             outcome=TraceOutcome.STARTED,
             operation=operation,
+            turn_id=turn_id,
         )
         try:
             yield active.run_id
@@ -217,6 +229,7 @@ class ExecutionTracer:
                 phase=TracePhase.END,
                 outcome=outcome,
                 operation=operation,
+                turn_id=turn_id,
                 duration_ms=self._duration_ms(started_at),
                 error_category=category,
                 error_code=code,
@@ -228,6 +241,7 @@ class ExecutionTracer:
                 phase=TracePhase.END,
                 outcome=TraceOutcome.SUCCEEDED,
                 operation=operation,
+                turn_id=turn_id,
                 duration_ms=self._duration_ms(started_at),
             )
         finally:
@@ -245,17 +259,18 @@ class ExecutionTracer:
         if active is None:
             return
         active.sequence += 1
-        self._sink.emit(
-            ExecutionTrace(
-                run_id=active.run_id,
-                thread_id=active.thread_id,
-                sequence=active.sequence,
-                kind=kind,
-                phase=phase,
-                outcome=outcome,
-                **fields,
-            )
+        fields.setdefault("turn_id", active.turn_id)
+        event = ExecutionTrace(
+            run_id=active.run_id,
+            thread_id=active.thread_id,
+            sequence=active.sequence,
+            kind=kind,
+            phase=phase,
+            outcome=outcome,
+            **fields,
         )
+        self._events.append(event)
+        self._sink.emit(event)
 
     def wrap_node(
         self,

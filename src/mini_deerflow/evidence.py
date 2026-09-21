@@ -37,6 +37,30 @@ _HTTP_URL_PATTERN = re.compile(
     r"https?://[^\s<>()]+",
     re.IGNORECASE,
 )
+_INTERNAL_PREFIX_PATTERN = re.compile(
+    r"^(?:step|review)\s+\d+\s*[:\-\u2013\u2014]\s*",
+    re.IGNORECASE,
+)
+_INTERNAL_PROGRESS_PATTERN = re.compile(
+    r"^(?:completed|finished)\s+(?:evidence-backed\s+)?research\s+"
+    r"step(?:\s+number)?\s+\d+[.!]?$",
+    re.IGNORECASE,
+)
+_INTERNAL_METADATA_PATTERN = re.compile(
+    r"\b(?:tool\s+calls?|review\s+cycles?|review\s+cycle\s+\d+|"
+    r"replan\s+cycles?|plan\s+step|step\s+\d+|observation\s+\d+|"
+    r"provenance|execution\s+(?:trace|report)|budget\s+(?:limit|counter))\b",
+    re.IGNORECASE,
+)
+_RESEARCH_REPORT_SECTIONS = (
+    "## Goal",
+    "## Findings",
+    "## Evidence",
+    "## Citations",
+    "## Review conclusions",
+    "## Gaps and limitations",
+    "## Execution",
+)
 
 
 def canonicalize_url(value: str | HttpUrl) -> str:
@@ -335,6 +359,150 @@ def sanitize_finding_summary(summary: str) -> str:
     without_links = _MARKDOWN_LINK_PATTERN.sub(r"\1", summary)
     without_urls = _HTTP_URL_PATTERN.sub("[unverified URL omitted]", without_links)
     return " ".join(without_urls.split())
+
+
+def _public_markdown_text(value: str) -> str:
+    """Render model-authored prose as Markdown text, never Markdown syntax."""
+
+    sanitized = sanitize_finding_summary(value)
+    sanitized = _INTERNAL_PREFIX_PATTERN.sub("", sanitized)
+    for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "#"):
+        sanitized = sanitized.replace(character, f"\\{character}")
+    return sanitized
+
+
+def render_user_answer(
+    *,
+    findings: list[StepFinding],
+    evidence: list[EvidenceRecord],
+    review_notes: Sequence[str] = (),
+    has_collection_failures: bool = False,
+) -> str:
+    """Render controlled user-facing Markdown from validated research state.
+
+    Unlike :func:`render_research_report`, this intentionally omits plan-step
+    numbering, provenance, reviewer cycles, budgets, and tool counters. Model
+    authored prose is escaped; only citations backed by successful evidence
+    records are introduced as active Markdown links.
+    """
+
+    evidence_by_url = {
+        record.canonical_url: record
+        for record in evidence
+        if record.status == "success"
+    }
+    public_findings: list[tuple[StepFinding, str]] = []
+    for finding in findings:
+        statement = _public_markdown_text(finding.summary)
+        if _INTERNAL_PROGRESS_PATTERN.fullmatch(statement):
+            continue
+        if _INTERNAL_METADATA_PATTERN.search(statement):
+            continue
+        public_findings.append((finding, statement))
+    cited_urls = list(
+        dict.fromkeys(
+            str(citation)
+            for finding in findings
+            for citation in finding.citations
+            if str(citation) in evidence_by_url
+        )
+    )
+    citation_numbers = {url: index for index, url in enumerate(cited_urls, 1)}
+    evidence_linked: list[str] = []
+    unverified: list[str] = []
+
+    for finding, statement in public_findings:
+        valid_urls = [
+            str(citation)
+            for citation in finding.citations
+            if str(citation) in evidence_by_url
+        ]
+        if valid_urls:
+            markers = " ".join(f"[{citation_numbers[url]}]" for url in valid_urls)
+            evidence_linked.append(f"- {statement} {markers}")
+        else:
+            unverified.append(f"- {statement}")
+
+    lines = ["## Answer", ""]
+    if evidence_linked:
+        lines.extend(["### Evidence-linked findings", "", *evidence_linked, ""])
+    elif cited_urls:
+        lines.extend(
+            [
+                (
+                    "Public sources were collected, but the completed steps did not "
+                    "provide a substantive claim suitable for the answer."
+                ),
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                (
+                    "No claim could be linked to the public sources collected "
+                    "in this run."
+                ),
+                "",
+            ]
+        )
+
+    if unverified:
+        lines.extend(["### Unverified or incomplete clues", "", *unverified, ""])
+
+    has_review_limitations = any(note.strip() for note in review_notes)
+    lines.extend(["### Conclusion", ""])
+    if has_review_limitations:
+        lines.append(
+            "The review identified unresolved evidence limitations; treat this "
+            "answer as incomplete."
+        )
+    elif evidence_linked and unverified:
+        lines.append(
+            "Some findings link to collected public sources, while the remaining "
+            "clues have no accepted citation."
+        )
+    elif evidence_linked:
+        lines.append(
+            "The findings above link to collected public sources. Citation "
+            "membership alone does not prove that a claim is true or supported "
+            "by the source content."
+        )
+    else:
+        lines.append(
+            "The available public evidence is insufficient to confirm the "
+            "requested claim."
+        )
+
+    if has_collection_failures:
+        lines.extend(
+            [
+                "",
+                (
+                    "Some collection attempts failed or were blocked. The available "
+                    "evidence may therefore be incomplete."
+                ),
+            ]
+        )
+
+    if cited_urls:
+        lines.extend(["", "### Sources", ""])
+        for url in cited_urls:
+            record = evidence_by_url[url]
+            title = _public_markdown_text(record.title or "Public source")
+            lines.append(f"{citation_numbers[url]}. [{title}]({url})")
+
+    return "\n".join(lines).strip()
+
+
+def is_research_report(value: object) -> bool:
+    """Recognize only this project's deterministic internal report format."""
+
+    return (
+        isinstance(value, str)
+        and value.startswith("# Research Report\n\n## Goal\n")
+        and all(f"\n{section}\n" in value for section in _RESEARCH_REPORT_SECTIONS)
+    )
 
 
 def render_research_report(

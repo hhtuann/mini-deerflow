@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -54,3 +56,5 @@ class Settings(BaseSettings):
         ge=1_024,
         le=10_000_000,
     )
+
+    structured_output_mode: Literal["native", "prompt_json"] = "prompt_json"

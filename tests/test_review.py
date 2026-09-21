@@ -313,7 +313,7 @@ def test_render_review_conclusions_reports_missing_verdicts() -> None:
     ]
 
 
-def test_render_review_conclusions_sanitizes_untrusted_urls() -> None:
+def test_render_review_conclusions_omits_rationale_and_sanitizes_findings() -> None:
     verdict = ReviewVerdict(
         **verdict_payload(
             "finish",
@@ -336,9 +336,10 @@ def test_render_review_conclusions_sanitizes_untrusted_urls() -> None:
     lines = render_review_conclusions([verdict])
 
     assert lines[0] == (
-        "- **Review 1 — finish:** Evidence is sufficient; see "
-        "[unverified URL omitted] for details."
+        "- **Review 1 — finish:** Structured findings follow; "
+        "internal rationale is not displayed."
     )
+    assert "Evidence is sufficient" not in "".join(lines)
     assert "[unverified URL omitted]" in lines[1]
     assert "(steps: 2)" in lines[1]
     assert "https://evil.example.com" not in "".join(lines)

@@ -41,8 +41,8 @@ Một agent nghiên cứu không nên chỉ là chuỗi prompt và tool call. N�
 | Loại sản phẩm | Learning/demo MVP chạy local | VERIFIED |
 | Backend | Python runtime và LangGraph workflow | VERIFIED |
 | Giao diện | Streamlit một trang, localhost-oriented | VERIFIED |
-| Chế độ demo | Offline deterministic mặc định | VERIFIED |
-| Chế độ live | Có composition cho CLI; không có live-mode control trong UI | VERIFIED |
+| Chế độ demo | Live web mặc định; có offline deterministic walkthrough tách biệt | VERIFIED |
+| Chế độ live | Có composition thật cho CLI và Streamlit, dùng cấu hình local | VERIFIED |
 | Production service | Không có | VERIFIED |
 | DeerFlow parity | Không được tuyên bố | VERIFIED qua phạm vi tài liệu/code |
 
@@ -85,7 +85,7 @@ Authentication, authorization, multi-tenancy, distributed workers, durable produ
 | Depth-one bounded delegation/fan-in | Distributed multi-agent platform |
 | SQLite checkpoint/run/resume | Exactly-once effects, production DB lifecycle |
 | Redacted trace và workspace artifact | Production telemetry/artifact serving |
-| Offline deterministic Streamlit demo | Hosted/live production UI và credential management |
+| Local Streamlit live/offline chat | Hosted production UI và credential management |
 
 ## 4. System Capabilities
 
@@ -105,7 +105,7 @@ Authentication, authorization, multi-tenancy, distributed workers, durable produ
 | Safety | URL/path/payload boundaries | Implemented | Không phải OS/network sandbox | VERIFIED |
 | Observability | Typed redacted trace | Implemented | Local trace, không production telemetry | VERIFIED |
 | Artifact | Deterministic Markdown | Implemented | Workspace confined, no hosted serving | VERIFIED |
-| Frontend | Streamlit mentor walkthrough | Demo-only | Offline deterministic, local | VERIFIED |
+| Frontend | Streamlit multi-turn chat | Demo-only | Live/offline explicit, local | VERIFIED |
 | Evaluation | Pytest + deterministic evaluator | Implemented | Contract coverage, không chứng minh bug-free | VERIFIED |
 | Context | Semantic memory/RAG | Not implemented | Deterministic projection/truncation only | VERIFIED |
 | Durability | Exactly-once external effects | Not implemented | Có cửa sổ effect-before-checkpoint | VERIFIED |
@@ -260,7 +260,9 @@ Canonical state là `AgentState` trong `state.py`, một `TypedDict` dùng reduc
 | State field | Purpose | Durable? | UI exposed? |
 | --- | --- | ---: | --- |
 | `goal` | Mục tiêu research | Có | Plain text đã làm sạch |
-| `messages` | Field dự phòng với `add_messages` reducer; canonical graph hiện không đọc/ghi field này | Có | Không |
+| `turn_id` / `turn_sequence` | Identity và thứ tự của turn hiện tại | Có điều kiện | Safe identity trong trace/chat projection |
+| `conversation_context` | Bounded completed user/assistant pairs của các turn trước | Có điều kiện | Không render trực tiếp |
+| `messages` | Bounded conversation messages và câu trả lời của turn hiện tại | Có | Không render trực tiếp |
 | `plan` | Structured plan và trạng thái step | Có | Bounded plan projection |
 | `current_step` | Step hiện tại | Có | Chỉ status/step safe |
 | `pending_action` | Tool/complete action chờ xử lý | Có | Không |
@@ -268,14 +270,15 @@ Canonical state là `AgentState` trong `state.py`, một `TypedDict` dùng reduc
 | `tool_calls_in_current_step` | Per-step counter | Có | Budget counter |
 | `total_tool_calls` | Run-wide counter | Có | Budget counter |
 | `pending_review_verdict` | Verdict chờ route | Có | Không trực tiếp |
-| `review_verdicts` | Review chronology | Có | Rationale/route bounded |
+| `review_verdicts` | Review chronology | Có | Route/finding allowlisted; raw rationale bị loại |
 | `replans` | Replan history | Có | Chronology bounded |
 | `delegations` | Wave/branch accounting | Có | Safe status/budget/limitations |
 | `notes` | Nội dung hỗ trợ synthesis | Có | Không trực tiếp |
 | `findings` | Findings tích lũy | Có | Chỉ safe artifact/evidence-related projection |
 | `evidence` | Evidence có provenance | Có | Bounded evidence cards |
 | `sources` | Accepted citation sources | Có | Accepted citations only |
-| `final_answer` | Exact final Markdown | Có | `st.code`/download qua safe view |
+| `final_answer` | Markdown trả lời người dùng | Có | Sanitized `st.markdown`, chỉ validated links |
+| `research_report` | Báo cáo thực thi nội bộ deterministic | Có | Collapsed details, `st.code`/download qua safe view |
 | `artifact_path` | Filesystem location nội bộ | Có | Không |
 | `errors` | Controlled workflow errors | Có | Không raw; safe limitations/status only |
 
@@ -579,25 +582,36 @@ Error trace thể hiện category/outcome an toàn, không phải debugging dump
 
 ## 23. Artifact and Workspace
 
-Synthesis tạo deterministic research report Markdown từ state đã lọc. Renderer recheck citation membership, giữ provenance, sanitize URL và gắn nhãn `unsupported` cho finding không có validated citation. Nhãn này vẫn chỉ phản ánh canonical-URL membership, không chứng minh semantic evidence support hay factual truth. `final_answer` giữ source text trong state; khi write được bật, workflow ghi vào path artifact do composition quyết định thông qua `Workspace`. UI không cho user chọn workspace/artifact path và projector không expose `artifact_path`.
+Synthesis tạo hai representation từ state đã lọc. `final_answer` là Markdown ngắn gọn
+dành cho người dùng và bounded context của lượt sau. `research_report` là báo cáo nội bộ
+deterministic, giữ provenance/counters và là nội dung duy nhất được ghi qua `Workspace`.
+Renderer recheck citation membership, sanitize URL và gắn nhãn `unsupported` trong báo
+cáo; điều này vẫn không chứng minh semantic evidence support hay factual truth. UI không
+cho user chọn workspace/artifact path và projector không expose `artifact_path`.
 
 | Khái niệm | Implementation |
 | --- | --- |
-| Artifact content | `final_answer` Markdown đã render |
-| Artifact source | Exact Markdown string được safe view model giữ |
+| Chat content | `final_answer` Markdown đã sanitize và chỉ giữ validated links |
+| Artifact content | `research_report` Markdown đã render |
+| Artifact source | Exact internal report được safe view model giữ |
 | Workspace path | Internal, confined; không gửi UI |
 | Filesystem artifact | Optional write qua workspace boundary |
 | Structured preview | Các section/field allowlisted |
 | UI source display | `st.code(..., language="markdown")` |
 | Download | In-memory source qua `st.download_button` |
 
-Không có `unsafe_allow_html=True`, iframe hoặc arbitrary Markdown renderer trong demo. “Safe preview” đến từ structured projection và plain/code rendering, không phải một general-purpose Markdown sanitizer.
+Không có `unsafe_allow_html=True`, iframe hoặc arbitrary Markdown renderer trong demo.
+Primary answer đi qua sanitizer đóng: bỏ HTML, Markdown image và link không thuộc
+validated citation allowlist. Internal report chỉ hiển thị bằng `st.code`.
 
 **Nguồn:** `src/mini_deerflow/evidence.py`, `src/mini_deerflow/agent_workflow.py`, `src/mini_deerflow/workspace.py`, `src/mini_deerflow/demo/view_models.py`, `src/mini_deerflow/demo/components.py`.
 
 ## 24. Frontend Architecture
 
-Streamlit demo là một page với sidebar, status strip và đúng năm tab: **Overview**, **Evidence & Citations**, **Delegation**, **Trace**, **Artifact**.
+Streamlit demo là persistent chat với sidebar. Mỗi turn có expander đóng mặc định
+**🔎 Agent details** và chỉ tạo section có dữ liệu trong sáu loại: **Execution**,
+**Evidence & Citations**, **Delegation**, **Review & Replan**, **Trace** và
+**Research report**.
 
 | Component/file | Trách nhiệm |
 | --- | --- |
@@ -606,11 +620,17 @@ Streamlit demo là một page với sidebar, status strip và đúng năm tab: *
 | `demo/jobs.py` | Single-worker executor, active-job guard, trace queue/history |
 | `demo/view_models.py` | Frozen allowlisted view models và explicit projector |
 | `demo/offline_scenario.py` | Deterministic injected trajectory, real core runtime |
-| `demo/components.py` | Renderer cho status và năm tab |
+| `demo/components.py` | Renderer cho các section chi tiết động theo từng turn |
 
-Sidebar có badge `Offline deterministic — no network`, scenario `Mentor walkthrough v1`, thread ID mới, sample goal, Run, Resume, Refresh và disclaimer. Không có API key, tool picker, checkpoint/workspace path, database browser, write toggle hoặc Cancel.
+Sidebar cho chọn rõ `Live web` hoặc `Offline walkthrough`, tạo chat mới và mở lại
+conversation đã persist. Không có API-key field, tool picker, checkpoint/workspace path,
+database browser, write toggle hoặc Cancel; credential chỉ được đọc qua `Settings` ở
+backend live.
 
-Session state giữ service/job manager, thread list/selection, last completed safe view, live trace và controlled message. Một active job mỗi session; controls disabled trong lúc chạy; double-submit bị chặn. Last completed view vẫn hiển thị khi job mới đang chạy. Khi fail, UI hiển thị thông báo ngắn có kiểm soát và không traceback/raw exception.
+Session state giữ service/job manager, conversation list/selection, safe chat projection,
+live trace và controlled message. Một active job mỗi session; controls disabled trong lúc
+chạy và double-submit bị chặn. Transcript bền vững được dựng lại từ SQLite. Khi fail, UI
+hiển thị thông báo ngắn có kiểm soát và không traceback/raw exception.
 
 ## 25. FE–Backend Interaction
 
@@ -621,18 +641,18 @@ sequenceDiagram
     participant J as Single-worker manager
     participant A as asyncio.run in worker
     participant S as DemoRuntimeService
-    participant B as OfflineDemoBackend
+    participant B as Selected live/offline backend
     participant R as AgentRuntime/workflow
     participant Q as Typed trace queue
     participant P as Safe projector
 
-    U->>ST: Run or Resume
+    U->>ST: First message, follow-up, or Resume
     ST->>ST: construct validated command
     ST->>J: submit task
     J->>A: execute in single worker
-    A->>S: await service.run or resume
+    A->>S: await service.run, continue_thread, or resume
     S->>B: backend command
-    B->>R: real run/resume
+    B->>R: real run/continue/resume
     R-->>Q: ordered redacted trace events
     loop polling fragment
         ST->>J: snapshot and drain
@@ -644,11 +664,18 @@ sequenceDiagram
     P-->>S: immutable DemoRunView
     S-->>A: safe result
     A-->>J: worker result
-    J-->>ST: completed view
-    ST-->>U: five-tab rendering
+    J-->>ST: completed safe result
+    ST->>S: load persisted conversation
+    S-->>ST: immutable ChatSessionView
+    ST-->>U: chat answer and collapsed per-turn details
 ```
 
-Worker không gọi `st.*`; nó sở hữu async runtime open/close cho `run`/`resume`. Main thread tạo command, submit, poll, drain và render; thao tác refresh thread list là facade call ngắn chạy `service.list_threads()` qua `asyncio.run` trên main thread. `Future` và raw state nằm nội bộ job/backend; UI-facing run result là safe view model. Không có cancellation do semantics checkpoint/external effect chưa được thiết kế cho cancel an toàn.
+Worker không gọi `st.*`; nó sở hữu async runtime open/close cho
+`run`/`continue_thread`/`resume`. Main thread tạo command, submit, poll, drain và render;
+refresh/open conversation đi qua facade `list_conversations()` và
+`load_conversation()`. `Future` và raw state nằm nội bộ job/backend; UI chỉ nhận các safe
+view model. Không có cancellation do semantics checkpoint/external effect chưa được thiết
+kế cho cancel an toàn.
 
 **Nguồn:** `src/mini_deerflow/demo/app.py`, `src/mini_deerflow/demo/service.py`, `src/mini_deerflow/demo/jobs.py`, `tests/test_demo_app.py`, `tests/test_demo_jobs.py`.
 

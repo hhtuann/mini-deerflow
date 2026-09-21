@@ -18,7 +18,7 @@ from mini_deerflow.demo.view_models import (
 )
 from mini_deerflow.tracing import ExecutionTrace, TraceSink
 
-JobOperation = Literal["run", "resume"]
+JobOperation = Literal["run", "continue", "resume"]
 JobTask = Callable[[TraceSink], DemoRunView]
 JobErrorMapper = Callable[[BaseException, str], str]
 
@@ -43,6 +43,7 @@ class JobSnapshot:
     error_message: str | None
     view: DemoRunView | None
     last_completed_view: DemoRunView | None
+    turn_id: str | None = None
 
     @property
     def active(self) -> bool:
@@ -101,6 +102,7 @@ class DemoJobManager:
         self._job_id: str | None = None
         self._operation: JobOperation | None = None
         self._thread_id: str | None = None
+        self._turn_id: str | None = None
         self._state: JobState | None = None
         self._error_message: str | None = None
         self._view: DemoRunView | None = None
@@ -111,9 +113,11 @@ class DemoJobManager:
         operation: JobOperation,
         thread_id: str,
         task: JobTask,
+        *,
+        turn_id: str | None = None,
     ) -> str:
-        if operation not in ("run", "resume"):
-            raise ValueError("operation must be 'run' or 'resume'")
+        if operation not in ("run", "continue", "resume"):
+            raise ValueError("operation must be 'run', 'continue', or 'resume'")
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise ValueError("thread_id must not be empty")
         if not callable(task):
@@ -132,6 +136,7 @@ class DemoJobManager:
             self._job_id = job_id
             self._operation = operation
             self._thread_id = thread_id.strip()
+            self._turn_id = None if turn_id is None else turn_id.strip()
             self._state = JobState.QUEUED
             self._error_message = None
             self._view = None
@@ -160,6 +165,7 @@ class DemoJobManager:
                 error_message=self._error_message,
                 view=self._view,
                 last_completed_view=self._last_completed_view,
+                turn_id=self._turn_id,
             )
 
     def drain_trace_views(self) -> tuple[TraceEventView, ...]:

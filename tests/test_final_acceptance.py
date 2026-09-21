@@ -505,7 +505,7 @@ def test_final_mvp_acceptance_survives_interruption_and_resume(
         assert any("Controlled branch limitation" in error for error in state["errors"])
         assert all(finding.branch_id != "beta" for finding in state["findings"])
 
-        report = cast(str, state["final_answer"])
+        report = cast(str, state["research_report"])
         workspace = Workspace(workspace_root)
         assert state["artifact_path"] == "reports/day-14-demo.md"
         assert workspace.list_files() == ("reports/day-14-demo.md",)

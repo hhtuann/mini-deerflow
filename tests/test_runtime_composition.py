@@ -137,6 +137,7 @@ def test_default_runtime_composes_expected_file_tools(
         context_budget: ContextBudget | None = None,
         artifact_path: str | None = None,
         tracer: ExecutionTracer | None = None,
+        conversation_repository: object | None = None,
     ) -> AgentRuntime:
         captured["planner"] = planner
         captured["action_selector"] = action_selector
@@ -149,6 +150,7 @@ def test_default_runtime_composes_expected_file_tools(
         captured["context_budget"] = context_budget
         captured["artifact_path"] = artifact_path
         captured["tracer"] = tracer
+        captured["conversation_repository"] = conversation_repository
 
         return expected_runtime
 
@@ -195,6 +197,7 @@ def test_default_runtime_composes_expected_file_tools(
     assert planner.args == (fake_model,)
     assert planner.keywords == {
         "available_tools": action_registry.definitions(),
+        "structured_output_mode": "native",
     }
 
     assert isinstance(
@@ -211,7 +214,7 @@ def test_default_runtime_composes_expected_file_tools(
     assert isinstance(composed_replanner, partial)
     assert composed_replanner.func is create_replacement_plan
     assert composed_replanner.args == (fake_model,)
-    assert composed_replanner.keywords == {}
+    assert composed_replanner.keywords == {"structured_output_mode": "native"}
 
     # The replanner binds lazily. The researcher selector, parent selector,
     # and reviewer bind eagerly at composition time.

@@ -1,3 +1,4 @@
+import hashlib
 import re
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
@@ -22,6 +23,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.conversation import ConversationContext, ConversationMessage
 from mini_deerflow.delegation import (
     BranchFinding,
     BranchResult,
@@ -52,6 +54,8 @@ _ALLOWED_CHECKPOINT_TYPES = (
     BranchResult,
     FanInSummary,
     DelegationRecord,
+    ConversationMessage,
+    ConversationContext,
 )
 
 
@@ -184,6 +188,7 @@ def create_thread_config(
     thread_id: str,
     *,
     recursion_limit: int,
+    checkpoint_namespace: str | None = None,
 ) -> RunnableConfig:
     """Create the LangGraph configuration for one persistent thread."""
 
@@ -196,12 +201,37 @@ def create_thread_config(
     if recursion_limit <= 0:
         raise ValueError("recursion_limit must be greater than zero")
 
+    public_thread_id = normalize_thread_id(thread_id)
+    configurable: dict[str, str] = {"thread_id": public_thread_id}
+    if checkpoint_namespace is not None:
+        namespace = normalize_thread_id(checkpoint_namespace)
+        # LangGraph reserves checkpoint_ns for nested graphs and resets it for
+        # a root graph. A deterministic internal thread key therefore provides
+        # the real root-level namespace while the public conversation thread
+        # remains stable in the ledger and trace.
+        digest = hashlib.sha256(f"{public_thread_id}\0{namespace}".encode()).hexdigest()
+        configurable["thread_id"] = f"turncp-{digest}"
+        configurable["checkpoint_ns"] = namespace
+        configurable["conversation_thread_id"] = public_thread_id
+
     return {
-        "configurable": {
-            "thread_id": normalize_thread_id(thread_id),
-        },
+        "configurable": configurable,
         "recursion_limit": recursion_limit,
     }
+
+
+def checkpoint_lookup_config(config: RunnableConfig) -> RunnableConfig:
+    """Return the saver-facing root config for a turn-scoped graph config."""
+
+    configurable = config.get("configurable")
+    if (
+        not isinstance(configurable, dict)
+        or "conversation_thread_id" not in configurable
+    ):
+        return config
+    saver_configurable = dict(configurable)
+    saver_configurable["checkpoint_ns"] = ""
+    return {**config, "configurable": saver_configurable}
 
 
 def resolve_checkpoint_path(

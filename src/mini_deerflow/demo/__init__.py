@@ -2,6 +2,7 @@
 
 from mini_deerflow.demo.service import (
     DEFAULT_DEMO_GOAL,
+    ContinueDemoCommand,
     DemoBackend,
     DemoCommandValidationError,
     DemoRuntimeService,
@@ -12,6 +13,7 @@ from mini_deerflow.demo.service import (
 
 __all__ = [
     "DEFAULT_DEMO_GOAL",
+    "ContinueDemoCommand",
     "DemoBackend",
     "DemoCommandValidationError",
     "DemoRuntimeService",

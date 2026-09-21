@@ -483,7 +483,7 @@ def render_review_conclusions(
     for review_number, verdict in enumerate(review_verdicts, start=1):
         lines.append(
             f"- **Review {review_number} — {verdict.verdict}:** "
-            f"{sanitize_finding_summary(verdict.rationale)}"
+            "Structured findings follow; internal rationale is not displayed."
         )
 
         for finding in verdict.findings:

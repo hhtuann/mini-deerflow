@@ -26,6 +26,7 @@ def test_create_initial_state_returns_complete_state() -> None:
         "evidence": [],
         "sources": [],
         "final_answer": None,
+        "research_report": None,
         "artifact_path": None,
         "errors": [],
     }

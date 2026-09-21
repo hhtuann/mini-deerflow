@@ -354,25 +354,26 @@ và có thể download dưới tên cố định. Đây là **hiển thị sourc
 không phải **thực thi hoặc render arbitrary active Markdown/HTML**. Day 15 không
 tuyên bố có general sanitizer hay secure file-serving service.
 
-## Năm tab của mentor demo
+## Cập nhật sau Day 15: câu trả lời và Agent details
 
-UI có đúng năm tab:
+UI hiện tách `final_answer` dành cho người dùng khỏi `research_report` nội bộ.
+Primary bubble dùng sanitized Markdown; report chỉ nằm trong expander đóng mặc định
+**🔎 Agent details**. Các tab là động và tab rỗng được bỏ qua:
 
 | Tab | What the mentor sees | Concept demonstrated | Deliberately hidden |
 | --- | --- | --- | --- |
-| Overview | Goal text, plan/current step, budgets, limitation | Stateful plan và independent bounds | Messages, prompts, raw state |
-| Evidence & Citations | Bounded evidence, provenance, accepted citations, rejected count, review/replan | Evidence authority và quality loop | Raw observation, rejected URL, provider payload |
+| Execution | Goal text, plan/current step, budgets, limitation | Stateful plan và independent bounds | Messages, prompts, raw state |
+| Evidence & Citations | Bounded evidence, provenance, accepted citations, rejected count | Evidence authority | Raw observation, rejected URL, provider payload |
 | Delegation | Wave/branch status, reserved-used-charged, fan-in limitation | Bounded fan-out/fan-in và partial success | Failed-branch finding, raw branch output |
+| Review & Replan | Structured verdict/finding và replacement-step metadata | Quality loop | Raw reviewer rationale |
 | Trace | Filtered ordered typed timeline | Redacted observability với run/thread identity | Generic log/JSON, checkpoint, prompt |
-| Artifact | Structured preview, exact Markdown source, download | Parent-owned deterministic artifact | Arbitrary path, active HTML/iframe |
+| Research report | Structured preview, exact internal Markdown source, download | Parent-owned deterministic artifact | Arbitrary path, active HTML/iframe |
 
-Sidebar có badge `Offline deterministic — no network`, label `Mentor walkthrough
-v1`, new thread ID, sample goal, Run, Resume selected thread, Refresh threads và
-disclaimer localhost/non-production/non-parity.
-
-Không có API-key field, credential editor, model selector, arbitrary tool
-picker, checkpoint/path selector, workspace selector, database browser, write
-toggle, Cancel button hoặc live-mode switch.
+Sidebar hiện có selector rõ ràng giữa `Live web` và `Offline walkthrough`, nút
+`New chat`, lịch sử conversation bền vững và disclaimer local/non-production.
+Credential không được nhập hoặc hiển thị trong UI; live backend chỉ đọc qua
+`Settings`. Không có arbitrary tool picker, checkpoint/path selector, workspace
+selector, database browser, write toggle hoặc Cancel button.
 
 ## Security và non-leakage boundary
 
@@ -526,7 +527,11 @@ identity; fixture deterministic cũng phải tương thích checkpoint semantics
 - Observability không đòi hỏi lộ prompt, payload hoặc checkpoint.
 - Thêm UI không được làm yếu runtime invariants đã kiểm chứng.
 
-## Các quyết định kiến trúc Day 15
+## Các quyết định kiến trúc Day 15 (baseline lịch sử)
+
+Danh sách dưới đây mô tả baseline offline-only ban đầu. Phần **Cập nhật sau Day
+15** ở trên là trạng thái hiện tại và thay thế các quyết định UI-only này khi có
+mâu thuẫn.
 
 1. Một page, sidebar, status strip và đúng năm tab.
 2. Offline deterministic backend là mặc định duy nhất của UI.
@@ -544,15 +549,17 @@ identity; fixture deterministic cũng phải tương thích checkpoint semantics
 
 ## Mini DeerFlow hiện có thể demo được những gì?
 
-Mentor có thể chạy một trajectory từ plan tới artifact, quan sát budget và
+Mentor có thể chạy một trajectory từ plan tới câu trả lời, quan sát budget và
 workflow status, kiểm tra evidence/citation membership, thấy reviewer yêu cầu
 replan, xem delegation partial failure được chuyển thành limitation, đọc trace
-đã redact và Resume completed thread mà không replay completed work.
+đã redact và gửi follow-up trên cùng conversation. Nếu một turn bị gián đoạn,
+Resume tiếp tục đúng turn đó mà không biến nó thành user message mới.
 
-Demo chạy localhost bằng Python/Streamlit, không cần API key hoặc external
-service cho scenario mặc định. Nó dùng runtime, LangGraph, SQLite, safety,
-review, context, delegation và artifact boundary thật nên có giá trị học kiến
-trúc cao hơn một UI fixture tĩnh.
+Demo chạy localhost bằng Python/Streamlit. Chế độ mặc định **Live web** cần model
+credential và Jina key để thực hiện web search thật; **Offline walkthrough**
+không cần API key hoặc external service. Cả hai dùng runtime, LangGraph, SQLite,
+safety, review, context, delegation và artifact boundary thật nên có giá trị
+học kiến trúc cao hơn một UI fixture tĩnh.
 
 ## Những gì vẫn chỉ là learning MVP
 

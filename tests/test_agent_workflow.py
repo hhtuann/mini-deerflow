@@ -252,14 +252,17 @@ def test_workflow_executes_tools_across_plan_steps() -> None:
     )
 
     final_answer = result["final_answer"]
+    research_report = result["research_report"]
 
     assert final_answer is not None
-    assert "- Tool calls: 3" in final_answer
-    assert "- Successful tool calls: 3" in final_answer
-    assert "- Failed tool calls: 0" in final_answer
+    assert research_report is not None
+    assert "- Tool calls: 3" in research_report
+    assert "- Successful tool calls: 3" in research_report
+    assert "- Failed tool calls: 0" in research_report
 
     assert "https://example.com/source" not in final_answer
-    assert "unsupported" in final_answer
+    assert "unsupported" in research_report
+    assert "Tool calls:" not in final_answer
 
 
 def test_workflow_can_complete_without_tool_calls() -> None:
@@ -280,7 +283,7 @@ def test_workflow_can_complete_without_tool_calls() -> None:
     assert result["total_tool_calls"] == 0
     assert result["tool_observations"] == []
     assert result["errors"] == []
-    assert "- Tool calls: 0" in result["final_answer"]
+    assert "- Tool calls: 0" in result["research_report"]
 
 
 def test_structured_tool_failure_becomes_observation() -> None:
@@ -311,7 +314,7 @@ def test_structured_tool_failure_becomes_observation() -> None:
     assert observation.result.success is False
     assert observation.result.data is None
     assert observation.result.error == "Simulated tool failure."
-    assert "- Failed tool calls: 1" in result["final_answer"]
+    assert "- Failed tool calls: 1" in result["research_report"]
 
 
 def test_unknown_tool_becomes_observation_and_loop_continues() -> None:
@@ -374,7 +377,7 @@ def test_per_step_budget_stops_second_tool_execution() -> None:
     assert result["pending_action"] is None
     assert len(result["errors"]) == 1
     assert "per-step limit" in result["errors"][0]
-    assert "No plan step was completed" in result["final_answer"]
+    assert "No plan step was completed" in result["research_report"]
 
     assert len(selector.contexts) == 2
     assert selector.contexts[1].remaining_step_tool_calls == 0
@@ -650,11 +653,14 @@ def test_workflow_completes_after_recoverable_action_format_failure() -> None:
     assert len(result["notes"]) == 3
 
     final_answer = result["final_answer"]
+    research_report = result["research_report"]
 
     assert isinstance(final_answer, str)
-    assert "Tool calls: 1" in final_answer
-    assert "Successful tool calls: 1" in final_answer
-    assert "Failed tool calls: 0" in final_answer
+    assert isinstance(research_report, str)
+    assert "Tool calls: 1" in research_report
+    assert "Successful tool calls: 1" in research_report
+    assert "Failed tool calls: 0" in research_report
+    assert "Tool calls:" not in final_answer
 
 
 def test_build_agent_workflow_attaches_injected_checkpointer() -> None:

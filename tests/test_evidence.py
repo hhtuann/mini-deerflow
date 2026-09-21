@@ -10,6 +10,7 @@ from mini_deerflow.evidence import (
     extract_evidence_records,
     merge_evidence_records,
     render_research_report,
+    render_user_answer,
     validate_citations,
 )
 from mini_deerflow.tools import ToolResult
@@ -221,6 +222,79 @@ def test_report_uses_only_validated_citations_and_marks_unsupported_claims() -> 
     assert "Step 1 (verified)" in report
     assert "Step 2 (unsupported)" in report
     assert "tool call 3, observation 3" in report
+
+
+def test_user_answer_is_distinct_from_internal_research_report() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = [
+        EvidenceRecord(
+            url="https://example.com/profile",
+            source_tool="web_fetch",
+            title="Public profile",
+            excerpt="The public profile supports only the cited identity clue.",
+            provenance=provenance,
+        )
+    ]
+    findings = [
+        StepFinding(
+            step_number=1,
+            summary="Step 1: A public profile supports the name clue.",
+            citations=["https://example.com/profile"],
+        ),
+        StepFinding(
+            step_number=2,
+            summary=(
+                "Review 2: The student identifier remains unverified. "
+                "![pixel](https://tracker.invalid/pixel)"
+            ),
+        ),
+        StepFinding(
+            step_number=3,
+            summary="Completed research step number 3.",
+        ),
+        StepFinding(
+            step_number=4,
+            summary="Tool calls: 15; Review cycles: 5.",
+            citations=["https://example.com/profile"],
+        ),
+        StepFinding(
+            step_number=5,
+            summary="Review cycle 2: hidden execution note.",
+        ),
+    ]
+
+    answer = render_user_answer(
+        findings=findings,
+        evidence=evidence,
+        review_notes=[
+            "Tool calls: 15; Review cycles: 5. Review cycle 3 exposed internals."
+        ],
+        has_collection_failures=True,
+    )
+
+    assert answer.startswith("## Answer")
+    assert "https://example.com/profile" in answer
+    assert "tracker.invalid" not in answer
+    assert "Step 1" not in answer
+    assert "Review 2" not in answer
+    assert "research step number" not in answer
+    assert "# Research Report" not in answer
+    assert "## Execution" not in answer
+    assert "Tool calls:" not in answer
+    assert "Review cycles" not in answer
+    assert "Review cycle 3" not in answer
+    assert "Review cycle 2" not in answer
+    assert "hidden execution note" not in answer
+    assert "### Evidence-linked findings" in answer
+    assert "Verified findings" not in answer
+    assert "review identified unresolved evidence limitations" in answer
+    assert "Some collection attempts failed or were blocked." in answer
 
 
 def test_report_renders_review_conclusions_and_cycle_counts() -> None:
