@@ -53,7 +53,7 @@ Never show or commit `.env`.
 4. Confirm the user bubble appears immediately and the assistant shows a
    bounded research status while the worker runs.
 5. Inspect the completed sanitized Markdown answer. Open the collapsed
-   **🔎 Agent details** panel to show only the detail tabs relevant to that turn.
+   **Xem quá trình Agent** panel to show only the detail tabs relevant to that turn.
 6. Ask a follow-up such as `Nguồn nào là nguồn trực tiếp và giới hạn của kết
    luận là gì?` without creating a new chat.
 7. Confirm the same public `thread_id` remains in the header and a new turn is
@@ -89,7 +89,7 @@ promoted into current-turn citation membership.
 
 The main page uses native `st.chat_message` and `st.chat_input`. The assistant
 bubble renders only the durable, user-facing `final_answer`. The deterministic
-`research_report` stays in the collapsed **🔎 Agent details** panel. That panel
+`research_report` stays in the collapsed **Xem quá trình Agent** panel. That panel
 creates only the tabs for which the current turn has data:
 
 1. **Execution** — goal, plan, progress, budgets, and limitations.
@@ -104,6 +104,27 @@ creates only the tabs for which the current turn has data:
 
 The background worker never calls `st.*`. It owns its event loop, runtime,
 SQLite connection, and workspace lifetime. Only one job may run per UI session.
+
+Before rendering `final_answer`, the demo builds a `UserFacingAnswer` projection
+with `summary`, supporting `evidence`, `discrepancies`, `limitations`, and
+`sources`. This is a presentation projection, rather than a replacement for
+the durable research state: the raw observations, execution metadata, and
+research report remain available only in the collapsed detail panel.
+
+The public answer is backward-compatible Markdown with this reading order:
+**Kết quả**, **Kết luận**, optional **Bằng chứng & đối chiếu**, optional
+**Khác biệt giữa các nguồn**, optional **Độ tin cậy / hạn chế**, and numbered
+**Sources**. The formatter removes execution-progress prose, splits overly long
+findings into bounded points, deduplicates overlapping claims, and keeps a
+citation only when its canonical URL belongs to successful evidence. Citations
+are rendered beside their claim; source titles link only to those accepted URLs.
+
+Older persisted turns continue to store a Markdown `final_answer`. When their
+checkpoint state is available, an internal deterministic research report is
+re-projected into the public format; without that state, it is shown as a short
+user-facing availability notice instead of leaking the report's execution
+sections. The Markdown safety layer also decodes entities (including `&#xD;`),
+normalizes CRLF/CR newlines, and removes raw HTML before Streamlit renders it.
 
 ## Security boundary
 
