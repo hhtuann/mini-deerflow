@@ -33,6 +33,10 @@ _MARKDOWN_LINK_PATTERN = re.compile(
     r"\[([^\]]+)\]\(https?://[^)]+\)",
     re.IGNORECASE,
 )
+_MARKDOWN_IMAGE_PATTERN = re.compile(
+    r"!\s*\[([^\]]*)\]\(https?://[^)]+\)",
+    re.IGNORECASE,
+)
 _HTTP_URL_PATTERN = re.compile(
     r"https?://[^\s<>()]+",
     re.IGNORECASE,
@@ -52,6 +56,31 @@ _INTERNAL_METADATA_PATTERN = re.compile(
     r"provenance|execution\s+(?:trace|report)|budget\s+(?:limit|counter))\b",
     re.IGNORECASE,
 )
+_INTERNAL_EXECUTION_PATTERN = re.compile(
+    r"^\s*(?:(?:b\u01b0\u1edbc|step)\s*\d+\b|(?:branch|nh\u00e1nh)\b|"
+    r"(?:fetch|search)\b.*(?:status\s*(?:=\s*)?\d{3}|(?:th\u00e0nh c\u00f4ng|successful|succeeded))|"
+    r"(?:failed\s+collection|url\s+(?:verified|verification|omitted)|"
+    r"unverified\s+url\s+omitted|observations?|tool\s*(?:calls?|execution)|"
+    r"review\s*cycles?|workflow\s*step|agent\s*step|agent\s*trace|"
+    r"execution\s*trace|search\s*(?:query|snippet)|provenance)\b|"
+    r"ghi\s+ch\u00fa\s+cho\s+b\u01b0\u1edbc\s+sau|"
+    r"(?:completed|finished)\s+(?:research\s+)?step\b|"
+    r"(?:b\u01b0\u1edbc\s*\d+\s+ho\u00e0n\s+t\u1ea5t|\u0111\u00e3\s+tr\u00edch\s+xu\u1ea5t\s+\u0111\u1ea7y\s+\u0111\u1ee7|"
+    r"\u0111\u1ed1i\s+chi\u1ebfu\s+ho\u00e0n\s+t\u1ea5t)\b)",
+    re.IGNORECASE,
+)
+_CONCLUSION_MARKER_PATTERN = re.compile(
+    r"(?:^|[.!?]\s+)(?:k\u1ebft\s+lu\u1eadn(?:\s+(?:cho|v\u1ec1)[^:]{0,80})?|"
+    r"conclusion(?:\s+for[^:]{0,80})?)\s*:\s*",
+    re.IGNORECASE,
+)
+_DISCREPANCY_PATTERN = re.compile(
+    r"(?:m\u00e2u\s+thu\u1eabn|ch\u00eanh\s+l\u1ec7ch|kh\u00e1c\s+bi\u1ec7t|"
+    r"kh\u00f4ng\s+ph\u1ea3i\s+m\u00e2u\s+thu\u1eabn|scope|ph\u1ea1m\s+vi)",
+    re.IGNORECASE,
+)
+_ANSWER_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?;])\s+")
+_MAX_ANSWER_POINT_CHARS = 240
 _RESEARCH_REPORT_SECTIONS = (
     "## Goal",
     "## Findings",
@@ -187,6 +216,31 @@ class StepFinding(EvidenceModel):
             raise TypeError("citations must be a list")
 
         return [canonicalize_url(citation) for citation in value]
+
+
+class AnswerClaim(EvidenceModel):
+    """One user-facing claim with only accepted source membership."""
+
+    text: str = Field(min_length=1, max_length=1_000)
+    citations: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def canonicalize_claim_citations(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            raise TypeError("citations must be a list")
+
+        return [canonicalize_url(citation) for citation in value]
+
+
+class UserFacingAnswer(EvidenceModel):
+    """Structured public response, kept separate from the execution trace."""
+
+    summary: list[AnswerClaim] = Field(default_factory=list, max_length=5)
+    evidence: list[AnswerClaim] = Field(default_factory=list, max_length=12)
+    discrepancies: list[AnswerClaim] = Field(default_factory=list, max_length=6)
+    limitations: list[str] = Field(default_factory=list, max_length=6)
+    sources: list[str] = Field(default_factory=list, max_length=MAX_EVIDENCE_RECORDS)
 
 
 def extract_evidence_records(
@@ -356,7 +410,8 @@ def validate_citations(
 def sanitize_finding_summary(summary: str) -> str:
     """Remove model-authored URLs; validated citations are rendered separately."""
 
-    without_links = _MARKDOWN_LINK_PATTERN.sub(r"\1", summary)
+    without_images = _MARKDOWN_IMAGE_PATTERN.sub(r"\1", summary)
+    without_links = _MARKDOWN_LINK_PATTERN.sub(r"\1", without_images)
     without_urls = _HTTP_URL_PATTERN.sub("[unverified URL omitted]", without_links)
     return " ".join(without_urls.split())
 
@@ -371,19 +426,218 @@ def _public_markdown_text(value: str) -> str:
     return sanitized
 
 
-def render_user_answer(
+def _answer_points(statement: str) -> list[str]:
+    """Break a model-authored finding into scan-friendly, complete points.
+
+    The public answer preserves the original sanitized text. This helper only
+    introduces line breaks at sentence boundaries or between words when a
+    source summary is unusually long.
+    """
+
+    sentences = [
+        sentence.strip()
+        for sentence in _ANSWER_SENTENCE_BOUNDARY.split(statement)
+        if sentence.strip()
+    ]
+    points: list[str] = []
+
+    for sentence in sentences:
+        if len(sentence) <= _MAX_ANSWER_POINT_CHARS:
+            points.append(sentence)
+            continue
+
+        words = sentence.split()
+        chunk: list[str] = []
+        chunk_length = 0
+        for word in words:
+            if len(word) > _MAX_ANSWER_POINT_CHARS:
+                if chunk:
+                    points.append(" ".join(chunk))
+                    chunk = []
+                    chunk_length = 0
+                points.extend(_split_overlong_answer_word(word))
+                continue
+
+            next_length = chunk_length + len(word) + (1 if chunk else 0)
+            if chunk and next_length > _MAX_ANSWER_POINT_CHARS:
+                points.append(" ".join(chunk))
+                chunk = [word]
+                chunk_length = len(word)
+            else:
+                chunk.append(word)
+                chunk_length = next_length
+        if chunk:
+            points.append(" ".join(chunk))
+
+    return points
+
+
+def _split_overlong_answer_word(word: str) -> list[str]:
+    """Split an unspaced value without leaving a trailing Markdown escape."""
+
+    parts: list[str] = []
+    remaining = word
+    while len(remaining) > _MAX_ANSWER_POINT_CHARS:
+        end = _MAX_ANSWER_POINT_CHARS
+        if remaining[end - 1] == "\\":
+            end -= 1
+        parts.append(remaining[:end])
+        remaining = remaining[end:]
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _claim_key(value: str) -> str:
+    """Return a stable key for deterministic, conservative claim deduplication."""
+
+    return " ".join(re.findall(r"\w+", value.casefold()))
+
+
+def _is_internal_execution_text(value: str) -> bool:
+    """Recognize progress/debug prose that must remain in the trace only."""
+
+    return bool(
+        _INTERNAL_PROGRESS_PATTERN.fullmatch(value)
+        or _INTERNAL_EXECUTION_PATTERN.search(value)
+        or "[unverified url omitted]" in value.casefold()
+    )
+
+
+def contains_execution_metadata(value: str) -> bool:
+    """Detect whether every meaningful legacy-answer point is execution metadata."""
+
+    points = _legacy_answer_points(value)
+    return bool(points) and all(_is_internal_execution_text(point) for point in points)
+
+
+def has_execution_metadata(value: str) -> bool:
+    """Detect mixed legacy answers that need trace points removed before display."""
+
+    return any(_is_internal_execution_text(point) for point in _legacy_answer_points(value))
+
+
+def legacy_public_answer_points(value: str) -> list[str]:
+    """Retain only non-trace points from a pre-structured persisted answer."""
+
+    return [
+        _public_markdown_text(point)
+        for point in _legacy_answer_points(value)
+        if not _is_internal_execution_text(point)
+    ]
+
+
+def _legacy_answer_points(value: str) -> list[str]:
+    points: list[str] = []
+    for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped or re.fullmatch(r"#{1,6}\s*[^#]+", stripped):
+            continue
+        points.extend(_answer_points(sanitize_finding_summary(stripped)))
+    return points
+
+
+def _conclusion_fragments(value: str) -> list[str]:
+    """Extract explicit model conclusions without exposing the execution lead-in."""
+
+    matches = list(_CONCLUSION_MARKER_PATTERN.finditer(value))
+    if not matches:
+        return []
+
+    fragments: list[str] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+        fragment = value[match.end() : end].strip()
+        if fragment:
+            fragments.append(fragment)
+    return fragments
+
+
+def _merge_claims(claims: list[AnswerClaim]) -> list[AnswerClaim]:
+    """Merge exact or nested claims and retain every accepted citation."""
+
+    merged: list[AnswerClaim] = []
+    keys: list[str] = []
+    for claim in claims:
+        key = _claim_key(claim.text)
+        if not key:
+            continue
+        match_index = next(
+            (
+                index
+                for index, existing_key in enumerate(keys)
+                if key == existing_key
+                or (
+                    min(len(key), len(existing_key)) >= 40
+                    and (key in existing_key or existing_key in key)
+                )
+            ),
+            None,
+        )
+        if match_index is None:
+            keys.append(key)
+            merged.append(claim)
+            continue
+
+        existing = merged[match_index]
+        citations = list(dict.fromkeys([*existing.citations, *claim.citations]))
+        text = claim.text if len(claim.text) < len(existing.text) else existing.text
+        merged[match_index] = AnswerClaim(text=text, citations=citations)
+        keys[match_index] = _claim_key(text)
+    return merged
+
+
+def _claims_from_finding(
+    finding: StepFinding,
+    *,
+    evidence_by_url: dict[str, EvidenceRecord],
+) -> tuple[list[AnswerClaim], list[AnswerClaim]]:
+    """Separate explicit conclusions from supporting public claims."""
+
+    citations = list(
+        dict.fromkeys(
+            str(citation)
+            for citation in finding.citations
+            if str(citation) in evidence_by_url
+        )
+    )
+    raw = sanitize_finding_summary(finding.summary)
+    raw = _INTERNAL_PREFIX_PATTERN.sub("", raw).strip()
+    conclusion_fragments = _conclusion_fragments(raw)
+    summary: list[AnswerClaim] = []
+    evidence: list[AnswerClaim] = []
+
+    def collect(value: str, target: list[AnswerClaim]) -> None:
+        if not citations:
+            return
+        for point in _answer_points(value):
+            if _is_internal_execution_text(point):
+                continue
+            text = _public_markdown_text(point)
+            if text:
+                target.append(AnswerClaim(text=text, citations=citations))
+
+    for fragment in conclusion_fragments:
+        collect(fragment, summary)
+    if not conclusion_fragments:
+        collect(raw, evidence)
+
+    return summary, evidence
+
+
+def build_user_facing_answer(
     *,
     findings: list[StepFinding],
     evidence: list[EvidenceRecord],
     review_notes: Sequence[str] = (),
     has_collection_failures: bool = False,
-) -> str:
-    """Render controlled user-facing Markdown from validated research state.
+) -> UserFacingAnswer:
+    """Normalize research state into a concise answer and a separate trace-safe view.
 
-    Unlike :func:`render_research_report`, this intentionally omits plan-step
-    numbering, provenance, reviewer cycles, budgets, and tool counters. Model
-    authored prose is escaped; only citations backed by successful evidence
-    records are introduced as active Markdown links.
+    The formatter is deterministic: it never calls the model, never invents a
+    source, and only carries citations which already refer to successful web
+    evidence. Execution metadata remains available through ``research_report``
+    and the demo trace rather than leaking into the main answer.
     """
 
     evidence_by_url = {
@@ -391,103 +645,133 @@ def render_user_answer(
         for record in evidence
         if record.status == "success"
     }
-    public_findings: list[tuple[StepFinding, str]] = []
+    summary: list[AnswerClaim] = []
+    supporting: list[AnswerClaim] = []
     for finding in findings:
-        statement = _public_markdown_text(finding.summary)
-        if _INTERNAL_PROGRESS_PATTERN.fullmatch(statement):
-            continue
-        if _INTERNAL_METADATA_PATTERN.search(statement):
-            continue
-        public_findings.append((finding, statement))
-    cited_urls = list(
+        extracted_summary, extracted_evidence = _claims_from_finding(
+            finding,
+            evidence_by_url=evidence_by_url,
+        )
+        summary.extend(extracted_summary)
+        supporting.extend(extracted_evidence)
+
+    summary = _merge_claims(summary)
+    supporting = _merge_claims(supporting)
+    if not summary and supporting:
+        summary, supporting = supporting[:2], supporting[2:]
+
+    summary_keys = {_claim_key(claim.text) for claim in summary}
+    supporting = [
+        claim for claim in supporting if _claim_key(claim.text) not in summary_keys
+    ]
+    discrepancies = [
+        claim for claim in supporting if _DISCREPANCY_PATTERN.search(claim.text)
+    ]
+    evidence_claims = [
+        claim for claim in supporting if claim not in discrepancies
+    ]
+    sources = list(
         dict.fromkeys(
-            str(citation)
-            for finding in findings
-            for citation in finding.citations
-            if str(citation) in evidence_by_url
+            citation
+            for claim in [*summary, *evidence_claims, *discrepancies]
+            for citation in claim.citations
         )
     )
-    citation_numbers = {url: index for index, url in enumerate(cited_urls, 1)}
-    evidence_linked: list[str] = []
-    unverified: list[str] = []
-
-    for finding, statement in public_findings:
-        valid_urls = [
-            str(citation)
-            for citation in finding.citations
-            if str(citation) in evidence_by_url
-        ]
-        if valid_urls:
-            markers = " ".join(f"[{citation_numbers[url]}]" for url in valid_urls)
-            evidence_linked.append(f"- {statement} {markers}")
-        else:
-            unverified.append(f"- {statement}")
-
-    lines = ["## Answer", ""]
-    if evidence_linked:
-        lines.extend(["### Evidence-linked findings", "", *evidence_linked, ""])
-    elif cited_urls:
-        lines.extend(
-            [
-                (
-                    "Public sources were collected, but the completed steps did not "
-                    "provide a substantive claim suitable for the answer."
-                ),
-                "",
-            ]
+    if not sources and not summary and not evidence_claims and not discrepancies:
+        # A resumed legacy turn may contain only successful evidence plus
+        # progress summaries. Keep its collected source list visible without
+        # manufacturing a claim from that execution metadata.
+        sources = list(
+            dict.fromkeys(
+                str(citation)
+                for finding in findings
+                for citation in finding.citations
+                if str(citation) in evidence_by_url
+            )
         )
+
+    limitations = [
+        _public_markdown_text(note)
+        for note in review_notes
+        if note.strip() and not _is_internal_execution_text(note)
+    ]
+    limitations = list(dict.fromkeys(limitations))
+    if has_collection_failures and not limitations and not summary and not evidence_claims:
+        limitations.append(
+            "Không thể thu thập đủ bằng chứng công khai để trả lời chắc chắn câu hỏi này."
+        )
+
+    return UserFacingAnswer(
+        summary=summary[:5],
+        evidence=evidence_claims[:12],
+        discrepancies=discrepancies[:6],
+        limitations=limitations[:6],
+        sources=sources,
+    )
+
+
+def _render_claim(claim: AnswerClaim, citation_numbers: dict[str, int]) -> str:
+    markers = "".join(
+        f"[{citation_numbers[url]}]"
+        for url in claim.citations
+        if url in citation_numbers
+    )
+    return f"{claim.text} {markers}".strip()
+
+
+def render_user_answer(
+    *,
+    findings: list[StepFinding],
+    evidence: list[EvidenceRecord],
+    review_notes: Sequence[str] = (),
+    has_collection_failures: bool = False,
+) -> str:
+    """Render the structured public response as backward-compatible Markdown."""
+
+    answer = build_user_facing_answer(
+        findings=findings,
+        evidence=evidence,
+        review_notes=review_notes,
+        has_collection_failures=has_collection_failures,
+    )
+    evidence_by_url = {
+        record.canonical_url: record
+        for record in evidence
+        if record.status == "success"
+    }
+    citation_numbers = {
+        url: index for index, url in enumerate(answer.sources, start=1)
+    }
+    lines = ["# Kết quả", "", "## Kết luận", ""]
+
+    if answer.summary:
+        lines.extend(_render_claim(claim, citation_numbers) for claim in answer.summary)
     else:
+        lines.append(
+            "Chưa có đủ bằng chứng công khai để đưa ra kết luận trực tiếp cho câu hỏi này."
+        )
+
+    if answer.evidence:
+        lines.extend(["", "## Bằng chứng & đối chiếu", ""])
         lines.extend(
-            [
-                (
-                    "No claim could be linked to the public sources collected "
-                    "in this run."
-                ),
-                "",
-            ]
+            f"- {_render_claim(claim, citation_numbers)}"
+            for claim in answer.evidence
         )
 
-    if unverified:
-        lines.extend(["### Unverified or incomplete clues", "", *unverified, ""])
-
-    has_review_limitations = any(note.strip() for note in review_notes)
-    lines.extend(["### Conclusion", ""])
-    if has_review_limitations:
-        lines.append(
-            "The review identified unresolved evidence limitations; treat this "
-            "answer as incomplete."
-        )
-    elif evidence_linked and unverified:
-        lines.append(
-            "Some findings link to collected public sources, while the remaining "
-            "clues have no accepted citation."
-        )
-    elif evidence_linked:
-        lines.append(
-            "The findings above link to collected public sources. Citation "
-            "membership alone does not prove that a claim is true or supported "
-            "by the source content."
-        )
-    else:
-        lines.append(
-            "The available public evidence is insufficient to confirm the "
-            "requested claim."
-        )
-
-    if has_collection_failures:
+    if answer.discrepancies:
+        lines.extend(["", "## Khác biệt giữa các nguồn", ""])
         lines.extend(
-            [
-                "",
-                (
-                    "Some collection attempts failed or were blocked. The available "
-                    "evidence may therefore be incomplete."
-                ),
-            ]
+            f"- {_render_claim(claim, citation_numbers)}"
+            for claim in answer.discrepancies
         )
 
-    if cited_urls:
-        lines.extend(["", "### Sources", ""])
-        for url in cited_urls:
+    if answer.limitations:
+        lines.extend(["", "## Độ tin cậy / hạn chế", ""])
+        lines.extend(f"> {limitation}" for limitation in answer.limitations)
+
+    if answer.sources:
+        lines.extend(["", "## Sources", ""])
+        for url in answer.sources:
             record = evidence_by_url[url]
             title = _public_markdown_text(record.title or "Public source")
             lines.append(f"{citation_numbers[url]}. [{title}]({url})")

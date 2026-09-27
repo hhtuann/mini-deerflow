@@ -16,21 +16,28 @@ from mini_deerflow.demo.offline_scenario import (
 )
 from mini_deerflow.demo.service import DemoRuntimeService, RunDemoCommand
 from mini_deerflow.demo.view_models import (
+    _answer_markdown,
     project_chat_session,
     sanitize_answer_markdown,
 )
-from mini_deerflow.evidence import render_research_report
+from mini_deerflow.evidence import (
+    EvidenceProvenance,
+    EvidenceRecord,
+    StepFinding,
+    render_research_report,
+)
 from mini_deerflow.runtime import (
     ConversationSnapshot,
     ConversationTurnSnapshot,
     RuntimeLimits,
 )
+from mini_deerflow.state import AgentState
 
 
 def test_answer_markdown_denies_remote_images_html_and_unvalidated_links() -> None:
     safe = sanitize_answer_markdown(
         (
-            "## Answer\n\n"
+            "## Answer&#xD;\r\n\r\n"
             "![pixel](https://tracker.invalid/pixel) "
             "![reference pixel][tracker]\n"
             "[tracker]: https://tracker.invalid/reference\n"
@@ -42,6 +49,8 @@ def test_answer_markdown_denies_remote_images_html_and_unvalidated_links() -> No
     )
 
     assert safe.startswith("## Answer")
+    assert "&#xD;" not in safe
+    assert "\r" not in safe
     assert "[validated](https://example.com/source)" in safe
     assert "invented" in safe
     assert "invented.invalid" not in safe
@@ -97,7 +106,77 @@ def test_legacy_report_without_checkpoint_has_no_nonexistent_details_cta() -> No
     assert turn.run is None
     assert "# Research Report" not in (turn.assistant_message or "")
     assert "Agent details" not in (turn.assistant_message or "")
-    assert "cannot be reconstructed" in (turn.assistant_message or "")
+    assert (turn.assistant_message or "").startswith("## Kết quả")
+    assert "Không thể dựng lại" in (turn.assistant_message or "")
+
+
+def test_checkpointed_legacy_public_answer_is_rebuilt_from_findings() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = EvidenceRecord(
+        url="https://example.com/source",
+        source_tool="web_fetch",
+        title="Source",
+        excerpt="Observed content",
+        provenance=provenance,
+    )
+    state: AgentState = {
+        "final_answer": "## Answer\n\nBước 1 hoàn tất: status 200.",
+        "findings": [
+            StepFinding(
+                step_number=1,
+                summary="Kết luận: A durable public claim.",
+                citations=["https://example.com/source"],
+            )
+        ],
+        "evidence": [evidence],
+        "review_verdicts": [],
+        "errors": [],
+        "tool_observations": [],
+    }
+
+    answer = _answer_markdown(state, state["final_answer"] or "")
+
+    assert "A durable public claim. [1]" in answer
+    assert "Bước 1 hoàn tất" not in answer
+
+
+def test_legacy_execution_only_answer_is_not_rendered_as_public_content() -> None:
+    state: AgentState = {
+        "final_answer": "## Answer\n\nBước 1 hoàn tất: fetch status = 200.",
+        "findings": [],
+        "evidence": [],
+        "review_verdicts": [],
+        "errors": [],
+        "tool_observations": [],
+    }
+
+    answer = _answer_markdown(state, state["final_answer"] or "")
+
+    assert answer.startswith("# Kết quả")
+    assert "Bước 1 hoàn tất" not in answer
+    assert "fetch status" not in answer
+
+
+def test_legacy_mixed_answer_keeps_public_point_and_removes_trace() -> None:
+    state: AgentState = {
+        "final_answer": "Public result.\n\nStep 1: fetch status = 200.",
+        "findings": [],
+        "evidence": [],
+        "review_verdicts": [],
+        "errors": [],
+        "tool_observations": [],
+    }
+
+    answer = _answer_markdown(state, state["final_answer"] or "")
+
+    assert "Public result." in answer
+    assert "fetch status" not in answer
 
 
 def test_projector_is_frozen_allowlisted_and_does_not_leak_canaries(

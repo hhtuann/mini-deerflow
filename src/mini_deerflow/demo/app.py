@@ -338,7 +338,10 @@ def _render_turn(turn) -> None:
             st.info("This turn is still running.")
 
         if turn.run is not None:
-            with st.expander("🔎 Agent details", expanded=False):
+            with st.expander(
+                "Xem quá trình Agent",
+                expanded=False,
+            ):
                 render_demo_tabs(
                     turn.run,
                     key_prefix=f"turn-{turn.turn_id}",

@@ -9,13 +9,20 @@ not cross this boundary.
 
 from __future__ import annotations
 
+import html
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
 from mini_deerflow.conversation import ConversationRecord, TurnStatus
-from mini_deerflow.evidence import is_research_report, render_user_answer
+from mini_deerflow.evidence import (
+    contains_execution_metadata,
+    has_execution_metadata,
+    is_research_report,
+    legacy_public_answer_points,
+    render_user_answer,
+)
 from mini_deerflow.runtime import ConversationSnapshot, RuntimeLimits
 from mini_deerflow.state import AgentState
 from mini_deerflow.tracing import ExecutionTrace, TraceKind
@@ -635,7 +642,7 @@ def _answer_markdown(state: AgentState | None, persisted_answer: str) -> str:
         state_answer = state.get("final_answer")
         if isinstance(state_answer, str):
             candidate = state_answer
-        if is_research_report(candidate):
+        if is_research_report(candidate) or state.get("findings"):
             review_notes = list(
                 dict.fromkeys(
                     finding.description
@@ -661,11 +668,22 @@ def _answer_markdown(state: AgentState | None, persisted_answer: str) -> str:
                     for observation in state.get("tool_observations", ())
                 ),
             )
+        elif contains_execution_metadata(candidate):
+            candidate = (
+                "# Kết quả\n\n## Độ tin cậy / hạn chế\n\n"
+                "> Bản ghi cũ này chỉ còn dữ liệu quá trình Agent; không còn đủ "
+                "evidence đã chuẩn hoá để dựng lại câu trả lời công khai an toàn."
+            )
+        elif has_execution_metadata(candidate):
+            candidate = "# Kết quả\n\n## Kết luận\n\n" + "\n\n".join(
+                legacy_public_answer_points(candidate)
+            )
     elif is_research_report(candidate):
         candidate = (
-            "## Answer\n\nThis legacy turn completed, but only its internal "
-            "research report is available. A concise public answer cannot be "
-            "reconstructed without its checkpoint."
+            "## Kết quả\n\n### Lưu ý\n\n"
+            "- Phiên trò chuyện cũ này đã hoàn tất, nhưng chỉ còn báo cáo nghiên cứu "
+            "nội bộ. Không thể dựng lại câu trả lời công khai ngắn gọn khi không có "
+            "checkpoint."
         )
 
     return sanitize_answer_markdown(candidate, allowed_urls=allowed_urls)
@@ -679,7 +697,8 @@ def sanitize_answer_markdown(
     """Preserve answer structure while denying remote images, HTML, and links."""
 
     allowed_url_set = set(allowed_urls)
-    text = _CONTROL_CHARACTERS.sub("", value)
+    text = html.unescape(value).replace("\r\n", "\n").replace("\r", "\n")
+    text = _CONTROL_CHARACTERS.sub("", text)
     text = _MARKDOWN_IMAGE.sub(
         lambda match: _plain_text(match.group(1), 200, omit_urls=True),
         text,

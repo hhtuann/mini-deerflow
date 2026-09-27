@@ -281,13 +281,12 @@ def test_streamlit_renders_two_turns_from_durable_chat_projection() -> None:
     assert "Follow-up answer only" in visible_markdown
     assert "FIRST_INTERNAL_REPORT_CANARY" not in visible_markdown
     assert "SECOND_INTERNAL_REPORT_CANARY" not in visible_markdown
-    assert [expander.label for expander in app.expander[:2]] == [
-        "🔎 Agent details",
-        "🔎 Agent details",
+    assert len(app.expander) == 2
+    assert [expander.label for expander in app.expander] == [
+        "Xem quá trình Agent",
+        "Xem quá trình Agent",
     ]
-    assert 'st.expander("🔎 Agent details", expanded=False)' in APP_PATH.read_text(
-        encoding="utf-8"
-    )
+    assert '"Xem quá trình Agent"' in APP_PATH.read_text(encoding="utf-8")
     assert any("FIRST_INTERNAL_REPORT_CANARY" in str(item.value) for item in app.code)
     assert "4/100" in "\n".join(item.value for item in app.caption)
 

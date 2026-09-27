@@ -6,6 +6,7 @@ from mini_deerflow.evidence import (
     EvidenceProvenance,
     EvidenceRecord,
     StepFinding,
+    _answer_points,
     canonicalize_url,
     extract_evidence_records,
     merge_evidence_records,
@@ -278,7 +279,7 @@ def test_user_answer_is_distinct_from_internal_research_report() -> None:
         has_collection_failures=True,
     )
 
-    assert answer.startswith("## Answer")
+    assert answer.startswith("# Kết quả")
     assert "https://example.com/profile" in answer
     assert "tracker.invalid" not in answer
     assert "Step 1" not in answer
@@ -291,10 +292,230 @@ def test_user_answer_is_distinct_from_internal_research_report() -> None:
     assert "Review cycle 3" not in answer
     assert "Review cycle 2" not in answer
     assert "hidden execution note" not in answer
-    assert "### Evidence-linked findings" in answer
+    assert "## Kết luận" in answer
+    assert "## Sources" in answer
     assert "Verified findings" not in answer
-    assert "review identified unresolved evidence limitations" in answer
-    assert "Some collection attempts failed or were blocked." in answer
+    assert "giới hạn bằng chứng chưa được giải quyết" not in answer
+    assert "Một số lần thu thập đã lỗi hoặc bị chặn" not in answer
+
+
+def test_user_answer_splits_long_finding_into_short_cited_points() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = [
+        EvidenceRecord(
+            url="https://example.com/profile",
+            source_tool="web_fetch",
+            title="Public profile",
+            excerpt="Observed content",
+            provenance=provenance,
+        )
+    ]
+    findings = [
+        StepFinding(
+            step_number=1,
+            summary=(
+                "The profile confirms the public name. "
+                "It lists a role relevant to the request. "
+                "It also includes a public location. "
+                "The final detail is separated for easier reading."
+            ),
+            citations=["https://example.com/profile"],
+        )
+    ]
+
+    answer = render_user_answer(findings=findings, evidence=evidence)
+
+    assert "## Kết luận" in answer
+    assert "### Tóm tắt nhanh" not in answer
+    assert "The profile confirms the public name. [1]" in answer
+    assert "It lists a role relevant to the request. [1]" in answer
+    assert "It also includes a public location. [1]" in answer
+    assert "The final detail is separated for easier reading. [1]" in answer
+
+
+def test_user_answer_filters_execution_logs_and_merges_duplicate_citations() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = [
+        EvidenceRecord(
+            url="https://example.com/one",
+            source_tool="web_fetch",
+            title="Source one",
+            excerpt="Observed content",
+            provenance=provenance,
+        ),
+        EvidenceRecord(
+            url="https://example.com/two",
+            source_tool="web_fetch",
+            title="Source two",
+            excerpt="Observed content",
+            provenance=provenance,
+        ),
+        EvidenceRecord(
+            url="https://example.com/trace-only",
+            source_tool="web_fetch",
+            title="Trace-only source",
+            excerpt="Observed content",
+            provenance=provenance,
+        ),
+    ]
+    findings = [
+        StepFinding(
+            step_number=1,
+            summary=(
+                "Bước 1 hoàn tất: fetch thành công, status 200, branch totals. "
+                "Kết luận: Ronaldo có 979 bàn thắng chính thức."
+            ),
+            citations=["https://example.com/one", "https://example.com/one"],
+        ),
+        StepFinding(
+            step_number=2,
+            summary="Đối chiếu hoàn tất. Kết luận: Ronaldo có 979 bàn thắng chính thức.",
+            citations=["https://example.com/two"],
+        ),
+        StepFinding(
+            step_number=3,
+            summary="fetch status = 200; observations stored for the next step.",
+            citations=["https://example.com/trace-only"],
+        ),
+    ]
+
+    answer = render_user_answer(findings=findings, evidence=evidence)
+
+    assert answer.count("Ronaldo có 979 bàn thắng chính thức.") == 1
+    assert "Ronaldo có 979 bàn thắng chính thức. [1][2]" in answer
+    for forbidden in ("Bước 1 hoàn tất", "fetch thành công", "status 200", "branch"):
+        assert forbidden not in answer
+    assert "1. [Source one](https://example.com/one)" in answer
+    assert "2. [Source two](https://example.com/two)" in answer
+    assert "Trace-only source" not in answer
+
+
+@pytest.mark.parametrize(
+    "trace_line",
+    [
+        "Search query: Ronaldo goals",
+        "Search snippet: latest result",
+        "Agent trace: tool execution completed",
+        "Execution trace: observation stored",
+        "Failed collection: provider timeout",
+        "URL verified: https://example.com/source",
+    ],
+)
+def test_user_answer_filters_trace_prefixes(trace_line: str) -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = [
+        EvidenceRecord(
+            url="https://example.com/source",
+            source_tool="web_fetch",
+            title="Source",
+            excerpt="Observed content",
+            provenance=provenance,
+        )
+    ]
+    answer = render_user_answer(
+        findings=[
+            StepFinding(
+                step_number=1,
+                summary=trace_line,
+                citations=["https://example.com/source"],
+            )
+        ],
+        evidence=evidence,
+    )
+
+    assert trace_line not in answer
+
+
+def test_user_answer_preserves_factual_step_wording_without_trace_prefix() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = [
+        EvidenceRecord(
+            url="https://example.com/procedure",
+            source_tool="web_fetch",
+            title="Procedure source",
+            excerpt="Observed content",
+            provenance=provenance,
+        )
+    ]
+
+    answer = render_user_answer(
+        findings=[
+            StepFinding(
+                step_number=1,
+                summary="The procedure has 3 steps.",
+                citations=["https://example.com/procedure"],
+            )
+        ],
+        evidence=evidence,
+    )
+
+    assert "The procedure has 3 steps. [1]" in answer
+
+
+def test_answer_points_wraps_an_unspaced_long_value() -> None:
+    points = _answer_points("x" * 241)
+
+    assert points == ["x" * 240, "x"]
+
+
+def test_user_answer_removes_malformed_remote_image_syntax() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = [
+        EvidenceRecord(
+            url="https://example.com/source",
+            source_tool="web_fetch",
+            title="Source",
+            excerpt="Observed content",
+            provenance=provenance,
+        )
+    ]
+    answer = render_user_answer(
+        findings=[
+            StepFinding(
+                step_number=1,
+                summary=(
+                    "Kết luận: A supported claim. "
+                    "! [pixel](https://tracker.invalid/pixel)"
+                ),
+                citations=["https://example.com/source"],
+            )
+        ],
+        evidence=evidence,
+    )
+
+    assert "pixel" in answer
+    assert "!pixel" not in answer
+    assert "tracker.invalid" not in answer
 
 
 def test_report_renders_review_conclusions_and_cycle_counts() -> None:
