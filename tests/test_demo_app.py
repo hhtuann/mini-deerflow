@@ -245,8 +245,7 @@ def test_streamlit_initial_surface_is_an_honest_chat(
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MINI_DEERFLOW_API_KEY", "test-model-key")
-    monkeypatch.setenv("MINI_DEERFLOW_JINA_API_KEY", "test-jina-key")
+    monkeypatch.setenv("MINI_DEERFLOW_API_KEY", "test-api-key")
     app = AppTest.from_file(APP_PATH).run(timeout=10)
 
     assert not app.exception
@@ -259,7 +258,8 @@ def test_streamlit_initial_surface_is_an_honest_chat(
     assert app.chat_input[0].disabled is False
     assert not app.tabs
     assert any(
-        "Jina key is required" in caption.value for caption in app.sidebar.caption
+        "GLM 5.3" in caption.value and "Wikipedia" in caption.value
+        for caption in app.sidebar.caption
     )
 
 
@@ -289,6 +289,24 @@ def test_streamlit_renders_two_turns_from_durable_chat_projection() -> None:
     assert '"Xem quá trình Agent"' in APP_PATH.read_text(encoding="utf-8")
     assert any("FIRST_INTERNAL_REPORT_CANARY" in str(item.value) for item in app.code)
     assert "4/100" in "\n".join(item.value for item in app.caption)
+
+
+def test_streamlit_hides_redundant_result_heading() -> None:
+    session = _chat_session()
+    first_turn = replace(
+        session.turns[0],
+        assistant_message="# Kết quả\n\n## Kết luận\n\nFirst answer only.",
+    )
+    session = replace(session, turns=(first_turn,))
+    app = AppTest.from_file(APP_PATH)
+    _seed_dependencies(app, _SnapshotManager(None), session)
+    app.run(timeout=10)
+
+    assert not app.exception
+    visible_markdown = "\n".join(str(item.value) for item in app.markdown)
+    assert "# Kết quả" not in visible_markdown
+    assert "## Kết luận" in visible_markdown
+    assert "First answer only" in visible_markdown
 
 
 def test_streamlit_disables_new_work_while_a_turn_is_running() -> None:

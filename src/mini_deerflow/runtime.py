@@ -7,10 +7,13 @@ from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast, runtime_checkable
 
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from mini_deerflow.agent_workflow import build_agent_workflow
+from mini_deerflow.answer_synthesis import (
+    AnswerSynthesizer,
+    LLMAnswerSynthesizer,
+)
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.conversation import (
@@ -44,17 +47,20 @@ from mini_deerflow.persistence import (
     create_thread_config,
     open_sqlite_checkpointer,
 )
-from mini_deerflow.planner import create_research_plan
+from mini_deerflow.planner import PlanningBudget, create_research_plan
 from mini_deerflow.replanner import create_replacement_plan
 from mini_deerflow.review import EvidenceReviewer, Replanner
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState, create_initial_state
+from mini_deerflow.structured_output import StructuredChatModel
 from mini_deerflow.tools import (
     ListFilesTool,
     ReadFileTool,
     ToolRegistry,
     WebFetchTool,
     WebSearchTool,
+    WikiLookupTool,
+    WikiSearchTool,
     WriteFileTool,
 )
 from mini_deerflow.tracing import (
@@ -66,20 +72,17 @@ from mini_deerflow.tracing import (
     TraceOutcome,
     TracePhase,
 )
-from mini_deerflow.web import (
-    JinaWebProvider,
-    UrllibWebHttpClient,
-    WebProvider,
-)
+from mini_deerflow.web import WebProvider
 from mini_deerflow.web_safety import (
     PublicWebTargetValidator,
     SystemHostResolver,
     WebTargetValidator,
 )
+from mini_deerflow.wikipedia import MediaWikiProvider, WikipediaProvider
 from mini_deerflow.workspace import Workspace
 
 Planner = Callable[[str], Plan]
-ModelFactory = Callable[[Settings], ChatOpenAI]
+ModelFactory = Callable[[Settings], StructuredChatModel]
 
 
 @dataclass(frozen=True, slots=True)
@@ -653,6 +656,7 @@ def build_agent_runtime(
     action_registry: ToolRegistry | None = None,
     reviewer: EvidenceReviewer | None = None,
     replanner: Replanner | None = None,
+    answer_synthesizer: AnswerSynthesizer | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     limits: RuntimeLimits | None = None,
     context_budget: ContextBudget | None = None,
@@ -672,6 +676,7 @@ def build_agent_runtime(
         action_registry=action_registry,
         reviewer=reviewer,
         replanner=replanner,
+        answer_synthesizer=answer_synthesizer,
         checkpointer=checkpointer,
         max_tool_calls_per_step=(resolved_limits.max_tool_calls_per_step),
         max_total_tool_calls=resolved_limits.max_total_tool_calls,
@@ -701,6 +706,7 @@ def create_default_agent_runtime(
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
     web_target_validator: WebTargetValidator | None = None,
+    wiki_provider: WikipediaProvider | None = None,
     researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
     tracer: ExecutionTracer | None = None,
@@ -712,31 +718,31 @@ def create_default_agent_runtime(
         raise TypeError("allow_write must be a boolean")
 
     model = model_factory(settings)
-    structured_output_mode = (
-        settings.structured_output_mode if isinstance(model, ChatOpenAI) else "native"
-    )
+    structured_output_mode = settings.structured_output_mode
     workspace = Workspace(workspace_root)
-    resolved_web_provider = (
-        web_provider
-        if web_provider is not None
-        else JinaWebProvider(
-            UrllibWebHttpClient(),
-            api_key=settings.jina_api_key,
-            timeout_seconds=settings.web_request_timeout,
-            max_response_bytes=settings.web_max_response_bytes,
-        )
-    )
 
     resolved_limits = limits or RuntimeLimits()
-    web_search_tool = WebSearchTool(resolved_web_provider)
-    resolved_target_validator = web_target_validator or PublicWebTargetValidator(
-        SystemHostResolver()
-    )
-    web_fetch_tool = WebFetchTool(
-        resolved_web_provider,
-        resolved_target_validator,
-    )
-    branch_registry = ToolRegistry([web_search_tool, web_fetch_tool])
+    if web_provider is None:
+        resolved_wiki_provider = wiki_provider or MediaWikiProvider(
+            timeout_seconds=settings.wiki_request_timeout,
+        )
+        research_tools = [
+            WikiSearchTool(resolved_wiki_provider),
+            WikiLookupTool(resolved_wiki_provider),
+        ]
+    else:
+        # Explicit dependency injection keeps the deterministic legacy web
+        # scenarios available for safety/resume tests. The production default
+        # never enters this branch and therefore registers only Wikipedia tools.
+        resolved_target_validator = web_target_validator or PublicWebTargetValidator(
+            SystemHostResolver()
+        )
+        research_tools = [
+            WebSearchTool(web_provider),
+            WebFetchTool(web_provider, resolved_target_validator),
+        ]
+
+    branch_registry = ToolRegistry(research_tools)
     resolved_context_budget = context_budget or ContextBudget()
     resolved_researcher = researcher_subagent or BoundedResearcherSubagent(
         LLMActionSelector(
@@ -756,8 +762,7 @@ def create_default_agent_runtime(
     action_tools = [
         ListFilesTool(workspace),
         ReadFileTool(workspace),
-        web_search_tool,
-        web_fetch_tool,
+        *research_tools,
         delegation_tool,
     ]
     execution_tools = list(action_tools)
@@ -774,6 +779,11 @@ def create_default_agent_runtime(
         create_research_plan,
         model,
         available_tools=action_registry.definitions(),
+        planning_budget=PlanningBudget(
+            max_tool_calls_per_step=resolved_limits.max_tool_calls_per_step,
+            max_total_tool_calls=resolved_limits.max_total_tool_calls,
+            max_replan_cycles=resolved_limits.max_replan_cycles,
+        ),
         structured_output_mode=structured_output_mode,
     )
 
@@ -782,6 +792,10 @@ def create_default_agent_runtime(
         structured_output_mode=structured_output_mode,
     )
     reviewer = LLMReviewer(
+        model,
+        structured_output_mode=structured_output_mode,
+    )
+    answer_synthesizer = LLMAnswerSynthesizer(
         model,
         structured_output_mode=structured_output_mode,
     )
@@ -798,6 +812,7 @@ def create_default_agent_runtime(
         action_registry=action_registry,
         reviewer=reviewer,
         replanner=replanner,
+        answer_synthesizer=answer_synthesizer,
         checkpointer=checkpointer,
         limits=resolved_limits,
         context_budget=resolved_context_budget,
@@ -819,6 +834,7 @@ async def open_default_agent_runtime(
     model_factory: ModelFactory = create_chat_model,
     web_provider: WebProvider | None = None,
     web_target_validator: WebTargetValidator | None = None,
+    wiki_provider: WikipediaProvider | None = None,
     researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
     tracer: ExecutionTracer | None = None,
@@ -837,6 +853,7 @@ async def open_default_agent_runtime(
             model_factory=model_factory,
             web_provider=web_provider,
             web_target_validator=web_target_validator,
+            wiki_provider=wiki_provider,
             researcher_subagent=researcher_subagent,
             artifact_path=artifact_path,
             tracer=tracer,

@@ -10,6 +10,7 @@ from mini_deerflow.context_budget import (
     ContextBudgetExceededError,
     payload_size,
 )
+from mini_deerflow.decision import ActionContext
 from mini_deerflow.delegation import (
     BoundedResearcherSubagent,
     BranchFinding,
@@ -307,6 +308,53 @@ def test_aggregate_budget_rejection_happens_before_dispatch() -> None:
     assert researcher.contexts == []
 
 
+def test_parent_allocated_remainder_admits_delegate_and_reserved_branch_calls() -> None:
+    researcher = ConcurrentFakeResearcher()
+    tool = DelegateResearchTool(researcher, ToolRegistry([FakeWebTool()]))
+    result = asyncio.run(
+        tool.run_with_parent_budget(
+            {
+                "delegation_id": "wave-allocated-boundary",
+                "tasks": [
+                    task("alpha", budget=1).model_dump(),
+                    task("beta", budget=2).model_dump(),
+                ],
+            },
+            parent_step_number=1,
+            remaining_tool_calls=10,
+            remaining_allocated_step_tool_calls=4,
+        )
+    )
+
+    assert result.success is True
+    assert len(researcher.contexts) == 2
+
+
+def test_parent_allocated_remainder_rejects_before_branch_dispatch() -> None:
+    researcher = ConcurrentFakeResearcher()
+    tool = DelegateResearchTool(researcher, ToolRegistry([FakeWebTool()]))
+    result = asyncio.run(
+        tool.run_with_parent_budget(
+            {
+                "delegation_id": "wave-over-allocated-budget",
+                "tasks": [
+                    task("alpha", budget=1).model_dump(),
+                    task("beta", budget=2).model_dump(),
+                ],
+            },
+            parent_step_number=1,
+            remaining_tool_calls=10,
+            remaining_allocated_step_tool_calls=3,
+        )
+    )
+
+    assert result.success is False
+    assert result.metadata["error_type"] == "DelegationBudgetExceededError"
+    assert result.metadata["required_tool_calls"] == 4
+    assert result.metadata["admission_tool_call_cap"] == 3
+    assert researcher.contexts == []
+
+
 def test_branch_timeout_is_recorded_and_conservatively_charged() -> None:
     tool = DelegateResearchTool(
         SlowResearcher(),
@@ -359,9 +407,9 @@ class SequencedResearchSelector:
                 sources=["https://example.com/alpha"],
             ),
         ]
-        self.contexts: list[object] = []
+        self.contexts: list[ActionContext] = []
 
-    async def select_action(self, context: object) -> object:
+    async def select_action(self, context: ActionContext) -> object:
         self.contexts.append(context)
         return self.actions.pop(0)
 
@@ -389,6 +437,27 @@ def test_bounded_researcher_uses_only_structured_web_observations() -> None:
     assert len(selector.contexts) == 2
 
 
+def test_bounded_researcher_exposes_branch_allocation_to_selector() -> None:
+    selector = SequencedResearchSelector()
+    web_tool = FakeWebTool()
+    registry = ToolRegistry([web_tool])
+    researcher = BoundedResearcherSubagent(selector, registry)
+    context = build_research_task_context(
+        task("alpha", budget=2),
+        registry,
+        ContextBudget(),
+    )
+
+    result = asyncio.run(researcher.research(context))
+
+    assert result.status == "success"
+    assert [item.allocated_step_tool_calls for item in selector.contexts] == [2, 2]
+    assert [item.remaining_allocated_step_tool_calls for item in selector.contexts] == [
+        2,
+        1,
+    ]
+
+
 def test_researcher_rejects_nested_delegation_without_tool_call() -> None:
     web_tool = FakeWebTool()
     researcher = BoundedResearcherSubagent(
@@ -411,5 +480,5 @@ def test_researcher_rejects_nested_delegation_without_tool_call() -> None:
 def test_researcher_registry_rejects_file_or_delegation_tools() -> None:
     invalid_tool = FakeWebTool("write_file")
 
-    with pytest.raises(ValueError, match="only web tools"):
+    with pytest.raises(ValueError, match="only research tools"):
         BoundedResearcherSubagent(NestedSelector(), ToolRegistry([invalid_tool]))

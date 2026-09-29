@@ -19,6 +19,7 @@ from mini_deerflow.runtime import (
     RuntimeLimits,
     open_default_agent_runtime,
 )
+from mini_deerflow.sandbox import SessionSandboxResolver
 from mini_deerflow.tracing import ExecutionTrace, ExecutionTracer, TraceSink
 
 
@@ -51,7 +52,10 @@ class LiveDemoBackend:
     ) -> None:
         self._storage_root = Path(storage_root).resolve(strict=False)
         self._checkpoint_path = self._storage_root / "checkpoints.sqlite"
-        self._workspaces_root = self._storage_root / "workspaces"
+        self._workspaces_root = (self._storage_root / "workspaces").resolve(
+            strict=False
+        )
+        self._sandbox_resolver = SessionSandboxResolver(self._workspaces_root)
         self._settings = settings
         self._limits = limits or RuntimeLimits()
 
@@ -112,7 +116,7 @@ class LiveDemoBackend:
     async def load_conversation(self, thread_id: str) -> ConversationSnapshot:
         async with open_default_agent_runtime(
             self._resolved_settings(),
-            self._workspaces_root / thread_id,
+            self._resolve_workspace_root(thread_id),
             self._checkpoint_path,
             allow_write=True,
             limits=self._limits,
@@ -133,7 +137,7 @@ class LiveDemoBackend:
 
         async with open_default_agent_runtime(
             self._resolved_settings(),
-            self._workspaces_root / thread_id,
+            self._resolve_workspace_root(thread_id),
             self._checkpoint_path,
             allow_write=True,
             limits=self._limits,
@@ -183,3 +187,8 @@ class LiveDemoBackend:
 
     def _resolved_settings(self) -> Settings:
         return self._settings or Settings()
+
+    def _resolve_workspace_root(self, thread_id: str) -> Path:
+        """Resolve the thread's opaque root without legacy path fallback."""
+
+        return self._sandbox_resolver.resolve(thread_id)

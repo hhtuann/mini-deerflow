@@ -4,8 +4,8 @@
 
 Mini DeerFlow is a local Python project with two entry points:
 
-- a live-capable CLI composed with an OpenAI-compatible model and Jina web provider;
-- a Streamlit interface with an explicit live-web mode and a deterministic offline walkthrough.
+- a live-capable CLI using the configured GLM 5.3 OpenAI-compatible endpoint plus Wikipedia research tools;
+- a Streamlit interface with a live research mode and a deterministic offline walkthrough.
 
 It is a completed learning MVP—not a production platform, DeerFlow clone, or upstream-compatible implementation.
 
@@ -55,7 +55,7 @@ Deterministic Synthesis
 1. The planner creates a validated plan with 3–7 consecutively numbered steps.
 2. The action selector emits either a typed tool call or a step-completion action.
 3. The runtime validates the selected tool, arguments, timeout, and remaining budgets.
-4. Successful web observations can become bounded `EvidenceRecord` values with provenance.
+4. Successful Wikipedia observations can become bounded `EvidenceRecord` values with provenance.
 5. Proposed citations are canonicalized and checked against successful evidence.
 6. The reviewer chooses `continue`, `replan`, or `finish`; replan replaces only unfinished work.
 7. The parent may run a bounded, depth-one research wave and deterministically fan results in.
@@ -64,7 +64,7 @@ Deterministic Synthesis
 
 ### Evidence is not a raw provider result
 
-Evidence is a structured, bounded record extracted from a successful `web_search` or `web_fetch` observation. It retains source-tool, step, call, and optional delegation provenance.
+Evidence is a structured, bounded record extracted from a successful `wiki_search` or `wiki_lookup` observation in the default runtime. Legacy `web_search`/`web_fetch` evidence remains schema-compatible, but those tools are not registered by default. Each record retains source-tool, step, call, and optional delegation provenance.
 
 ### Citation validation is not fact checking
 
@@ -94,7 +94,7 @@ flowchart TB
     subgraph Infrastructure
         DB[(SQLite checkpoints)]
         Workspace[Confined workspace]
-        Providers[Model and web provider seams]
+        Providers[Model and Wikipedia provider seams]
     end
     subgraph CrossCutting[Cross-cutting boundaries]
         Context[Context budget]
@@ -155,17 +155,20 @@ flowchart TD
 | Fan-in | Stable branch ordering and citation revalidation | Failed-branch findings are not promoted |
 | Persistence | SQLite conversation/turn ledger plus turn-isolated checkpoints | No exactly-once guarantee for external effects |
 | Context | Deterministic LLM-facing projections | Character budget; token count is only `ceil(chars / 4)` |
-| Safety | Tool, workspace, fetch-target, and rendering boundaries | Application-level controls, not a production sandbox |
+| Safety | Tool, session sandbox, fetch-target, and rendering boundaries | Filesystem isolation only, not an OS/container sandbox |
 | Observability | Typed ordered trace and safe projections | No raw payload or production telemetry backend |
 | User answer | Concise evidence-based Markdown with validated links | No raw execution counters, prompts, or report dump |
 | Artifact | Deterministic Markdown and optional confined write | No production artifact serving |
 
 ## Streamlit modes
 
-The Streamlit app starts in **Live web** mode. It reads the model and Jina settings from
-the local environment or `.env`, then uses the real runtime and real `web_search`/
-`web_fetch` providers. The UI never displays credentials. Its checkpoints and workspace
-are isolated under `.mini-deerflow/live`.
+The Streamlit app starts in its live research mode. It reads the GLM-compatible API key,
+base URL, and model settings from the local environment or `.env`. GLM 5.3 handles planning,
+reasoning, review, and synthesis. Research is intentionally restricted to the public Wikipedia
+API through `wiki_search` and `wiki_lookup`; general `web_search`/`web_fetch` tools are not
+registered in the default runtime. The UI never displays credentials. Checkpoints are stored under
+`.mini-deerflow/live`; each conversation gets a persistent filesystem sandbox under
+`.mini-deerflow/live/workspaces/sessions/v1-<sha256(normalized thread_id)>`.
 
 Choose **Offline walkthrough** from the `Execution mode` selector to use the original
 deterministic mentor scenario. It is network-free and stores its data under
@@ -283,14 +286,18 @@ PowerShell:
 Copy-Item .env.example .env
 ```
 
-Minimum live-model configuration:
+Minimum live configuration:
 
 ```dotenv
-MINI_DEERFLOW_API_KEY=replace-with-your-api-key
+MINI_DEERFLOW_API_KEY=replace-with-your-z-ai-key
+MINI_DEERFLOW_BASE_URL=https://api.z.ai/api/coding/paas/v4
+MINI_DEERFLOW_MODEL_NAME=glm-5.3
 ```
 
-The live CLI also supports model endpoint/name and request/retry settings.
-`MINI_DEERFLOW_JINA_API_KEY` is required when a live run uses `web_search`.
+Defaults are `glm-5.3` on the Z.AI OpenAI-compatible endpoint, `15` seconds for
+Wikipedia requests, and `prompt_json` for structured output. Model name, base URL,
+timeouts, temperature, and retry settings remain configurable through the
+`MINI_DEERFLOW_` environment variables.
 See [`.env.example`](.env.example). Never commit `.env`.
 
 ## Run the Streamlit Demo
@@ -311,11 +318,11 @@ uv run streamlit run src/mini_deerflow/demo/app.py `
   --browser.gatherUsageStats false
 ```
 
-For a live mentor demo, keep the default **Live web** mode, click **New chat**, submit a
+For a live mentor demo, keep the default live mode, click **New chat**, submit a
 specific research request, wait for the cited answer, then ask a follow-up in the same
 chat. The sidebar badge distinguishes a configured live runtime from the network-free
-deterministic walkthrough; live-provider readiness is only confirmed by a successful
-web-tool outcome in the per-turn trace or evidence.
+deterministic walkthrough; live readiness is confirmed only after successful model
+and Wikipedia-tool outcomes in the run/trace or accepted evidence.
 
 The bind address is a launch configuration; the app does not enforce localhost by itself. The repository also disables Streamlit usage-stat gathering in `.streamlit/config.toml`.
 
@@ -347,7 +354,18 @@ uv run mini-deerflow resume --thread-id research-001
 uv run mini-deerflow threads
 ```
 
-`run` and `resume` also expose checkpoint/workspace paths, write opt-in, execution limits, delegation concurrency, and `--trace-json`. Use `uv run mini-deerflow <command> --help` for the verified option list. `write_file` is not model-selectable; when `--allow-write` is enabled, synthesis writes the fixed report artifact through the workspace boundary.
+`run` and `resume` also expose checkpoint/workspace paths, write opt-in, execution limits, delegation concurrency, and `--trace-json`. `--workspace` is the sandbox base; the CLI resolves the actual file-tool root as `<workspace>/sessions/v1-<sha256(normalized thread_id)>` for both run and resume. Use `uv run mini-deerflow <command> --help` for the verified option list. `write_file` is not model-selectable; when `--allow-write` is enabled, synthesis writes the fixed report artifact through the workspace boundary.
+
+Older raw `<workspace>/<thread_id>` directories are not selected automatically;
+migrate them explicitly into the opaque session layout when their contents are
+still required.
+
+Upgrade note: the former CLI layout treated `--workspace` as one shared root.
+Those files are not assigned to a thread automatically because doing so could
+expose one thread's files to another. Move trusted files explicitly into the
+intended hashed session directory. The live demo's former
+`workspaces/<thread_id>` layout was already per-thread and is retained as a
+read/write fallback when no hashed directory exists.
 
 ## Persistence and Resume
 
@@ -381,11 +399,29 @@ Tool input/result models reject unknown fields, the registry is an exact-name al
 
 ### Workspace boundary
 
-The workspace rejects absolute paths, traversal, symlink/junction escapes, and oversized reads/writes. This confines project file tools; it is not an OS sandbox or production artifact service.
+Each normalized public `thread_id` maps deterministically to one persistent filesystem
+sandbox at `<sandbox-base>/sessions/v1-<sha256(normalized thread_id)>`. Turns and
+resumed execution for that thread reuse the same root and intentionally share files;
+different normalized threads receive different roots even when they use the same
+relative artifact path. The workspace then rejects absolute paths, traversal,
+symlink/junction escapes, and oversized reads/writes.
+
+This boundary applies to file tools and artifacts only. Checkpoints still share one
+local SQLite database, there is no authenticated user ownership, and this is not an
+OS/container sandbox or production artifact service. Sandboxes are retained so a
+thread can resume; automatic cleanup is not implemented.
+
+### Session sandbox mentor check
+
+1. Run threads `sandbox-a` and `sandbox-b` with the same `--workspace` base.
+2. Enable writes and let both produce `reports/research-report.md`.
+3. Verify the files live under distinct opaque `sessions/` roots.
+4. Resume `sandbox-a` and verify its prior artifact remains available.
+5. Confirm neither thread can list or read the other's artifact through file tools.
 
 ### Web boundary
 
-`web_fetch` accepts HTTP(S), rejects userinfo and local/non-public targets, requires resolved addresses to be public, and validates provider-declared redirect/final URL metadata before accepting content into a successful result. Search-result URLs use typed schema and canonicalization but do not pass through the fetch target validator.
+The legacy, explicitly injected `web_fetch` compatibility seam accepts HTTP(S), rejects userinfo and local/non-public targets, requires resolved addresses to be public, and validates provider-declared redirect/final URL metadata before accepting content into a successful result. It is not registered by the default GLM + Wikipedia runtime.
 
 This is an implemented application-level URL safety boundary, not a claim of complete SSRF, DNS-rebinding, redirect, or production egress protection.
 
@@ -435,7 +471,6 @@ mini-deerflow/
 │   └── demo/                      # Streamlit facade, jobs, projection, UI
 ├── tests/                         # unit, integration, system, AppTest
 ├── evals/                         # deterministic evaluator and dataset
-├── docs/                          # technical and learning documentation
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
@@ -447,7 +482,8 @@ mini-deerflow/
 | --- | --- |
 | Language | Python 3.12+ and `asyncio` |
 | Agent orchestration | LangGraph 1.2.11+ |
-| Model integration | LangChain OpenAI 1.6+ |
+| Model integration | LangChain OpenAI-compatible client with GLM 5.3 by default |
+| Research source | Wikipedia MediaWiki API via `wiki_search` and `wiki_lookup` |
 | Contracts/config | Pydantic 2.13+, pydantic-settings 2.15+ |
 | Persistence | SQLite, aiosqlite 0.22+, LangGraph SQLite checkpointer 3.1+ |
 | Frontend | Streamlit 1.64+ |
@@ -487,7 +523,7 @@ No claim is made about source compatibility, behavioral equivalence, feature par
 | In-process worker | Durable queue, leases, and distributed workers |
 | One active job per session | Multi-user concurrency and quotas |
 | No authentication/authorization | Identity and resource policy |
-| Local workspace | Isolated, access-controlled artifact storage |
+| Per-thread local filesystem sandbox | Authenticated user/session ownership, quotas, retention, and access-controlled artifact storage |
 | Local live/offline Streamlit demo | Explicit live-backend and credential policy |
 | Local typed trace | Centralized telemetry and retention controls |
 | Application validation | Stronger sandbox and network egress enforcement |
@@ -509,14 +545,6 @@ This project exercises:
 - application-level security boundaries and redacted observability;
 - Streamlit frontend/runtime separation;
 - deterministic failure-oriented tests and evaluation.
-
-## Documentation
-
-- [Project-level technical report](docs/project-report-mini-deerflow.md)
-- [Day 15 learning report](docs/report-ngay-15-mini-deerflow.md)
-- [Persistent live/offline Streamlit chat guide](docs/streamlit-local-demo-day-15.md)
-
-The project report is the architecture deep dive; this README is the GitHub entry point.
 
 ## Current Limitations
 

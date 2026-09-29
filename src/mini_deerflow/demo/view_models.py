@@ -15,8 +15,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
+from mini_deerflow.answer_synthesis import infer_answer_language
 from mini_deerflow.conversation import ConversationRecord, TurnStatus
 from mini_deerflow.evidence import (
+    UserFacingAnswer,
     contains_execution_metadata,
     has_execution_metadata,
     is_research_report,
@@ -523,7 +525,11 @@ def project_demo_run(
     return DemoRunView(
         thread_id=_plain_text(thread_id, 128, omit_urls=True),
         operation=operation,
-        workflow_status="completed" if state.get("final_answer") else "incomplete",
+        workflow_status=(
+            "completed"
+            if state.get("final_answer") and state.get("completion_status") != "partial"
+            else "incomplete"
+        ),
         goal=_plain_text(state.get("goal", ""), MAX_GOAL_CHARS, omit_urls=False),
         plan=plan_steps,
         budget=BudgetView(
@@ -636,18 +642,38 @@ def _answer_markdown(state: AgentState | None, persisted_answer: str) -> str:
     allowed_urls: set[str] = set()
     if state is not None:
         evidence = list(state.get("evidence", ()))
+        language = state.get("output_language")
+        if language not in {"vi", "en"}:
+            goal = state.get("goal")
+            language = (
+                infer_answer_language(goal)
+                if isinstance(goal, str) and goal.strip()
+                else "vi"
+            )
+        completion_status = (
+            "partial" if state.get("completion_status") == "partial" else "complete"
+        )
         allowed_urls = {
             record.canonical_url for record in evidence if record.status == "success"
         }
         state_answer = state.get("final_answer")
         if isinstance(state_answer, str):
             candidate = state_answer
-        if is_research_report(candidate) or state.get("findings"):
+        public_answer = state.get("public_answer")
+        if isinstance(public_answer, UserFacingAnswer):
+            candidate = render_user_answer(
+                evidence=evidence,
+                answer=public_answer,
+            )
+        elif is_research_report(candidate) or state.get("findings"):
+            review_history = tuple(state.get("review_verdicts", ()))
+            latest_review_findings = (
+                review_history[-1].findings if review_history else ()
+            )
             review_notes = list(
                 dict.fromkeys(
                     finding.description
-                    for verdict in state.get("review_verdicts", ())
-                    for finding in verdict.findings
+                    for finding in latest_review_findings
                     if finding.category
                     in {
                         "gap",
@@ -667,17 +693,32 @@ def _answer_markdown(state: AgentState | None, persisted_answer: str) -> str:
                     not observation.result.success
                     for observation in state.get("tool_observations", ())
                 ),
+                language=language,
+                completion_status=completion_status,
             )
         elif contains_execution_metadata(candidate):
             candidate = (
-                "# Kết quả\n\n## Độ tin cậy / hạn chế\n\n"
-                "> Bản ghi cũ này chỉ còn dữ liệu quá trình Agent; không còn đủ "
-                "evidence đã chuẩn hoá để dựng lại câu trả lời công khai an toàn."
+                (
+                    "# Kết quả\n\n## Độ tin cậy / hạn chế\n\n"
+                    "> Bản ghi cũ này chỉ còn dữ liệu quá trình Agent; "
+                    "không còn đủ evidence đã chuẩn hoá để dựng lại câu trả lời "
+                    "công khai an toàn."
+                )
+                if language == "vi"
+                else (
+                    "# Result\n\n## Confidence / limitations\n\n"
+                    "> This legacy record only retains Agent execution data; "
+                    "there is not enough normalized evidence to safely rebuild "
+                    "the public answer."
+                )
             )
         elif has_execution_metadata(candidate):
-            candidate = "# Kết quả\n\n## Kết luận\n\n" + "\n\n".join(
-                legacy_public_answer_points(candidate)
+            heading = (
+                "# Kết quả\n\n## Kết luận\n\n"
+                if language == "vi"
+                else "# Result\n\n## Conclusion\n\n"
             )
+            candidate = heading + "\n\n".join(legacy_public_answer_points(candidate))
     elif is_research_report(candidate):
         candidate = (
             "## Kết quả\n\n### Lưu ý\n\n"

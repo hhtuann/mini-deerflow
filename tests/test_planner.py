@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from mini_deerflow.planner import (
     PLANNER_SYSTEM_PROMPT,
+    PlanningBudget,
     create_research_plan,
 )
 from mini_deerflow.schemas import Plan, PlanStep
@@ -101,6 +102,32 @@ def test_create_research_plan_defaults_to_empty_tool_catalog() -> None:
     )
 
     assert planning_context["available_tools"] == []
+
+
+def test_create_research_plan_exposes_execution_budget() -> None:
+    model = Mock()
+    structured_model = Mock()
+    model.with_structured_output.return_value = structured_model
+    structured_model.invoke.return_value = make_plan()
+
+    create_research_plan(
+        model,
+        "Research how planning improves tool-using AI agents.",
+        planning_budget=PlanningBudget(
+            max_tool_calls_per_step=3,
+            max_total_tool_calls=8,
+            max_replan_cycles=1,
+        ),
+    )
+
+    messages = structured_model.invoke.call_args.args[0]
+    planning_context = json.loads(messages[-1][1])
+
+    assert planning_context["execution_budget"] == {
+        "max_tool_calls_per_step": 3,
+        "max_total_tool_calls": 8,
+        "max_replan_cycles": 1,
+    }
 
 
 def test_create_research_plan_rejects_short_goal() -> None:

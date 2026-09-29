@@ -34,6 +34,12 @@ ReviewRoute = Literal[
     "finish",
 ]
 
+FinalizationReason = Literal[
+    "total_tool_budget_exhausted",
+    "replan_budget_exhausted",
+    "plan_capacity_exhausted",
+]
+
 ReviewFindingCategory = Literal[
     "gap",
     "contradiction",
@@ -280,6 +286,7 @@ class ReviewContext(ReviewModel):
     remaining_replan_cycles: int = Field(
         ge=0,
     )
+    finalization_reason: FinalizationReason | None = None
     context_projection: ProjectionMetadata | None = None
 
 

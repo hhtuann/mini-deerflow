@@ -48,6 +48,8 @@ Selection rules:
    close the most important gap.
 6. A replan requested after the replan budget is exhausted is coerced
    by the runtime to finish.
+7. Choose finish when finalization_reason is present. This is the single
+   terminal review for a partial answer; do not request more tools or replan.
 
 Evaluation criteria — assess each traceable dimension:
 1. relevance: does the evidence address the goal and remaining steps?

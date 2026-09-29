@@ -10,6 +10,7 @@ from mini_deerflow.decision import (
     ActionContext,
     ActionSelector,
     build_action_context,
+    calculate_step_tool_call_budget,
 )
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.state import AgentState, create_initial_state
@@ -135,6 +136,8 @@ def test_build_context_selects_current_step_and_observations() -> None:
     assert len(context.observations) == 1
     assert context.observations[0].step_number == 1
     assert context.remaining_step_tool_calls == 4
+    assert context.allocated_step_tool_calls == 5
+    assert context.remaining_allocated_step_tool_calls == 4
     assert context.remaining_total_tool_calls == 18
 
     assert len(context.available_tools) == 1
@@ -278,6 +281,30 @@ def test_remaining_budgets_are_clamped_to_zero() -> None:
 
     assert context.remaining_step_tool_calls == 0
     assert context.remaining_total_tool_calls == 0
+
+
+def test_step_budget_reserves_global_calls_for_remaining_steps() -> None:
+    state = create_planned_state()
+
+    first = calculate_step_tool_call_budget(
+        state,
+        max_tool_calls_per_step=5,
+        max_total_tool_calls=4,
+    )
+
+    assert first.allocated_step_tool_calls == 2
+    assert first.remaining_allocated_step_tool_calls == 2
+
+    state["tool_calls_in_current_step"] = 2
+    state["total_tool_calls"] = 2
+    exhausted = calculate_step_tool_call_budget(
+        state,
+        max_tool_calls_per_step=5,
+        max_total_tool_calls=4,
+    )
+
+    assert exhausted.remaining_allocated_step_tool_calls == 0
+    assert exhausted.remaining_total_tool_calls == 2
 
 
 @pytest.mark.parametrize(

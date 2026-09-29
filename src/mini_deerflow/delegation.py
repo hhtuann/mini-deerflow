@@ -56,6 +56,7 @@ MIN_DELEGATION_BRANCHES = 2
 MAX_BRANCH_TOOL_CALLS = 5
 DEFAULT_DELEGATION_CONCURRENCY = 2
 DEFAULT_BRANCH_TIMEOUT_SECONDS = 30.0
+RESEARCH_TOOL_NAMES = {"web_search", "web_fetch", "wiki_search", "wiki_lookup"}
 
 BranchId = Annotated[
     str,
@@ -222,9 +223,9 @@ class BoundedResearcherSubagent:
         if not isinstance(action_selector, BranchActionSelector):
             raise TypeError("action_selector must satisfy BranchActionSelector")
 
-        invalid_tools = set(registry.names()) - {"web_search", "web_fetch"}
+        invalid_tools = set(registry.names()) - RESEARCH_TOOL_NAMES
         if invalid_tools or not registry.names():
-            raise ValueError("researcher registry may contain only web tools")
+            raise ValueError("researcher registry may contain only research tools")
 
         self._action_selector = action_selector
         self._registry = registry
@@ -239,6 +240,7 @@ class BoundedResearcherSubagent:
         evidence: list[EvidenceRecord] = []
 
         for call_number in range(1, task.tool_call_budget + 1):
+            remaining_branch_tool_calls = task.tool_call_budget - len(observations)
             projected_observations, observation_metadata = project_observations(
                 observations,
                 self._context_budget,
@@ -260,8 +262,10 @@ class BoundedResearcherSubagent:
                 ),
                 observations=projected_observations,
                 evidence=projected_evidence,
-                remaining_step_tool_calls=task.tool_call_budget - len(observations),
-                remaining_total_tool_calls=task.tool_call_budget - len(observations),
+                remaining_step_tool_calls=remaining_branch_tool_calls,
+                allocated_step_tool_calls=task.tool_call_budget,
+                remaining_allocated_step_tool_calls=remaining_branch_tool_calls,
+                remaining_total_tool_calls=remaining_branch_tool_calls,
             )
             selector_context = cast(
                 ActionContext,
@@ -424,9 +428,9 @@ class DelegateResearchTool:
         ):
             raise ValueError("branch_timeout_seconds must be positive")
 
-        invalid_tools = set(branch_registry.names()) - {"web_search", "web_fetch"}
+        invalid_tools = set(branch_registry.names()) - RESEARCH_TOOL_NAMES
         if invalid_tools or not branch_registry.names():
-            raise ValueError("branch_registry may contain only web tools")
+            raise ValueError("branch_registry may contain only research tools")
 
         self._researcher = researcher
         self._branch_registry = branch_registry
@@ -448,6 +452,7 @@ class DelegateResearchTool:
         *,
         parent_step_number: int,
         remaining_tool_calls: int,
+        remaining_allocated_step_tool_calls: int | None = None,
     ) -> ToolResult:
         """Validate, reserve, dispatch, and deterministically merge one wave."""
 
@@ -465,14 +470,23 @@ class DelegateResearchTool:
 
         ordered_tasks = sorted(request.tasks, key=lambda task: task.branch_id)
         reserved = sum(task.tool_call_budget for task in ordered_tasks)
+        allocated_remainder = (
+            remaining_tool_calls
+            if remaining_allocated_step_tool_calls is None
+            else remaining_allocated_step_tool_calls
+        )
+        admission_tool_call_cap = min(remaining_tool_calls, allocated_remainder)
+        required_tool_calls = reserved + 1
 
-        if reserved > max(0, remaining_tool_calls - 1):
+        if required_tool_calls > max(0, admission_tool_call_cap):
             return ToolResult.fail(
                 error="Delegation cannot reserve branch calls within parent budgets.",
                 metadata={
                     "error_type": "DelegationBudgetExceededError",
                     "delegated_tool_calls": 0,
                     "reserved_tool_calls": reserved,
+                    "required_tool_calls": required_tool_calls,
+                    "admission_tool_call_cap": max(0, admission_tool_call_cap),
                 },
             )
 

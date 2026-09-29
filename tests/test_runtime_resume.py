@@ -16,6 +16,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
 )
 from mini_deerflow.decision import ActionContext
+from mini_deerflow.evidence import UserFacingAnswer
 from mini_deerflow.persistence import (
     CheckpointStorageError,
     ThreadAlreadyExistsError,
@@ -160,6 +161,16 @@ class CompletingAfterResumeSelector:
             type="complete_step",
             summary=(f"Completed research step {step_number} after resume."),
         )
+
+
+class CountingAnswerSynthesizer:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def synthesize_answer(self, context: object) -> UserFacingAnswer:
+        del context
+        self.call_count += 1
+        raise AssertionError("finalized resume must not invoke synthesis")
 
 
 def create_three_step_plan(goal: str) -> Plan:
@@ -436,6 +447,8 @@ def test_strict_mode_sqlite_listing_and_resume_preserve_domain_state(
                 "-q",
                 "-p",
                 "no:cacheprovider",
+                "--basetemp",
+                str(tmp_path / "strict-child-pytest"),
             ],
             cwd=Path(__file__).resolve().parents[1],
             env=environment,
@@ -558,6 +571,7 @@ def test_sqlite_run_rejects_existing_thread_without_overwriting_checkpoint(
             assert duplicate_selector.selected_step_numbers == []
 
         resumed_selector = CompletingAfterResumeSelector()
+        resumed_synthesizer = CountingAnswerSynthesizer()
 
         async with open_sqlite_checkpointer(
             checkpoint_path,
@@ -566,6 +580,7 @@ def test_sqlite_run_rejects_existing_thread_without_overwriting_checkpoint(
                 reject_replanning,
                 resumed_selector,
                 ToolRegistry(),
+                answer_synthesizer=resumed_synthesizer,
                 checkpointer=checkpointer,
                 limits=limits,
             )
@@ -577,6 +592,7 @@ def test_sqlite_run_rejects_existing_thread_without_overwriting_checkpoint(
         assert resumed_result["goal"] == goal
         assert resumed_result["final_answer"] == first_result["final_answer"]
         assert resumed_selector.selected_step_numbers == []
+        assert resumed_synthesizer.call_count == 0
 
     asyncio.run(run_scenario())
 

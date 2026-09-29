@@ -1,3 +1,4 @@
+import math
 from typing import Annotated, Protocol, cast, runtime_checkable
 
 from pydantic import (
@@ -64,6 +65,8 @@ class ActionContext(BaseModel):
     remaining_step_tool_calls: int = Field(
         ge=0,
     )
+    allocated_step_tool_calls: int = Field(default=0, ge=0)
+    remaining_allocated_step_tool_calls: int = Field(default=0, ge=0)
     remaining_total_tool_calls: int = Field(
         ge=0,
     )
@@ -77,6 +80,65 @@ class ActionSelector(Protocol):
         context: ActionContext,
     ) -> AgentAction:
         """Select the next structured action."""
+
+
+class StepToolCallBudget(BaseModel):
+    """Deterministic fair-share quota for the currently active plan step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allocated_step_tool_calls: int = Field(ge=0)
+    remaining_allocated_step_tool_calls: int = Field(ge=0)
+    remaining_step_tool_calls: int = Field(ge=0)
+    remaining_total_tool_calls: int = Field(ge=0)
+
+
+def calculate_step_tool_call_budget(
+    state: AgentState,
+    *,
+    max_tool_calls_per_step: int,
+    max_total_tool_calls: int,
+) -> StepToolCallBudget:
+    """Allocate the remaining global budget fairly across remaining steps."""
+
+    _validate_positive_limit("max_tool_calls_per_step", max_tool_calls_per_step)
+    _validate_positive_limit("max_total_tool_calls", max_total_tool_calls)
+
+    plan = state["plan"]
+    if plan is None:
+        raise RuntimeError("step tool budget requires a plan")
+
+    current_step = state["current_step"]
+    if current_step < 0 or current_step >= len(plan.steps):
+        raise RuntimeError("current_step is outside the plan")
+
+    step_tool_calls = state["tool_calls_in_current_step"]
+    total_tool_calls = state["total_tool_calls"]
+    if step_tool_calls < 0 or total_tool_calls < 0:
+        raise RuntimeError("tool call counters cannot be negative")
+    if step_tool_calls > total_tool_calls:
+        raise RuntimeError("step tool calls cannot exceed total tool calls")
+
+    remaining_steps = len(plan.steps) - current_step
+    remaining_total = max(0, max_total_tool_calls - total_tool_calls)
+    distributable_for_current_step = remaining_total + step_tool_calls
+    allocated = min(
+        max_tool_calls_per_step,
+        math.ceil(distributable_for_current_step / remaining_steps),
+    )
+    remaining_hard_step = max(0, max_tool_calls_per_step - step_tool_calls)
+    remaining_allocated = min(
+        remaining_total,
+        remaining_hard_step,
+        max(0, allocated - step_tool_calls),
+    )
+
+    return StepToolCallBudget(
+        allocated_step_tool_calls=allocated,
+        remaining_allocated_step_tool_calls=remaining_allocated,
+        remaining_step_tool_calls=remaining_hard_step,
+        remaining_total_tool_calls=remaining_total,
+    )
 
 
 def build_action_context(
@@ -142,13 +204,10 @@ def build_action_context(
         total_tool_calls,
     )
 
-    remaining_step_tool_calls = max(
-        0,
-        max_tool_calls_per_step - step_tool_calls,
-    )
-    remaining_total_tool_calls = max(
-        0,
-        max_total_tool_calls - total_tool_calls,
+    tool_budget = calculate_step_tool_call_budget(
+        state,
+        max_tool_calls_per_step=max_tool_calls_per_step,
+        max_total_tool_calls=max_total_tool_calls,
     )
 
     # LLM-facing projection only: caller-owned state keeps the complete
@@ -178,8 +237,12 @@ def build_action_context(
         available_tools=registry.definitions(),
         observations=projected_observations,
         evidence=projected_evidence,
-        remaining_step_tool_calls=remaining_step_tool_calls,
-        remaining_total_tool_calls=remaining_total_tool_calls,
+        remaining_step_tool_calls=tool_budget.remaining_step_tool_calls,
+        allocated_step_tool_calls=tool_budget.allocated_step_tool_calls,
+        remaining_allocated_step_tool_calls=(
+            tool_budget.remaining_allocated_step_tool_calls
+        ),
+        remaining_total_tool_calls=tool_budget.remaining_total_tool_calls,
     )
 
     return cast(

@@ -24,6 +24,7 @@ from mini_deerflow.runtime import (
     RuntimeLimits,
     open_default_agent_runtime,
 )
+from mini_deerflow.sandbox import SessionSandboxResolver
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState
 from mini_deerflow.tracing import ExecutionTracer, JsonLinesTraceSink
@@ -97,7 +98,9 @@ def _add_runtime_arguments(
         type=Path,
         default=Path(".mini-deerflow/workspace"),
         help=(
-            "Workspace directory available to file tools. "
+            "Base directory for per-thread file-tool sandboxes. "
+            "Files from the former shared-workspace layout are not migrated "
+            "automatically. "
             "Default: .mini-deerflow/workspace"
         ),
     )
@@ -201,7 +204,11 @@ def run_research_planner(goal: str) -> Plan:
     settings = Settings()
     model = create_chat_model(settings)
 
-    return create_research_plan(model, goal)
+    return create_research_plan(
+        model,
+        goal,
+        structured_output_mode=settings.structured_output_mode,
+    )
 
 
 async def run_research_agent(
@@ -217,10 +224,11 @@ async def run_research_agent(
     """Open the persistent runtime and execute one research goal."""
 
     settings = Settings()
+    sandbox_root = SessionSandboxResolver(workspace_root).resolve(thread_id)
 
     async with open_default_agent_runtime(
         settings,
-        workspace_root,
+        sandbox_root,
         checkpoint_path,
         allow_write=allow_write,
         limits=limits,
@@ -244,10 +252,11 @@ async def resume_research_agent(
     """Open the persistent runtime and resume one existing thread."""
 
     settings = Settings()
+    sandbox_root = SessionSandboxResolver(workspace_root).resolve(thread_id)
 
     async with open_default_agent_runtime(
         settings,
-        workspace_root,
+        sandbox_root,
         checkpoint_path,
         allow_write=allow_write,
         limits=limits,

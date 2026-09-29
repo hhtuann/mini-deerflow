@@ -8,24 +8,24 @@ def test_create_chat_model_forwards_validated_settings():
     settings = Settings(
         _env_file=None,
         api_key="test-secret",
-        base_url="https://example.com/v1/",
+        base_url="https://api.example.test/v1",
         model_name="test-model",
         temperature=0.25,
         request_timeout=30,
         max_retries=1,
     )
 
-    with patch("mini_deerflow.model.ChatOpenAI") as chat_open_ai:
-        expected_model = chat_open_ai.return_value
+    with patch("mini_deerflow.model.ChatOpenAI") as chat_openai:
+        expected_model = chat_openai.return_value
 
         actual_model = create_chat_model(settings)
 
     assert actual_model is expected_model
 
-    chat_open_ai.assert_called_once_with(
+    chat_openai.assert_called_once_with(
         model="test-model",
         api_key=settings.api_key,
-        base_url="https://example.com/v1",
+        base_url="https://api.example.test/v1",
         temperature=0.25,
         timeout=30,
         max_retries=1,

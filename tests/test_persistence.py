@@ -15,7 +15,15 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
-from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
+from mini_deerflow.evidence import (
+    AnswerClaim,
+    ComparisonRow,
+    ComparisonTable,
+    EvidenceProvenance,
+    EvidenceRecord,
+    StepFinding,
+    UserFacingAnswer,
+)
 from mini_deerflow.persistence import (
     _ALLOWED_CHECKPOINT_TYPES,
     CheckpointPathError,
@@ -326,6 +334,35 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
         summary="Recorded a checkpoint-backed evidence finding.",
         citations=["https://example.com/evidence"],
     )
+    public_answer = UserFacingAnswer(
+        language="en",
+        completion_status="complete",
+        summary=[
+            AnswerClaim(
+                text="The checkpoint preserves the public answer.",
+                citations=["https://example.com/evidence"],
+            )
+        ],
+        comparison_table=ComparisonTable(
+            left_subject="Before",
+            right_subject="After",
+            rows=[
+                ComparisonRow(
+                    criterion="Persistence",
+                    left="Not restored",
+                    right="Restored",
+                    citations=["https://example.com/evidence"],
+                ),
+                ComparisonRow(
+                    criterion="Type safety",
+                    left="Dictionary",
+                    right="Validated model",
+                    citations=["https://example.com/evidence"],
+                ),
+            ],
+        ),
+        sources=["https://example.com/evidence"],
+    )
     verdict = ReviewVerdict(
         verdict="replan",
         rationale="Remaining steps cannot close the recorded evidence gap.",
@@ -365,6 +402,7 @@ def test_checkpoint_serializer_round_trips_allowed_domain_types(
         provenance,
         evidence,
         finding,
+        public_answer,
         verdict,
         replan_record,
     ):

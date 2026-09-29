@@ -10,8 +10,10 @@ from mini_deerflow.actions import (
     ToolCallAction,
 )
 from mini_deerflow.agent_workflow import build_agent_workflow
+from mini_deerflow.answer_synthesis import AnswerSynthesisContext
 from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.decision import ActionContext
+from mini_deerflow.evidence import UserFacingAnswer
 from mini_deerflow.persistence import create_thread_config, open_sqlite_checkpointer
 from mini_deerflow.review import (
     ReplacementWork,
@@ -109,6 +111,21 @@ class QueuedReplanner:
             raise outcome
 
         return outcome
+
+
+class CapturingAnswerSynthesizer:
+    def __init__(self) -> None:
+        self.contexts: list[AnswerSynthesisContext] = []
+
+    async def synthesize_answer(
+        self,
+        context: AnswerSynthesisContext,
+    ) -> UserFacingAnswer:
+        self.contexts.append(context)
+        return UserFacingAnswer(
+            language=context.language,
+            completion_status=context.completion_status,
+        )
 
 
 def plan(goal: str) -> Plan:
@@ -270,6 +287,47 @@ def test_continue_verdict_keeps_current_plan_and_finishes() -> None:
     assert "**Review 3 — finish:**" in report
     assert "- Review cycles: 3" in report
     assert "- Replan cycles: 0" in report
+
+
+def test_public_synthesis_uses_only_latest_review_snapshot() -> None:
+    old_gap = ReviewFinding(
+        category="gap",
+        description="Resolved historical gap must remain audit-only.",
+        related_step_numbers=[1],
+    )
+    current_limitation = ReviewFinding(
+        category="budget_limitation",
+        description="Current limitation belongs in the public snapshot.",
+        related_step_numbers=[3],
+    )
+    synthesizer = CapturingAnswerSynthesizer()
+    graph = build_agent_workflow(
+        plan,
+        QueueSelector([completion(1), completion(2), completion(3)]),
+        ToolRegistry(),
+        reviewer=QueuedReviewer(
+            [
+                review_verdict("continue", findings=[old_gap]),
+                review_verdict("continue"),
+                review_verdict("finish", findings=[current_limitation]),
+            ]
+        ),
+        replanner=QueuedReplanner([]),
+        answer_synthesizer=synthesizer,
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            create_initial_state(GOAL),
+            config={"recursion_limit": 120},
+        )
+    )
+
+    assert len(synthesizer.contexts) == 1
+    assert synthesizer.contexts[0].limitations == [
+        "[budget_limitation] Current limitation belongs in the public snapshot."
+    ]
+    assert "Resolved historical gap" in result["research_report"]
 
 
 def test_replan_replaces_remaining_steps_and_preserves_completed_work() -> None:
@@ -658,7 +716,7 @@ def test_review_state_survives_checkpoint_resume(tmp_path: Path) -> None:
     assert "- Replan cycles: 1" in report
 
 
-def test_budget_exhaustion_skips_review_like_day_09() -> None:
+def test_total_budget_exhaustion_runs_exactly_one_final_review() -> None:
     provider = StaticSearchProvider()
     selector = QueueSelector(
         [
@@ -677,10 +735,14 @@ def test_budget_exhaustion_skips_review_like_day_09() -> None:
         max_total_tool_calls=1,
     )
 
-    assert reviewer.contexts == []
-    assert result["review_verdicts"] == []
+    assert len(reviewer.contexts) == 1
+    assert reviewer.contexts[0].finalization_reason == ("total_tool_budget_exhausted")
+    assert [verdict.verdict for verdict in result["review_verdicts"]] == ["finish"]
     assert result["pending_review_verdict"] is None
-    assert "No review verdicts were recorded." in result["research_report"]
+    assert result["completion_status"] == "partial"
+    assert result["finalization_reason"] == "total_tool_budget_exhausted"
+    assert result["output_language"] == "en"
+    assert "Partial answer" in result["final_answer"]
     assert "- Tool calls: 1" in result["research_report"]
 
 

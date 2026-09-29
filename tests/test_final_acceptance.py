@@ -7,13 +7,18 @@ from typing import cast
 
 import pytest
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
 
 from mini_deerflow.actions import (
     ActionDecision,
     CompleteStepAction,
     ToolCallAction,
     ToolObservation,
+)
+from mini_deerflow.answer_synthesis import (
+    AnswerSynthesisDraft,
+    DraftClaim,
+    DraftComparisonRow,
+    DraftComparisonTable,
 )
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
@@ -22,6 +27,7 @@ from mini_deerflow.delegation import (
     BranchResult,
     ResearchTaskContext,
 )
+from mini_deerflow.evidence import UserFacingAnswer
 from mini_deerflow.review import (
     ReplacementWork,
     ReviewDecision,
@@ -30,6 +36,7 @@ from mini_deerflow.review import (
 )
 from mini_deerflow.runtime import RuntimeLimits, open_default_agent_runtime
 from mini_deerflow.schemas import Plan, PlanStep
+from mini_deerflow.structured_output import StructuredChatModel
 from mini_deerflow.tools import ToolResult
 from mini_deerflow.tracing import (
     ExecutionTracer,
@@ -46,7 +53,7 @@ from mini_deerflow.web import (
 from mini_deerflow.web_safety import PublicWebTargetValidator, SafeWebTarget
 from mini_deerflow.workspace import Workspace
 
-GOAL = "Demonstrate the bounded Mini DeerFlow MVP with verifiable evidence."
+GOAL = "Ronaldo và Messi ai mạnh hơn?"
 THREAD_ID = "day-14-final-acceptance"
 SEARCH_SOURCE = "https://evidence.example/search"
 FETCH_SOURCE = "https://evidence.example/report"
@@ -214,6 +221,56 @@ class ScenarioModel:
                     )
                 ]
             ),
+            AnswerSynthesisDraft: deque(
+                [
+                    AnswerSynthesisDraft(
+                        language="vi",
+                        summary=[
+                            DraftClaim(
+                                text=(
+                                    "Messi và Ronaldo đều có thế mạnh riêng; kết luận "
+                                    "phụ thuộc vào tiêu chí so sánh."
+                                ),
+                                evidence_indices=[1, 2, 3],
+                            )
+                        ],
+                        evidence=[],
+                        discrepancies=[
+                            DraftClaim(
+                                text="Nguồn một đánh giá Messi nhỉnh hơn về kiến tạo.",
+                                evidence_indices=[1],
+                            ),
+                            DraftClaim(
+                                text="Nguồn hai nhấn mạnh ưu thế ghi bàn của Ronaldo.",
+                                evidence_indices=[2],
+                            ),
+                        ],
+                        limitations=[
+                            "Một nhánh nghiên cứu không trả về bằng chứng sử dụng được."
+                        ],
+                        comparison_table=DraftComparisonTable(
+                            left_subject="Messi",
+                            right_subject="Ronaldo",
+                            rows=[
+                                DraftComparisonRow(
+                                    criterion="Kiến tạo",
+                                    left="Nổi bật theo nguồn một.",
+                                    right="Kém hơn trong cùng phạm vi nguồn.",
+                                    assessment="Messi nhỉnh hơn ở tiêu chí này.",
+                                    evidence_indices=[1],
+                                ),
+                                DraftComparisonRow(
+                                    criterion="Ghi bàn",
+                                    left="Có thành tích cao.",
+                                    right="Nổi bật theo nguồn hai.",
+                                    assessment="Ronaldo nhỉnh hơn ở tiêu chí này.",
+                                    evidence_indices=[2],
+                                ),
+                            ],
+                        ),
+                    )
+                ]
+            ),
         }
         self.calls: list[tuple[type[object], object]] = []
         self.invocation_counts: Counter[type[object]] = Counter()
@@ -350,16 +407,16 @@ def _recorded_llm_payloads(
         else:
             human = messages[-1]
             assert isinstance(human, HumanMessage)
-            opening = (
-                "<action_context>\n"
-                if schema is ActionDecision
-                else "<review_context>\n"
-            )
-            closing = (
-                "\n</action_context>"
-                if schema is ActionDecision
-                else "\n</review_context>"
-            )
+            if schema is ActionDecision:
+                opening = "<action_context>\n"
+                closing = "\n</action_context>"
+            elif schema is ReviewDecision:
+                opening = "<review_context>\n"
+                closing = "\n</review_context>"
+            else:
+                assert schema is AnswerSynthesisDraft
+                opening = "<answer_context>\n"
+                closing = "\n</answer_context>"
             raw_payload = human.content.split(opening, 1)[1].split(closing, 1)[0]
         assert isinstance(raw_payload, str)
         payload = json.loads(raw_payload)
@@ -374,10 +431,14 @@ def test_final_mvp_acceptance_survives_interruption_and_resume(
     async def scenario() -> tuple[dict[str, object], list[object], ScenarioModel]:
         workspace_root = tmp_path / "workspace"
         checkpoint_path = tmp_path / "checkpoints.sqlite"
-        settings = Settings(api_key="test-api-key", _env_file=None)
+        settings = Settings(
+            api_key="test-api-key",
+            structured_output_mode="native",
+            _env_file=None,
+        )
         limits = RuntimeLimits(
             max_tool_calls_per_step=4,
-            max_total_tool_calls=8,
+            max_total_tool_calls=10,
             max_replan_cycles=1,
             recursion_limit=120,
             max_delegation_concurrency=2,
@@ -394,9 +455,9 @@ def test_final_mvp_acceptance_survives_interruption_and_resume(
         researcher = PartialResearcher()
         sink = InMemoryTraceSink()
 
-        def model_factory(received_settings: Settings) -> ChatOpenAI:
+        def model_factory(received_settings: Settings) -> StructuredChatModel:
             assert received_settings is settings
-            return cast(ChatOpenAI, model)
+            return cast(StructuredChatModel, model)
 
         with pytest.raises(
             RuntimeError,
@@ -461,8 +522,25 @@ def test_final_mvp_acceptance_survives_interruption_and_resume(
         assert researcher.calls == ["alpha", "beta"]
         assert model.invocation_counts[Plan] == 1
         assert model.invocation_counts[ReplacementWork] == 1
+        assert model.invocation_counts[AnswerSynthesisDraft] == 1
 
         assert state["final_answer"] is not None
+        public_answer = state["public_answer"]
+        assert isinstance(public_answer, UserFacingAnswer)
+        assert public_answer.language == "vi"
+        assert public_answer.comparison_table is not None
+        assert len(public_answer.comparison_table.rows) == 2
+        assert [row.citations for row in public_answer.comparison_table.rows] == [
+            [SEARCH_SOURCE],
+            [FETCH_SOURCE],
+        ]
+        assert [claim.citations for claim in public_answer.discrepancies] == [
+            [SEARCH_SOURCE],
+            [FETCH_SOURCE],
+        ]
+        assert "# Kết quả" in state["final_answer"]
+        assert "## Bảng so sánh" in state["final_answer"]
+        assert "Tool calls:" not in state["final_answer"]
         assert state["plan"] is not None
         assert state["current_step"] == len(state["plan"].steps)
         assert state["pending_action"] is None
@@ -599,3 +677,4 @@ def test_final_mvp_acceptance_survives_interruption_and_resume(
     assert not model.responses[ActionDecision]
     assert not model.responses[ReviewDecision]
     assert not model.responses[ReplacementWork]
+    assert not model.responses[AnswerSynthesisDraft]

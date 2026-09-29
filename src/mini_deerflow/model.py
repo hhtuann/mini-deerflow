@@ -1,9 +1,10 @@
 from langchain_openai import ChatOpenAI
 
 from mini_deerflow.config import Settings
+from mini_deerflow.structured_output import StructuredChatModel
 
 
-def create_chat_model(settings: Settings) -> ChatOpenAI:
+def create_chat_model(settings: Settings) -> StructuredChatModel:
     """Create the chat model used by Mini DeerFlow."""
 
     return ChatOpenAI(

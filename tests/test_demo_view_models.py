@@ -18,6 +18,7 @@ from mini_deerflow.demo.service import DemoRuntimeService, RunDemoCommand
 from mini_deerflow.demo.view_models import (
     _answer_markdown,
     project_chat_session,
+    project_demo_run,
     sanitize_answer_markdown,
 )
 from mini_deerflow.evidence import (
@@ -26,6 +27,7 @@ from mini_deerflow.evidence import (
     StepFinding,
     render_research_report,
 )
+from mini_deerflow.review import ReviewFinding, ReviewVerdict
 from mini_deerflow.runtime import (
     ConversationSnapshot,
     ConversationTurnSnapshot,
@@ -135,7 +137,30 @@ def test_checkpointed_legacy_public_answer_is_rebuilt_from_findings() -> None:
             )
         ],
         "evidence": [evidence],
-        "review_verdicts": [],
+        "review_verdicts": [
+            ReviewVerdict(
+                verdict="continue",
+                rationale="Historical review.",
+                findings=[
+                    ReviewFinding(
+                        category="gap",
+                        description="Resolved historical gap.",
+                        related_step_numbers=[1],
+                    )
+                ],
+            ),
+            ReviewVerdict(
+                verdict="finish",
+                rationale="Current review.",
+                findings=[
+                    ReviewFinding(
+                        category="gap",
+                        description="Current public limitation.",
+                        related_step_numbers=[1],
+                    )
+                ],
+            ),
+        ],
         "errors": [],
         "tool_observations": [],
     }
@@ -144,6 +169,48 @@ def test_checkpointed_legacy_public_answer_is_rebuilt_from_findings() -> None:
 
     assert "A durable public claim. [1]" in answer
     assert "Bước 1 hoàn tất" not in answer
+    assert "Current public limitation." in answer
+    assert "Resolved historical gap." not in answer
+
+
+def test_checkpointed_english_partial_answer_preserves_localization() -> None:
+    provenance = EvidenceProvenance(
+        tool_name="web_fetch",
+        step_number=1,
+        step_tool_call_number=1,
+        total_tool_call_number=1,
+        observation_index=1,
+    )
+    evidence = EvidenceRecord(
+        url="https://example.com/source",
+        source_tool="web_fetch",
+        title="Source",
+        excerpt="Observed content",
+        provenance=provenance,
+    )
+    state: AgentState = {
+        "goal": "Compare Pelé and Messi",
+        "output_language": "en",
+        "completion_status": "partial",
+        "final_answer": "# Research Report\n\nInternal execution summary.",
+        "findings": [
+            StepFinding(
+                step_number=1,
+                summary="Conclusion: A supported public claim.",
+                citations=["https://example.com/source"],
+            )
+        ],
+        "evidence": [evidence],
+        "review_verdicts": [],
+        "errors": [],
+        "tool_observations": [],
+    }
+
+    answer = _answer_markdown(state, state["final_answer"] or "")
+
+    assert answer.startswith("# Result")
+    assert "Partial answer" in answer
+    assert "# Kết quả" not in answer
 
 
 def test_legacy_execution_only_answer_is_not_rendered_as_public_content() -> None:
@@ -217,3 +284,20 @@ def test_projector_is_frozen_allowlisted_and_does_not_leak_canaries(
     )
     assert any(wave.failed_branch_count == 1 for wave in view.delegations)
     assert view.artifact.markdown_source
+
+
+def test_partial_answer_is_not_projected_as_completed() -> None:
+    state: AgentState = {
+        "goal": "Compare two systems",
+        "final_answer": "# Result\n\n> Partial answer",
+        "completion_status": "partial",
+    }
+
+    view = project_demo_run(
+        state,
+        (),
+        thread_id="partial-demo",
+        limits=RuntimeLimits(),
+    )
+
+    assert view.workflow_status == "incomplete"
