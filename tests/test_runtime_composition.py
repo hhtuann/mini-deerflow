@@ -4,25 +4,27 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from mini_deerflow import runtime as runtime_module
 from mini_deerflow.actions import ActionDecision
+from mini_deerflow.answer_synthesis import (
+    AnswerSynthesizer,
+    LLMAnswerSynthesizer,
+)
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.decision import ActionSelector
 from mini_deerflow.llm_reviewer import LLMReviewer
 from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.persistence import create_thread_config
-from mini_deerflow.planner import create_research_plan
+from mini_deerflow.planner import PlanningBudget, create_research_plan
 from mini_deerflow.replanner import create_replacement_plan
 from mini_deerflow.review import (
     EvidenceReviewer,
     Replanner,
-    ReviewDecision,
 )
 from mini_deerflow.runtime import (
     AgentRuntime,
@@ -31,6 +33,7 @@ from mini_deerflow.runtime import (
     create_default_agent_runtime,
     open_default_agent_runtime,
 )
+from mini_deerflow.structured_output import StructuredChatModel
 from mini_deerflow.tools import ToolRegistry
 from mini_deerflow.tracing import ExecutionTracer
 
@@ -59,6 +62,27 @@ class FakeModel:
 
         return FakeStructuredRunnable()
 
+    def invoke(self, messages: object) -> object:
+        return messages
+
+    async def ainvoke(self, messages: object) -> object:
+        return self.invoke(messages)
+
+
+class FakeWikiProvider:
+    async def search(
+        self,
+        query: str,
+        *,
+        language: str,
+        max_results: int,
+    ) -> list[object]:
+        del query, language, max_results
+        return []
+
+    async def lookup(self, title: str, *, language: str) -> object:
+        raise AssertionError(f"unexpected lookup: {language}:{title}")
+
 
 class FakeGraph:
     async def ainvoke(
@@ -78,8 +102,8 @@ class FakeGraph:
             (
                 "list_files",
                 "read_file",
-                "web_search",
-                "web_fetch",
+                "wiki_search",
+                "wiki_lookup",
                 "delegate_research",
             ),
         ),
@@ -88,8 +112,8 @@ class FakeGraph:
             (
                 "list_files",
                 "read_file",
-                "web_search",
-                "web_fetch",
+                "wiki_search",
+                "wiki_lookup",
                 "delegate_research",
                 "write_file",
             ),
@@ -120,9 +144,9 @@ def test_default_runtime_composes_expected_file_tools(
 
     def fake_model_factory(
         received_settings: Settings,
-    ) -> ChatOpenAI:
+    ) -> StructuredChatModel:
         captured["settings"] = received_settings
-        return cast(ChatOpenAI, fake_model)
+        return cast(StructuredChatModel, fake_model)
 
     def fake_build_agent_runtime(
         planner: Planner,
@@ -132,6 +156,7 @@ def test_default_runtime_composes_expected_file_tools(
         action_registry: ToolRegistry | None = None,
         reviewer: EvidenceReviewer | None = None,
         replanner: Replanner | None = None,
+        answer_synthesizer: AnswerSynthesizer | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         limits: RuntimeLimits | None = None,
         context_budget: ContextBudget | None = None,
@@ -145,6 +170,7 @@ def test_default_runtime_composes_expected_file_tools(
         captured["action_registry"] = action_registry
         captured["reviewer"] = reviewer
         captured["replanner"] = replanner
+        captured["answer_synthesizer"] = answer_synthesizer
         captured["checkpointer"] = checkpointer
         captured["limits"] = limits
         captured["context_budget"] = context_budget
@@ -169,6 +195,7 @@ def test_default_runtime_composes_expected_file_tools(
         checkpointer=expected_checkpointer,
         limits=limits,
         model_factory=fake_model_factory,
+        wiki_provider=FakeWikiProvider(),
     )
 
     assert actual_runtime is expected_runtime
@@ -186,8 +213,8 @@ def test_default_runtime_composes_expected_file_tools(
     assert action_registry.names() == (
         "list_files",
         "read_file",
-        "web_search",
-        "web_fetch",
+        "wiki_search",
+        "wiki_lookup",
         "delegate_research",
     )
 
@@ -197,7 +224,12 @@ def test_default_runtime_composes_expected_file_tools(
     assert planner.args == (fake_model,)
     assert planner.keywords == {
         "available_tools": action_registry.definitions(),
-        "structured_output_mode": "native",
+        "planning_budget": PlanningBudget(
+            max_tool_calls_per_step=2,
+            max_total_tool_calls=4,
+            max_replan_cycles=2,
+        ),
+        "structured_output_mode": "prompt_json",
     }
 
     assert isinstance(
@@ -208,36 +240,60 @@ def test_default_runtime_composes_expected_file_tools(
         captured["reviewer"],
         LLMReviewer,
     )
+    assert isinstance(captured["answer_synthesizer"], LLMAnswerSynthesizer)
 
     composed_replanner = captured["replanner"]
 
     assert isinstance(composed_replanner, partial)
     assert composed_replanner.func is create_replacement_plan
     assert composed_replanner.args == (fake_model,)
-    assert composed_replanner.keywords == {"structured_output_mode": "native"}
+    assert composed_replanner.keywords == {"structured_output_mode": "prompt_json"}
 
-    # The replanner binds lazily. The researcher selector, parent selector,
-    # and reviewer bind eagerly at composition time.
-    assert fake_model.structured_output_calls == [
-        (
-            ActionDecision,
-            "json_mode",
-        ),
-        (
-            ActionDecision,
-            "json_mode",
-        ),
-        (
-            ReviewDecision,
-            "json_mode",
-        ),
-    ]
+    # prompt_json must stay provider-neutral and must not invoke native
+    # structured-output binding based on a provider-specific model class.
+    assert fake_model.structured_output_calls == []
 
     assert captured["checkpointer"] is expected_checkpointer
     assert captured["context_budget"] == ContextBudget()
     assert captured["artifact_path"] == (
         "reports/research-report.md" if allow_write else None
     )
+
+
+def test_default_runtime_builds_wikipedia_provider_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        api_key="glm-secret",
+        wiki_request_timeout=7.5,
+        _env_file=None,
+    )
+    fake_model = FakeModel()
+    captured: dict[str, object] = {}
+    fake_provider = FakeWikiProvider()
+
+    def fake_model_factory(_settings: Settings) -> StructuredChatModel:
+        return cast(StructuredChatModel, fake_model)
+
+    def fake_provider_factory(*, timeout_seconds: float) -> FakeWikiProvider:
+        captured["timeout_seconds"] = timeout_seconds
+        return fake_provider
+
+    monkeypatch.setattr(
+        runtime_module,
+        "MediaWikiProvider",
+        fake_provider_factory,
+    )
+
+    runtime = create_default_agent_runtime(
+        settings,
+        tmp_path / "workspace",
+        model_factory=fake_model_factory,
+    )
+
+    assert isinstance(runtime, AgentRuntime)
+    assert captured["timeout_seconds"] == 7.5
 
 
 def test_default_runtime_rejects_non_boolean_write_permission(
@@ -251,7 +307,7 @@ def test_default_runtime_rejects_non_boolean_write_permission(
 
     def fake_model_factory(
         received_settings: Settings,
-    ) -> ChatOpenAI:
+    ) -> StructuredChatModel:
         nonlocal model_factory_called
         model_factory_called = True
 
@@ -283,11 +339,11 @@ def test_open_default_agent_runtime_owns_sqlite_lifecycle(
 
     def fake_model_factory(
         received_settings: Settings,
-    ) -> ChatOpenAI:
+    ) -> StructuredChatModel:
         assert received_settings is settings
 
         return cast(
-            ChatOpenAI,
+            StructuredChatModel,
             fake_model,
         )
 
@@ -297,6 +353,7 @@ def test_open_default_agent_runtime_owns_sqlite_lifecycle(
             tmp_path / "workspace",
             checkpoint_path,
             model_factory=fake_model_factory,
+            wiki_provider=FakeWikiProvider(),
         ) as runtime:
             checkpointer = getattr(
                 runtime.graph,

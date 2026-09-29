@@ -22,12 +22,14 @@ ToolName = Annotated[
     ),
 ]
 
+MAX_COMPLETION_SUMMARY_CHARS = 4_000
+
 CompletionSummary = Annotated[
     str,
     StringConstraints(
         strip_whitespace=True,
         min_length=10,
-        max_length=4_000,
+        max_length=MAX_COMPLETION_SUMMARY_CHARS,
     ),
 ]
 

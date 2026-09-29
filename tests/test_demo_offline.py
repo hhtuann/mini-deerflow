@@ -1,11 +1,13 @@
 import asyncio
 import socket
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from langchain_openai import ChatOpenAI
 from pydantic_settings.sources.providers.dotenv import DotEnvSettingsSource
 
+from mini_deerflow.demo import offline_scenario
 from mini_deerflow.demo.offline_scenario import OfflineDemoBackend
 from mini_deerflow.demo.service import (
     ContinueDemoCommand,
@@ -13,6 +15,44 @@ from mini_deerflow.demo.service import (
     ResumeDemoCommand,
     RunDemoCommand,
 )
+from mini_deerflow.sandbox import SessionSandboxResolver
+
+
+def test_offline_backend_uses_distinct_opaque_sandboxes_for_case_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots: list[Path] = []
+    snapshot = object()
+
+    class FakeRuntime:
+        async def load_conversation(self, _thread_id: str) -> object:
+            return snapshot
+
+    @asynccontextmanager
+    async def fake_open_runtime(
+        _settings: object,
+        workspace_root: str | Path,
+        _checkpoint_path: str | Path,
+        **_kwargs: object,
+    ):
+        roots.append(Path(workspace_root))
+        yield FakeRuntime()
+
+    monkeypatch.setattr(
+        offline_scenario,
+        "open_default_agent_runtime",
+        fake_open_runtime,
+    )
+    storage_root = tmp_path / "offline"
+    backend = OfflineDemoBackend(storage_root)
+
+    assert asyncio.run(backend.load_conversation("Alpha")) is snapshot
+    assert asyncio.run(backend.load_conversation("alpha")) is snapshot
+
+    resolver = SessionSandboxResolver(storage_root / "workspaces")
+    assert roots == [resolver.resolve("Alpha"), resolver.resolve("alpha")]
+    assert roots[0] != roots[1]
 
 
 def test_offline_run_list_duplicate_and_completed_resume_without_replay(
@@ -20,7 +60,10 @@ def test_offline_run_list_duplicate_and_completed_resume_without_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     poisoned = tmp_path / ".env"
-    poisoned.write_text("MINI_DEERFLOW_API_KEY=must-not-be-read\n", encoding="utf-8")
+    poisoned.write_text(
+        "MINI_DEERFLOW_API_KEY=must-not-be-read\n",
+        encoding="utf-8",
+    )
     monkeypatch.chdir(tmp_path)
 
     def deny_external(*_args, **_kwargs):
@@ -143,9 +186,8 @@ def test_offline_run_ignores_all_runtime_environment_settings(
         "MINI_DEERFLOW_TEMPERATURE": "not-a-number",
         "MINI_DEERFLOW_REQUEST_TIMEOUT": "-1",
         "MINI_DEERFLOW_MAX_RETRIES": "999",
-        "MINI_DEERFLOW_JINA_API_KEY": "environment-jina-key-must-not-be-used",
-        "MINI_DEERFLOW_WEB_REQUEST_TIMEOUT": "0",
-        "MINI_DEERFLOW_WEB_MAX_RESPONSE_BYTES": "1",
+        "MINI_DEERFLOW_WIKI_REQUEST_TIMEOUT": "0",
+        "MINI_DEERFLOW_STRUCTURED_OUTPUT_MODE": "invalid-mode",
     }
     for name, value in poisoned_settings.items():
         monkeypatch.setenv(name, value)

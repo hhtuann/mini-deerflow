@@ -14,6 +14,12 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.answer_synthesis import (
+    AnswerSynthesisContext,
+    AnswerSynthesisFormatError,
+    AnswerSynthesizer,
+    infer_answer_language,
+)
 from mini_deerflow.context_budget import (
     ContextBudget,
     ProjectionMetadata,
@@ -26,6 +32,7 @@ from mini_deerflow.context_budget import (
 from mini_deerflow.decision import (
     ActionSelector,
     build_action_context,
+    calculate_step_tool_call_budget,
 )
 from mini_deerflow.delegation import (
     DelegateResearchTool,
@@ -35,6 +42,8 @@ from mini_deerflow.delegation import (
 from mini_deerflow.evidence import (
     EvidenceRecord,
     StepFinding,
+    UserFacingAnswer,
+    build_user_facing_answer,
     extract_evidence_records,
     render_research_report,
     render_user_answer,
@@ -82,6 +91,13 @@ DecisionRoute = Literal[
 
 CompletionRoute = Literal[
     "decide_action",
+    "budget_exhausted",
+    "synthesize",
+]
+
+BudgetRoute = Literal[
+    "decide_action",
+    "review",
     "synthesize",
 ]
 
@@ -149,6 +165,7 @@ def build_agent_workflow(
     action_registry: ToolRegistry | None = None,
     reviewer: EvidenceReviewer | None = None,
     replanner: Replanner | None = None,
+    answer_synthesizer: AnswerSynthesizer | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     max_tool_calls_per_step: int = 5,
     max_total_tool_calls: int = 20,
@@ -204,6 +221,12 @@ def build_agent_workflow(
         raise TypeError(
             "replanner must be callable",
         )
+
+    if answer_synthesizer is not None and not isinstance(
+        answer_synthesizer,
+        AnswerSynthesizer,
+    ):
+        raise TypeError("answer_synthesizer must satisfy AnswerSynthesizer")
 
     action_registry_is_restricted = action_registry is not None
     resolved_action_registry = registry if action_registry is None else action_registry
@@ -297,10 +320,13 @@ def build_agent_workflow(
                 "pending action has an invalid type",
             )
 
-        step_budget_exhausted = (
-            state["tool_calls_in_current_step"] >= max_tool_calls_per_step
+        tool_budget = calculate_step_tool_call_budget(
+            state,
+            max_tool_calls_per_step=max_tool_calls_per_step,
+            max_total_tool_calls=max_total_tool_calls,
         )
-        total_budget_exhausted = state["total_tool_calls"] >= max_total_tool_calls
+        step_budget_exhausted = tool_budget.remaining_allocated_step_tool_calls == 0
+        total_budget_exhausted = tool_budget.remaining_total_tool_calls == 0
 
         if step_budget_exhausted or total_budget_exhausted:
             return "budget_exhausted"
@@ -362,6 +388,11 @@ def build_agent_workflow(
                 )
             else:
                 delegated_tool = candidate
+                tool_budget = calculate_step_tool_call_budget(
+                    state,
+                    max_tool_calls_per_step=max_tool_calls_per_step,
+                    max_total_tool_calls=max_total_tool_calls,
+                )
                 remaining_tool_calls = min(
                     max_tool_calls_per_step - state["tool_calls_in_current_step"],
                     max_total_tool_calls - state["total_tool_calls"],
@@ -370,6 +401,9 @@ def build_agent_workflow(
                     action.arguments,
                     parent_step_number=step.step_number,
                     remaining_tool_calls=remaining_tool_calls,
+                    remaining_allocated_step_tool_calls=(
+                        tool_budget.remaining_allocated_step_tool_calls
+                    ),
                 )
         else:
             result = await tool_runner.run(
@@ -623,6 +657,8 @@ def build_agent_workflow(
             )
 
         if current_step < len(plan.steps):
+            if state["total_tool_calls"] >= max_total_tool_calls:
+                return "budget_exhausted"
             return "decide_action"
 
         return "synthesize"
@@ -645,6 +681,14 @@ def build_agent_workflow(
             )
 
         assert reviewer is not None
+
+        finalization_reason = state.get("finalization_reason")
+        if (
+            finalization_reason is None
+            and current_step < len(plan.steps)
+            and state["total_tool_calls"] >= max_total_tool_calls
+        ):
+            finalization_reason = "total_tool_budget_exhausted"
 
         remaining_steps = plan.steps[current_step:]
         remaining_total_tool_calls = max(
@@ -690,6 +734,7 @@ def build_agent_workflow(
             limitations=projected_limitations,
             remaining_total_tool_calls=remaining_total_tool_calls,
             remaining_replan_cycles=remaining_replan_cycles,
+            finalization_reason=finalization_reason,
         )
 
         context = fit_context_to_budget(
@@ -721,12 +766,29 @@ def build_agent_workflow(
         route = verdict.verdict
         coercion_errors: list[str] = []
 
-        if route == "replan":
+        if finalization_reason is not None:
+            if route != "finish":
+                condition = {
+                    "total_tool_budget_exhausted": (
+                        "the tool-call budget was exhausted"
+                    ),
+                    "replan_budget_exhausted": "the replan budget was exhausted",
+                    "plan_capacity_exhausted": (
+                        "the seven-step plan capacity was exhausted"
+                    ),
+                }[finalization_reason]
+                coercion_errors.append(
+                    f"Review {review_number} requested {route!r} after {condition}; "
+                    "finishing with the available evidence."
+                )
+            route = "finish"
+        elif route == "replan":
             replan_budget_exhausted = len(state["replans"]) >= max_replan_cycles
             tool_budget_exhausted = state["total_tool_calls"] >= max_total_tool_calls
 
             if replan_budget_exhausted:
                 route = "finish"
+                finalization_reason = "replan_budget_exhausted"
                 coercion_errors.append(
                     f"Review {review_number} requested another replan "
                     "after the replan budget was exhausted; finishing "
@@ -734,6 +796,7 @@ def build_agent_workflow(
                 )
             elif tool_budget_exhausted:
                 route = "finish"
+                finalization_reason = "total_tool_budget_exhausted"
                 coercion_errors.append(
                     f"Review {review_number} requested a replan after "
                     "the tool-call budget was exhausted; finishing with "
@@ -744,6 +807,7 @@ def build_agent_workflow(
                     replacement_step_bounds(current_step)
                 except ValueError:
                     route = "finish"
+                    finalization_reason = "plan_capacity_exhausted"
                     coercion_errors.append(
                         f"Review {review_number} requested a replan "
                         "that cannot fit within the seven-step plan "
@@ -771,11 +835,15 @@ def build_agent_workflow(
             citation_count=len(state.get("sources", [])),
         )
 
-        return {
+        updates: dict[str, object] = {
             "review_verdicts": [verdict],
             "pending_review_verdict": route,
             "errors": coercion_errors,
         }
+        if finalization_reason is not None:
+            updates["finalization_reason"] = finalization_reason
+            updates["completion_status"] = "partial"
+        return updates
 
     def route_after_review(
         state: AgentState,
@@ -925,19 +993,16 @@ def build_agent_workflow(
             )
 
         step = plan.steps[current_step]
-        exhausted_limits: list[str] = []
-
-        if state["tool_calls_in_current_step"] >= max_tool_calls_per_step:
-            exhausted_limits.append("per-step limit")
-
-        if state["total_tool_calls"] >= max_total_tool_calls:
-            exhausted_limits.append("total-run limit")
-
-        rendered_limits = ", ".join(exhausted_limits)
-
+        tool_budget = calculate_step_tool_call_budget(
+            state,
+            max_tool_calls_per_step=max_tool_calls_per_step,
+            max_total_tool_calls=max_total_tool_calls,
+        )
+        total_exhausted = tool_budget.remaining_total_tool_calls == 0
+        limit_name = "total-run limit" if total_exhausted else "allocated step quota"
         error = (
-            f"Tool-call budget exhausted for plan step "
-            f"{step.step_number}: {rendered_limits}."
+            f"Tool-call budget exhausted for plan step {step.step_number}: "
+            f"{limit_name}."
         )
 
         logger.warning(error)
@@ -956,10 +1021,39 @@ def build_agent_workflow(
             error_code=TraceErrorCode.TOOL_FAILURE,
         )
 
-        return {
+        updates: dict[str, object] = {
             "pending_action": None,
             "errors": [error],
+            "completion_status": "partial",
         }
+        if total_exhausted:
+            updates["finalization_reason"] = "total_tool_budget_exhausted"
+        else:
+            updates.update(
+                {
+                    "current_step": current_step + 1,
+                    "tool_calls_in_current_step": 0,
+                    "notes": [
+                        (
+                            f"Step {step.step_number} closed after its allocated "
+                            "tool-call quota was exhausted."
+                        )
+                    ],
+                }
+            )
+        return updates
+
+    def route_after_budget_exhausted(state: AgentState) -> BudgetRoute:
+        plan = state["plan"]
+        if plan is None:
+            raise RuntimeError("budget routing requires a plan")
+        if state.get("finalization_reason") is not None:
+            return "review" if reviewer is not None else "synthesize"
+        if reviewer is not None:
+            return "review"
+        if state["current_step"] < len(plan.steps):
+            return "decide_action"
+        return "synthesize"
 
     async def synthesize_node(
         state: AgentState,
@@ -987,11 +1081,14 @@ def build_agent_workflow(
             "replan_cycles": len(state.get("replans", [])),
         }
         research_report = render_research_report(**report_arguments)
+        review_history = list(state.get("review_verdicts", []))
+        latest_review_findings = (
+            list(review_history[-1].findings) if review_history else []
+        )
         review_notes = list(
             dict.fromkeys(
                 finding.description
-                for verdict in state.get("review_verdicts", [])
-                for finding in verdict.findings
+                for finding in latest_review_findings
                 if finding.category
                 in {
                     "gap",
@@ -1002,12 +1099,117 @@ def build_agent_workflow(
                 }
             )
         )
-        final_answer = render_user_answer(
-            findings=list(state.get("findings", [])),
-            evidence=list(state.get("evidence", [])),
-            review_notes=review_notes,
-            has_collection_failures=failed_calls > 0 or bool(errors),
+        completion_status = (
+            "partial" if state.get("completion_status") == "partial" else "complete"
         )
+        output_language = state.get("output_language") or infer_answer_language(
+            state["goal"]
+        )
+        answer_evidence = list(state.get("evidence", []))
+        answer_findings = list(state.get("findings", []))
+        public_answer: UserFacingAnswer | None = None
+        synthesis_failed = False
+
+        if answer_synthesizer is not None:
+            projected_evidence, synthesis_evidence_metadata = project_evidence_records(
+                answer_evidence, resolved_context_budget
+            )
+            projected_findings, synthesis_findings_metadata = project_review_findings(
+                answer_findings,
+                resolved_context_budget,
+            )
+            synthesis_limitations = list(
+                dict.fromkeys(
+                    [
+                        *(
+                            f"[{finding.category}] {finding.description}"
+                            for finding in latest_review_findings
+                        ),
+                        *derive_review_limitations(observations, errors),
+                    ]
+                )
+            )
+            synthesis_context = AnswerSynthesisContext(
+                goal=state["goal"],
+                language=output_language,
+                completion_status=completion_status,
+                finalization_reason=state.get("finalization_reason"),
+                findings=projected_findings,
+                evidence=projected_evidence,
+                limitations=synthesis_limitations,
+            )
+            synthesis_context = fit_context_to_budget(
+                synthesis_context,
+                resolved_context_budget,
+                merge_metadata(
+                    synthesis_evidence_metadata,
+                    synthesis_findings_metadata,
+                ),
+            )
+            _trace_projection(
+                resolved_tracer,
+                "synthesize",
+                synthesis_context.context_projection,
+            )
+            try:
+                public_answer = await answer_synthesizer.synthesize_answer(
+                    synthesis_context
+                )
+            except AnswerSynthesisFormatError:
+                synthesis_error = (
+                    "Structured answer synthesis was invalid; a deterministic "
+                    "safe fallback was rendered."
+                )
+                synthesis_failed = True
+                errors.append(synthesis_error)
+                logger.warning(synthesis_error)
+            except Exception:  # noqa: BLE001 - normalize the synthesis provider seam
+                synthesis_error = (
+                    "Structured answer synthesis was unavailable; a deterministic "
+                    "safe fallback was rendered."
+                )
+                synthesis_failed = True
+                errors.append(synthesis_error)
+                logger.warning(synthesis_error)
+
+        if public_answer is None:
+            if synthesis_failed:
+                fallback_limitation = (
+                    "Không thể tổng hợp câu trả lời có cấu trúc vì dịch vụ mô hình "
+                    "không khả dụng; câu trả lời được dựng từ các phát hiện đã "
+                    "xác thực."
+                    if output_language == "vi"
+                    else (
+                        "A structured answer could not be synthesized because the "
+                        "model service was unavailable; the answer was built from "
+                        "validated findings."
+                    )
+                )
+                public_answer = build_user_facing_answer(
+                    findings=answer_findings,
+                    evidence=answer_evidence,
+                    review_notes=[*review_notes, fallback_limitation],
+                    has_collection_failures=True,
+                    language=output_language,
+                    completion_status=completion_status,
+                )
+            else:
+                public_answer = build_user_facing_answer(
+                    findings=answer_findings,
+                    evidence=answer_evidence,
+                    review_notes=review_notes,
+                    has_collection_failures=failed_calls > 0 or bool(errors),
+                    language=output_language,
+                    completion_status=completion_status,
+                )
+
+        final_answer = render_user_answer(
+            evidence=answer_evidence,
+            answer=public_answer,
+        )
+        if len(errors) > len(state["errors"]):
+            report_arguments["errors"] = errors
+            research_report = render_research_report(**report_arguments)
         resolved_artifact_path: str | None = None
 
         if artifact_path is not None:
@@ -1072,6 +1274,9 @@ def build_agent_workflow(
 
         updates: dict[str, object] = {
             "final_answer": final_answer,
+            "public_answer": public_answer,
+            "output_language": output_language,
+            "completion_status": completion_status,
             "research_report": research_report,
             "artifact_path": resolved_artifact_path,
             # Synthesis is the consumer of a routed "finish" review
@@ -1154,13 +1359,21 @@ def build_agent_workflow(
             route_after_completion,
             {
                 "decide_action": "decide_action",
+                "budget_exhausted": "budget_exhausted",
                 "synthesize": "synthesize",
             },
         )
 
-    builder.add_edge(
+    budget_routes = {
+        "decide_action": "decide_action",
+        "synthesize": "synthesize",
+    }
+    if reviewer is not None:
+        budget_routes["review"] = "review"
+    builder.add_conditional_edges(
         "budget_exhausted",
-        "synthesize",
+        route_after_budget_exhausted,
+        budget_routes,
     )
     builder.add_edge("synthesize", END)
 

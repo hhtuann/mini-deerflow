@@ -53,6 +53,15 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex}"
 
 
+def _strip_streamlit_answer_title(value: str) -> str:
+    """Hide the redundant top-level result title in the Streamlit chat UI."""
+
+    lines = value.splitlines()
+    if lines and lines[0].strip() in {"# Kết quả", "# Result"}:
+        return "\n".join(lines[1:]).lstrip()
+    return value
+
+
 def _default_dependencies(mode: str) -> tuple[DemoRuntimeService, DemoJobManager]:
     """Create local dependencies lazily without doing network work."""
 
@@ -251,8 +260,9 @@ def _render_sidebar(
     if mode == _LIVE_MODE:
         st.sidebar.badge("LIVE mode · configured runtime", color="blue")
         st.sidebar.caption(
-            "Readiness is confirmed only by a successful web-tool outcome; "
-            "Jina key is required for web_search."
+            "Live mode uses GLM 5.3 for agent reasoning and Wikipedia "
+            "for bounded research evidence. Readiness is confirmed by "
+            "successful model and Wikipedia-tool outcomes."
         )
     else:
         st.sidebar.badge("OFFLINE · deterministic", color="green")
@@ -321,11 +331,12 @@ def _render_turn(turn) -> None:
     with st.chat_message("assistant"):
         if turn.status == "completed" and turn.assistant_message:
             allowed_urls = () if turn.run is None else turn.run.accepted_citations
+            answer_markdown = sanitize_answer_markdown(
+                turn.assistant_message,
+                allowed_urls=allowed_urls,
+            )
             st.markdown(
-                sanitize_answer_markdown(
-                    turn.assistant_message,
-                    allowed_urls=allowed_urls,
-                ),
+                _strip_streamlit_answer_title(answer_markdown),
                 unsafe_allow_html=False,
             )
         elif turn.status == "completed":

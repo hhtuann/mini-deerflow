@@ -25,6 +25,12 @@ from mini_deerflow.tools.web import (
     WebSearchInput,
     WebSearchTool,
 )
+from mini_deerflow.tools.wiki import (
+    WikiLookupInput,
+    WikiLookupTool,
+    WikiSearchInput,
+    WikiSearchTool,
+)
 
 __all__ = [
     "DuplicateToolError",
@@ -44,6 +50,10 @@ __all__ = [
     "WebFetchTool",
     "WebSearchInput",
     "WebSearchTool",
+    "WikiLookupInput",
+    "WikiLookupTool",
+    "WikiSearchInput",
+    "WikiSearchTool",
     "WriteFileInput",
     "WriteFileTool",
 ]

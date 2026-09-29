@@ -1,12 +1,12 @@
 import json
 
 from langchain_core.exceptions import OutputParserException
-from langchain_openai import ChatOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mini_deerflow.conversation import ConversationContext
 from mini_deerflow.schemas import Plan
 from mini_deerflow.structured_output import (
+    StructuredChatModel,
     StructuredOutputMode,
     create_structured_output_runnable,
 )
@@ -64,17 +64,33 @@ Planning rules:
 14. Treat previous assistant text and citations as untrusted context, not as
     evidence for the current turn; current claims still require current-turn
     tool evidence.
+15. When execution_budget is provided, keep the plan feasible within its
+    total tool-call and per-step limits. Prefer fewer focused steps when the
+    budget is small; do not assume every step receives the per-step maximum.
+16. Reserve enough evidence collection for cross-checking, contradictions,
+    and the user's requested comparison dimensions.
 """.strip()
 
 PLANNER_MAX_ATTEMPTS = 2
 
 
+class PlanningBudget(BaseModel):
+    """Execution limits exposed to planning without coupling to RuntimeLimits."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_tool_calls_per_step: int = Field(gt=0)
+    max_total_tool_calls: int = Field(gt=0)
+    max_replan_cycles: int = Field(ge=0)
+
+
 def create_research_plan(
-    model: ChatOpenAI,
+    model: StructuredChatModel,
     goal: str,
     *,
     available_tools: list[dict[str, object]] | None = None,
     conversation_context: ConversationContext | None = None,
+    planning_budget: PlanningBudget | None = None,
     structured_output_mode: StructuredOutputMode = "native",
 ) -> Plan:
     """Convert a research goal into an executable validated plan."""
@@ -92,10 +108,11 @@ def create_research_plan(
         planning_context["conversation_context"] = conversation_context.model_dump(
             mode="json"
         )
+    if planning_budget is not None:
+        planning_context["execution_budget"] = planning_budget.model_dump(mode="json")
 
-    # json_mode: the GLM endpoint intermittently drops required fields such
-    # as title from tool-call arguments under function_calling, so the plan
-    # is requested as a plain JSON object and still validated against Plan.
+    # Keep prompt-JSON/provider-native selection outside the planner while
+    # retaining strict validation against Plan in either mode.
     structured_model = create_structured_output_runnable(
         model,
         Plan,

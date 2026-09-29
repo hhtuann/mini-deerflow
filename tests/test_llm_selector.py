@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from mini_deerflow.actions import (
+    MAX_COMPLETION_SUMMARY_CHARS,
     ActionDecision,
     CompleteStepAction,
     ToolCallAction,
@@ -115,6 +116,8 @@ def create_context(
         ],
         observations=observations or [],
         remaining_step_tool_calls=5,
+        allocated_step_tool_calls=5,
+        remaining_allocated_step_tool_calls=5,
         remaining_total_tool_calls=20,
     )
 
@@ -292,7 +295,8 @@ def test_selector_recovers_after_parser_failure_with_corrective_feedback() -> No
     corrective = second_messages[2]
 
     assert isinstance(corrective, HumanMessage)
-    assert corrective.content == ACTION_FORMAT_CORRECTION_MESSAGE
+    assert corrective.content.startswith(ACTION_FORMAT_CORRECTION_MESSAGE)
+    assert "could not be parsed" in corrective.content
     assert "Failed to parse ActionDecision" not in corrective.content
     assert "raw model output" not in corrective.content
     assert "evidence.txt" not in corrective.content
@@ -317,10 +321,40 @@ def test_selector_recovers_after_invalid_dictionary_response() -> None:
     assert action == expected_action
     assert len(runnable.calls) == 2
     assert len(runnable.calls[1]) == 3
+    correction = runnable.calls[1][2]
+    assert isinstance(correction, HumanMessage)
+    assert "Schema issues:" in correction.content
+    assert "sources" in correction.content
+    assert "evidence.txt" not in correction.content
+
+
+def test_selector_recovers_after_overlong_complete_step_summary() -> None:
+    expected_action = local_complete_action()
+    runnable = SequencedStructuredRunnable(
+        [
+            {
+                "action_type": "complete_step",
+                "summary": "x" * (MAX_COMPLETION_SUMMARY_CHARS + 1),
+                "sources": [],
+            },
+            expected_action,
+        ],
+    )
+    selector = LLMActionSelector(FakeModel(runnable))
+
+    action = asyncio.run(selector.select_action(create_context()))
+
+    assert action == expected_action
+    assert len(runnable.calls) == 2
+    correction = runnable.calls[1][2]
+    assert isinstance(correction, HumanMessage)
+    assert str(MAX_COMPLETION_SUMMARY_CHARS) in correction.content
+    assert "summary MUST be no longer" in correction.content
 
 
 def test_selector_fails_after_bounded_parser_failures() -> None:
     errors = [
+        make_parser_failure(),
         make_parser_failure(),
         make_parser_failure(),
     ]
@@ -334,8 +368,24 @@ def test_selector_fails_after_bounded_parser_failures() -> None:
         asyncio.run(selector.select_action(create_context()))
 
     assert len(runnable.calls) == ACTION_SELECTION_MAX_ATTEMPTS
-    assert len(runnable.calls) == 2
     assert exc_info.value.__cause__ is errors[-1]
+
+
+def test_selector_recovers_on_final_bounded_attempt() -> None:
+    expected_action = local_complete_action()
+    runnable = SequencedStructuredRunnable(
+        [
+            make_parser_failure(),
+            make_parser_failure(),
+            expected_action,
+        ]
+    )
+    selector = LLMActionSelector(FakeModel(runnable))
+
+    action = asyncio.run(selector.select_action(create_context()))
+
+    assert action == expected_action
+    assert len(runnable.calls) == ACTION_SELECTION_MAX_ATTEMPTS
 
 
 def test_selector_fails_after_bounded_schema_failures() -> None:
@@ -348,6 +398,7 @@ def test_selector_fails_after_bounded_schema_failures() -> None:
         [
             dict(invalid_payload),
             dict(invalid_payload),
+            dict(invalid_payload),
         ],
     )
     selector = LLMActionSelector(FakeModel(runnable))
@@ -358,7 +409,7 @@ def test_selector_fails_after_bounded_schema_failures() -> None:
     ) as exc_info:
         asyncio.run(selector.select_action(create_context()))
 
-    assert len(runnable.calls) == 2
+    assert len(runnable.calls) == ACTION_SELECTION_MAX_ATTEMPTS
     assert isinstance(exc_info.value.__cause__, ValidationError)
 
 
@@ -397,6 +448,8 @@ def test_selector_prompt_states_source_url_rules() -> None:
     assert (
         "Only report source URLs present in evidence" in ACTION_SELECTOR_SYSTEM_PROMPT
     )
+    assert str(MAX_COMPLETION_SUMMARY_CHARS) in ACTION_SELECTOR_SYSTEM_PROMPT
+    assert "summary field MUST be concise" in ACTION_SELECTOR_SYSTEM_PROMPT
 
 
 def test_corrective_message_is_static_and_schema_focused() -> None:
@@ -404,6 +457,8 @@ def test_corrective_message_is_static_and_schema_focused() -> None:
     assert "valid HTTP/HTTPS URLs" in ACTION_FORMAT_CORRECTION_MESSAGE
     assert "sources=[]" in ACTION_FORMAT_CORRECTION_MESSAGE
     assert "Do not change or invent facts" in ACTION_FORMAT_CORRECTION_MESSAGE
+    assert str(MAX_COMPLETION_SUMMARY_CHARS) in ACTION_FORMAT_CORRECTION_MESSAGE
+    assert "summary MUST be no longer" in ACTION_FORMAT_CORRECTION_MESSAGE
 
 
 def test_selector_builds_messages_with_untrusted_context() -> None:
@@ -473,6 +528,7 @@ def test_selector_builds_messages_with_untrusted_context() -> None:
     assert "</action_context>" in human_content
     assert malicious_instruction in human_content
     assert '"remaining_step_tool_calls": 5' in human_content
+    assert '"remaining_allocated_step_tool_calls": 5' in human_content
     assert '"action_type": "tool_call"' in human_content
 
     assert "Never infer file contents from a filename or path" in system_content

@@ -3,9 +3,11 @@ from pydantic import ValidationError
 
 from mini_deerflow.actions import ToolCallAction, ToolObservation
 from mini_deerflow.evidence import (
+    AnswerClaim,
     EvidenceProvenance,
     EvidenceRecord,
     StepFinding,
+    UserFacingAnswer,
     _answer_points,
     canonicalize_url,
     extract_evidence_records,
@@ -71,6 +73,61 @@ def test_successful_search_output_becomes_traceable_evidence() -> None:
         total_tool_call_number=4,
         observation_index=4,
     )
+
+
+def test_successful_wiki_search_output_becomes_traceable_evidence() -> None:
+    records = extract_evidence_records(
+        observation(
+            "wiki_search",
+            ToolResult.ok(
+                {
+                    "query": "Lionel Messi",
+                    "language": "en",
+                    "results": [
+                        {
+                            "title": "Lionel Messi",
+                            "url": "https://en.wikipedia.org/wiki/Lionel_Messi",
+                            "snippet": "Argentine footballer",
+                        }
+                    ],
+                    "count": 1,
+                }
+            ),
+            step_number=2,
+            call_number=5,
+        )
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.source_tool == "wiki_search"
+    assert record.canonical_url == "https://en.wikipedia.org/wiki/Lionel_Messi"
+    assert record.excerpt == "Argentine footballer"
+    assert record.provenance.tool_name == "wiki_search"
+
+
+def test_successful_wiki_lookup_output_becomes_traceable_evidence() -> None:
+    records = extract_evidence_records(
+        observation(
+            "wiki_lookup",
+            ToolResult.ok(
+                {
+                    "title": "Lionel Messi",
+                    "url": "https://vi.wikipedia.org/wiki/Lionel_Messi",
+                    "content": "Lionel Messi là một cầu thủ bóng đá người Argentina.",
+                }
+            ),
+            step_number=3,
+            call_number=6,
+        )
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.source_tool == "wiki_lookup"
+    assert record.canonical_url == "https://vi.wikipedia.org/wiki/Lionel_Messi"
+    assert "Argentina" in record.excerpt
+    assert record.provenance.tool_name == "wiki_lookup"
 
 
 def test_failed_or_non_web_tool_output_does_not_become_evidence() -> None:
@@ -293,7 +350,7 @@ def test_user_answer_is_distinct_from_internal_research_report() -> None:
     assert "Review cycle 2" not in answer
     assert "hidden execution note" not in answer
     assert "## Kết luận" in answer
-    assert "## Sources" in answer
+    assert "## Nguồn" in answer
     assert "Verified findings" not in answer
     assert "giới hạn bằng chứng chưa được giải quyết" not in answer
     assert "Một số lần thu thập đã lỗi hoặc bị chặn" not in answer
@@ -337,6 +394,35 @@ def test_user_answer_splits_long_finding_into_short_cited_points() -> None:
     assert "It lists a role relevant to the request. [1]" in answer
     assert "It also includes a public location. [1]" in answer
     assert "The final detail is separated for easier reading. [1]" in answer
+
+
+def test_user_answer_does_not_spam_multiple_citations_across_split_sentences() -> None:
+    evidence = [
+        EvidenceRecord(
+            url=f"https://example.com/source-{number}",
+            source_tool="web_fetch",
+            title=f"Source {number}",
+            excerpt="Observed content",
+            provenance=EvidenceProvenance(
+                tool_name="web_fetch",
+                step_number=1,
+                step_tool_call_number=number,
+                total_tool_call_number=number,
+                observation_index=number,
+            ),
+        )
+        for number in (1, 2)
+    ]
+    finding = StepFinding(
+        step_number=1,
+        summary="First supported statement. Second supported statement.",
+        citations=[record.canonical_url for record in evidence],
+    )
+
+    answer = render_user_answer(findings=[finding], evidence=evidence, language="en")
+
+    assert answer.count("[1][2]") == 1
+    assert "First supported statement. Second supported statement. [1][2]" in answer
 
 
 def test_user_answer_filters_execution_logs_and_merges_duplicate_citations() -> None:
@@ -516,6 +602,52 @@ def test_user_answer_removes_malformed_remote_image_syntax() -> None:
     assert "pixel" in answer
     assert "!pixel" not in answer
     assert "tracker.invalid" not in answer
+
+
+def test_english_partial_fallback_does_not_mix_languages() -> None:
+    answer = render_user_answer(
+        findings=[],
+        evidence=[],
+        has_collection_failures=True,
+        language="en",
+        completion_status="partial",
+    )
+
+    assert "Partial answer" in answer
+    assert "Not enough public evidence" in answer
+    assert "Không thể thu thập" not in answer
+
+
+def test_structured_answer_renders_model_prose_as_inert_markdown_text() -> None:
+    answer = UserFacingAnswer(
+        language="en",
+        summary=[
+            AnswerClaim(
+                text=(
+                    "[click](javascript:alert(1)) <script>alert(2)</script> "
+                    "![pixel](data:text/html,boom)"
+                )
+            )
+        ],
+        limitations=[
+            "[run](javascript:alert(3)) <img src=x> ![data](data:text/html,boom)"
+        ],
+    )
+
+    markdown = render_user_answer(evidence=[], answer=answer)
+
+    assert "[click](" not in markdown
+    assert "[run](" not in markdown
+    assert "![pixel](" not in markdown
+    assert "![data](" not in markdown
+    assert "<script>" not in markdown
+    assert "<img src=x>" not in markdown
+    assert "\\<img src=x\\>" in markdown
+
+
+def test_public_answer_limitations_are_bounded() -> None:
+    with pytest.raises(ValidationError, match="at most 1000 characters"):
+        UserFacingAnswer(language="en", limitations=["x" * 1_001])
 
 
 def test_report_renders_review_conclusions_and_cycle_counts() -> None:

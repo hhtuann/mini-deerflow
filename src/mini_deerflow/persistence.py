@@ -31,7 +31,15 @@ from mini_deerflow.delegation import (
     FanInSummary,
     ScopedResearchTask,
 )
-from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
+from mini_deerflow.evidence import (
+    AnswerClaim,
+    ComparisonRow,
+    ComparisonTable,
+    EvidenceProvenance,
+    EvidenceRecord,
+    StepFinding,
+    UserFacingAnswer,
+)
 from mini_deerflow.review import ReplanRecord, ReviewFinding, ReviewVerdict
 from mini_deerflow.schemas import Plan
 
@@ -46,6 +54,10 @@ _ALLOWED_CHECKPOINT_TYPES = (
     EvidenceProvenance,
     EvidenceRecord,
     StepFinding,
+    AnswerClaim,
+    ComparisonRow,
+    ComparisonTable,
+    UserFacingAnswer,
     ReviewVerdict,
     ReviewFinding,
     ReplanRecord,

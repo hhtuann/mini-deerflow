@@ -19,6 +19,11 @@ from mini_deerflow.actions import ToolObservation
 MAX_EVIDENCE_RECORDS = 50
 MAX_EVIDENCE_EXCERPT_CHARS = 20_000
 
+AnswerLanguage = Literal["vi", "en"]
+AnswerCompletionStatus = Literal["complete", "partial"]
+RunCompletionStatus = Literal["running", "complete", "partial"]
+EvidenceToolName = Literal["web_search", "web_fetch", "wiki_search", "wiki_lookup"]
+
 EvidenceText = Annotated[
     str,
     StringConstraints(
@@ -26,6 +31,10 @@ EvidenceText = Annotated[
         min_length=1,
         max_length=MAX_EVIDENCE_EXCERPT_CHARS,
     ),
+]
+PublicAnswerText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=1_000),
 ]
 
 _HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
@@ -62,7 +71,8 @@ _INTERNAL_EXECUTION_PATTERN = re.compile(
     r"(?:failed\s+collection|url\s+(?:verified|verification|omitted)|"
     r"unverified\s+url\s+omitted|observations?|tool\s*(?:calls?|execution)|"
     r"review\s*cycles?|workflow\s*step|agent\s*step|agent\s*trace|"
-    r"execution\s*trace|search\s*(?:query|snippet)|provenance)\b|"
+    r"execution\s*trace|search\s*(?:query|snippet)|provenance|"
+    r"step\s+closed|tool\s+budget\s+exhausted)\b|"
     r"ghi\s+ch\u00fa\s+cho\s+b\u01b0\u1edbc\s+sau|"
     r"(?:completed|finished)\s+(?:research\s+)?step\b|"
     r"(?:b\u01b0\u1edbc\s*\d+\s+ho\u00e0n\s+t\u1ea5t|\u0111\u00e3\s+tr\u00edch\s+xu\u1ea5t\s+\u0111\u1ea7y\s+\u0111\u1ee7|"
@@ -138,7 +148,7 @@ class EvidenceModel(BaseModel):
 
 
 class EvidenceProvenance(EvidenceModel):
-    tool_name: Literal["web_search", "web_fetch"]
+    tool_name: EvidenceToolName
     step_number: int = Field(ge=1, le=7)
     step_tool_call_number: int = Field(ge=1)
     total_tool_call_number: int = Field(ge=1)
@@ -173,7 +183,7 @@ class EvidenceRecord(EvidenceModel):
     """One citable web result derived from a successful tool observation."""
 
     url: str
-    source_tool: Literal["web_search", "web_fetch"]
+    source_tool: EvidenceToolName
     title: str | None = Field(default=None, max_length=500)
     excerpt: EvidenceText
     status: Literal["success"] = "success"
@@ -233,13 +243,42 @@ class AnswerClaim(EvidenceModel):
         return [canonicalize_url(citation) for citation in value]
 
 
+class ComparisonRow(EvidenceModel):
+    """One evidence-backed row in a user-facing comparison table."""
+
+    criterion: str = Field(min_length=1, max_length=200)
+    left: str = Field(min_length=1, max_length=1_000)
+    right: str = Field(min_length=1, max_length=1_000)
+    assessment: str | None = Field(default=None, max_length=1_000)
+    citations: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def canonicalize_row_citations(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            raise TypeError("citations must be a list")
+
+        return [canonicalize_url(citation) for citation in value]
+
+
+class ComparisonTable(EvidenceModel):
+    """A comparison table emitted only when at least two criteria are supported."""
+
+    left_subject: str = Field(min_length=1, max_length=200)
+    right_subject: str = Field(min_length=1, max_length=200)
+    rows: list[ComparisonRow] = Field(min_length=2, max_length=10)
+
+
 class UserFacingAnswer(EvidenceModel):
     """Structured public response, kept separate from the execution trace."""
 
+    language: AnswerLanguage = "vi"
+    completion_status: AnswerCompletionStatus = "complete"
     summary: list[AnswerClaim] = Field(default_factory=list, max_length=5)
     evidence: list[AnswerClaim] = Field(default_factory=list, max_length=12)
     discrepancies: list[AnswerClaim] = Field(default_factory=list, max_length=6)
-    limitations: list[str] = Field(default_factory=list, max_length=6)
+    limitations: list[PublicAnswerText] = Field(default_factory=list, max_length=6)
+    comparison_table: ComparisonTable | None = None
     sources: list[str] = Field(default_factory=list, max_length=MAX_EVIDENCE_RECORDS)
 
 
@@ -254,8 +293,9 @@ def extract_evidence_records(
     ):
         return []
 
-    if observation.action.tool_name == "web_search":
-        provenance = _provenance_for(observation, "web_search")
+    if observation.action.tool_name in {"web_search", "wiki_search"}:
+        source_tool = observation.action.tool_name
+        provenance = _provenance_for(observation, source_tool)
         raw_results = observation.result.data.get("results")
 
         if not isinstance(raw_results, list):
@@ -280,7 +320,7 @@ def extract_evidence_records(
                 records.append(
                     EvidenceRecord(
                         url=url,
-                        source_tool="web_search",
+                        source_tool=source_tool,
                         title=title,
                         excerpt=excerpt[:MAX_EVIDENCE_EXCERPT_CHARS],
                         provenance=provenance,
@@ -291,8 +331,9 @@ def extract_evidence_records(
 
         return records
 
-    if observation.action.tool_name == "web_fetch":
-        provenance = _provenance_for(observation, "web_fetch")
+    if observation.action.tool_name in {"web_fetch", "wiki_lookup"}:
+        source_tool = observation.action.tool_name
+        provenance = _provenance_for(observation, source_tool)
         url = observation.result.data.get("url")
         content = observation.result.data.get("content")
         title = observation.result.data.get("title")
@@ -311,7 +352,7 @@ def extract_evidence_records(
             return [
                 EvidenceRecord(
                     url=url,
-                    source_tool="web_fetch",
+                    source_tool=source_tool,
                     title=title,
                     excerpt=content[:MAX_EVIDENCE_EXCERPT_CHARS],
                     provenance=provenance,
@@ -325,7 +366,7 @@ def extract_evidence_records(
 
 def _provenance_for(
     observation: ToolObservation,
-    tool_name: Literal["web_search", "web_fetch"],
+    tool_name: EvidenceToolName,
 ) -> EvidenceProvenance:
     return EvidenceProvenance(
         tool_name=tool_name,
@@ -514,7 +555,9 @@ def contains_execution_metadata(value: str) -> bool:
 def has_execution_metadata(value: str) -> bool:
     """Detect mixed legacy answers that need trace points removed before display."""
 
-    return any(_is_internal_execution_text(point) for point in _legacy_answer_points(value))
+    return any(
+        _is_internal_execution_text(point) for point in _legacy_answer_points(value)
+    )
 
 
 def legacy_public_answer_points(value: str) -> list[str]:
@@ -610,15 +653,19 @@ def _claims_from_finding(
     def collect(value: str, target: list[AnswerClaim]) -> None:
         if not citations:
             return
-        for point in _answer_points(value):
+        points = _answer_points(value) if len(citations) == 1 else [value]
+        for point in points:
             if _is_internal_execution_text(point):
                 continue
             text = _public_markdown_text(point)
             if text:
                 target.append(AnswerClaim(text=text, citations=citations))
 
-    for fragment in conclusion_fragments:
-        collect(fragment, summary)
+    if len(citations) > 1 and conclusion_fragments:
+        collect(" ".join(conclusion_fragments), summary)
+    else:
+        for fragment in conclusion_fragments:
+            collect(fragment, summary)
     if not conclusion_fragments:
         collect(raw, evidence)
 
@@ -631,6 +678,8 @@ def build_user_facing_answer(
     evidence: list[EvidenceRecord],
     review_notes: Sequence[str] = (),
     has_collection_failures: bool = False,
+    language: AnswerLanguage = "vi",
+    completion_status: AnswerCompletionStatus = "complete",
 ) -> UserFacingAnswer:
     """Normalize research state into a concise answer and a separate trace-safe view.
 
@@ -667,9 +716,7 @@ def build_user_facing_answer(
     discrepancies = [
         claim for claim in supporting if _DISCREPANCY_PATTERN.search(claim.text)
     ]
-    evidence_claims = [
-        claim for claim in supporting if claim not in discrepancies
-    ]
+    evidence_claims = [claim for claim in supporting if claim not in discrepancies]
     sources = list(
         dict.fromkeys(
             citation
@@ -696,12 +743,26 @@ def build_user_facing_answer(
         if note.strip() and not _is_internal_execution_text(note)
     ]
     limitations = list(dict.fromkeys(limitations))
-    if has_collection_failures and not limitations and not summary and not evidence_claims:
-        limitations.append(
-            "Không thể thu thập đủ bằng chứng công khai để trả lời chắc chắn câu hỏi này."
+    if (
+        has_collection_failures
+        and not limitations
+        and not summary
+        and not evidence_claims
+    ):
+        fallback_limitation = (
+            "Không thể thu thập đủ bằng chứng công khai để trả lời chắc chắn "
+            "câu hỏi này."
+            if language == "vi"
+            else (
+                "Not enough public evidence could be collected to answer this "
+                "question confidently."
+            )
         )
+        limitations.append(fallback_limitation)
 
     return UserFacingAnswer(
+        language=language,
+        completion_status=completion_status,
         summary=summary[:5],
         evidence=evidence_claims[:12],
         discrepancies=discrepancies[:6],
@@ -716,63 +777,131 @@ def _render_claim(claim: AnswerClaim, citation_numbers: dict[str, int]) -> str:
         for url in claim.citations
         if url in citation_numbers
     )
-    return f"{claim.text} {markers}".strip()
+    return f"{_public_markdown_text(claim.text)} {markers}".strip()
+
+
+def _render_table_cell(value: str) -> str:
+    """Escape untrusted prose for one Markdown table cell."""
+
+    return _public_markdown_text(value).replace("|", "\\|").replace("\n", " ")
 
 
 def render_user_answer(
     *,
-    findings: list[StepFinding],
+    findings: list[StepFinding] | None = None,
     evidence: list[EvidenceRecord],
     review_notes: Sequence[str] = (),
     has_collection_failures: bool = False,
+    answer: UserFacingAnswer | None = None,
+    language: AnswerLanguage = "vi",
+    completion_status: AnswerCompletionStatus = "complete",
 ) -> str:
     """Render the structured public response as backward-compatible Markdown."""
 
-    answer = build_user_facing_answer(
-        findings=findings,
-        evidence=evidence,
-        review_notes=review_notes,
-        has_collection_failures=has_collection_failures,
-    )
+    if answer is None:
+        answer = build_user_facing_answer(
+            findings=findings or [],
+            evidence=evidence,
+            review_notes=review_notes,
+            has_collection_failures=has_collection_failures,
+            language=language,
+            completion_status=completion_status,
+        )
     evidence_by_url = {
         record.canonical_url: record
         for record in evidence
         if record.status == "success"
     }
-    citation_numbers = {
-        url: index for index, url in enumerate(answer.sources, start=1)
-    }
-    lines = ["# Kết quả", "", "## Kết luận", ""]
+    citation_numbers = {url: index for index, url in enumerate(answer.sources, start=1)}
+    labels = (
+        {
+            "title": "Kết quả",
+            "summary": "Kết luận",
+            "evidence": "Bằng chứng & đối chiếu",
+            "comparison": "Bảng so sánh",
+            "criterion": "Tiêu chí",
+            "assessment": "Nhận định",
+            "discrepancies": "Mâu thuẫn / khác biệt giữa các nguồn",
+            "limitations": "Độ tin cậy / hạn chế",
+            "sources": "Nguồn",
+            "empty": "Chưa có đủ bằng chứng công khai để đưa ra kết luận trực tiếp cho câu hỏi này.",
+            "partial": "Câu trả lời một phần: agent đã dừng vì giới hạn thực thi và chỉ tổng hợp từ bằng chứng đã xác thực.",
+        }
+        if answer.language == "vi"
+        else {
+            "title": "Result",
+            "summary": "Conclusion",
+            "evidence": "Evidence & cross-checks",
+            "comparison": "Comparison",
+            "criterion": "Criterion",
+            "assessment": "Assessment",
+            "discrepancies": "Source conflicts / differences",
+            "limitations": "Confidence / limitations",
+            "sources": "Sources",
+            "empty": "There is not enough public evidence for a direct conclusion.",
+            "partial": "Partial answer: the agent stopped at an execution limit and synthesized only validated evidence.",
+        }
+    )
+    lines = [f"# {labels['title']}", ""]
+
+    if answer.completion_status == "partial":
+        lines.extend([f"> {labels['partial']}", ""])
+
+    lines.extend([f"## {labels['summary']}", ""])
 
     if answer.summary:
         lines.extend(_render_claim(claim, citation_numbers) for claim in answer.summary)
     else:
+        lines.append(labels["empty"])
+
+    if answer.comparison_table is not None:
+        table = answer.comparison_table
+        lines.extend(["", f"## {labels['comparison']}", ""])
         lines.append(
-            "Chưa có đủ bằng chứng công khai để đưa ra kết luận trực tiếp cho câu hỏi này."
+            f"| {labels['criterion']} | {_render_table_cell(table.left_subject)} | "
+            f"{_render_table_cell(table.right_subject)} | {labels['assessment']} |"
         )
+        lines.append("|---|---|---|---|")
+        for row in table.rows:
+            markers = "".join(
+                f"[{citation_numbers[url]}]"
+                for url in row.citations
+                if url in citation_numbers
+            )
+            assessment = _render_table_cell(row.assessment or "")
+            if markers:
+                assessment = f"{assessment} {markers}".strip()
+            lines.append(
+                f"| {_render_table_cell(row.criterion)} | {_render_table_cell(row.left)} | "
+                f"{_render_table_cell(row.right)} | {assessment} |"
+            )
 
     if answer.evidence:
-        lines.extend(["", "## Bằng chứng & đối chiếu", ""])
+        lines.extend(["", f"## {labels['evidence']}", ""])
         lines.extend(
-            f"- {_render_claim(claim, citation_numbers)}"
-            for claim in answer.evidence
+            f"- {_render_claim(claim, citation_numbers)}" for claim in answer.evidence
         )
 
     if answer.discrepancies:
-        lines.extend(["", "## Khác biệt giữa các nguồn", ""])
+        lines.extend(["", f"## {labels['discrepancies']}", ""])
         lines.extend(
             f"- {_render_claim(claim, citation_numbers)}"
             for claim in answer.discrepancies
         )
 
     if answer.limitations:
-        lines.extend(["", "## Độ tin cậy / hạn chế", ""])
-        lines.extend(f"> {limitation}" for limitation in answer.limitations)
+        lines.extend(["", f"## {labels['limitations']}", ""])
+        lines.extend(
+            f"> {_public_markdown_text(limitation)}"
+            for limitation in answer.limitations
+        )
 
     if answer.sources:
-        lines.extend(["", "## Sources", ""])
+        lines.extend(["", f"## {labels['sources']}", ""])
         for url in answer.sources:
-            record = evidence_by_url[url]
+            record = evidence_by_url.get(url)
+            if record is None:
+                continue
             title = _public_markdown_text(record.title or "Public source")
             lines.append(f"{citation_numbers[url]}. [{title}]({url})")
 

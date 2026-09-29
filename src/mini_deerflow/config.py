@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,28 +33,28 @@ class Settings(BaseSettings):
     )
 
     request_timeout: float = Field(
-        default=120.0,
+        default=300.0,
         gt=0.0,
     )
 
     max_retries: int = Field(
-        default=2,
+        default=1,
         ge=0,
         le=5,
     )
 
-    jina_api_key: SecretStr | None = None
-
-    web_request_timeout: float = Field(
-        default=20.0,
+    wiki_request_timeout: float = Field(
+        default=15.0,
         gt=0.0,
         le=120.0,
     )
 
-    web_max_response_bytes: int = Field(
-        default=2_000_000,
-        ge=1_024,
-        le=10_000_000,
-    )
-
     structured_output_mode: Literal["native", "prompt_json"] = "prompt_json"
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, value: SecretStr) -> SecretStr:
+        normalized = value.get_secret_value().strip()
+        if not normalized:
+            raise ValueError("api_key must not be blank")
+        return SecretStr(normalized)

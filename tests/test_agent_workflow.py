@@ -15,6 +15,7 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.decision import ActionContext
+from mini_deerflow.evidence import UserFacingAnswer
 from mini_deerflow.llm_selector import LLMActionSelector
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.state import (
@@ -113,6 +114,12 @@ class QueuedActionSelector:
             raise AssertionError("QueuedActionSelector has no action left")
 
         return self._actions.popleft()
+
+
+class FailingAnswerSynthesizer:
+    async def synthesize_answer(self, context: object) -> UserFacingAnswer:
+        del context
+        raise RuntimeError("simulated synthesis provider outage")
 
 
 def create_step(number: int) -> PlanStep:
@@ -360,6 +367,8 @@ def test_per_step_budget_stops_second_tool_execution() -> None:
                 tool_name="echo",
                 arguments={"text": "second"},
             ),
+            complete_action(2),
+            complete_action(3),
         ]
     )
 
@@ -371,15 +380,20 @@ def test_per_step_budget_stops_second_tool_execution() -> None:
     )
 
     assert echo_tool.call_count == 1
-    assert result["current_step"] == 0
+    assert result["current_step"] == 3
     assert result["total_tool_calls"] == 1
     assert len(result["tool_observations"]) == 1
     assert result["pending_action"] is None
     assert len(result["errors"]) == 1
-    assert "per-step limit" in result["errors"][0]
-    assert "No plan step was completed" in result["research_report"]
+    assert "allocated step quota" in result["errors"][0]
+    assert result["completion_status"] == "partial"
+    assert result["notes"] == [
+        "Step 1 closed after its allocated tool-call quota was exhausted.",
+        "Completed research step number 2.",
+        "Completed research step number 3.",
+    ]
 
-    assert len(selector.contexts) == 2
+    assert len(selector.contexts) == 4
     assert selector.contexts[1].remaining_step_tool_calls == 0
 
 
@@ -414,6 +428,10 @@ def test_total_budget_stops_tool_in_next_step() -> None:
     assert result["notes"] == ["Completed research step number 1."]
     assert len(result["errors"]) == 1
     assert "total-run limit" in result["errors"][0]
+    assert result["completion_status"] == "partial"
+    assert result["finalization_reason"] == "total_tool_budget_exhausted"
+    assert result["output_language"] == "en"
+    assert "Partial answer" in result["final_answer"]
 
     assert selector.contexts[-1].remaining_total_tool_calls == 0
 
@@ -677,3 +695,29 @@ def test_build_agent_workflow_attaches_injected_checkpointer() -> None:
     )
 
     assert graph.checkpointer is checkpointer
+
+
+def test_synthesis_provider_failure_uses_localized_safe_fallback() -> None:
+    selector = QueuedActionSelector(
+        [complete_action(1), complete_action(2), complete_action(3)]
+    )
+    graph = build_agent_workflow(
+        planner,
+        selector,
+        ToolRegistry(),
+        answer_synthesizer=FailingAnswerSynthesizer(),
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            create_initial_state("Messi và Ronaldo ai mạnh hơn?"),
+            config={"recursion_limit": 100},
+        )
+    )
+
+    public_answer = result["public_answer"]
+    assert isinstance(public_answer, UserFacingAnswer)
+    assert public_answer.language == "vi"
+    assert "dịch vụ mô hình" in result["final_answer"]
+    assert "Completed research step" not in result["final_answer"]
+    assert "Structured answer synthesis was unavailable" in result["research_report"]

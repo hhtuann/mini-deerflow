@@ -189,13 +189,13 @@ async def run_and_resume(
             action_registry=ToolRegistry([delegation_tool]),
             checkpointer=checkpointer,
             max_tool_calls_per_step=5,
-            max_total_tool_calls=5,
+            max_total_tool_calls=7,
         )
         runtime = AgentRuntime(
             graph=graph,
             limits=RuntimeLimits(
                 max_tool_calls_per_step=5,
-                max_total_tool_calls=5,
+                max_total_tool_calls=7,
             ),
             checkpointer=checkpointer,
         )
@@ -231,3 +231,57 @@ def test_workflow_fan_in_preserves_boundaries_and_resume_skips_completed_work(
     assert first["artifact_path"] is None
     assert first["pending_action"] is None
     assert first["errors"]
+
+
+def test_delegation_wave_cannot_consume_budget_allocated_to_later_steps() -> None:
+    researcher = CheckpointFakeResearcher()
+    delegation_tool = DelegateResearchTool(
+        researcher,
+        ToolRegistry([NeverCalledWebTool()]),
+        max_concurrency=2,
+    )
+    graph = build_agent_workflow(
+        planner,
+        QueuedSelector(),
+        ToolRegistry([delegation_tool]),
+        action_registry=ToolRegistry([delegation_tool]),
+        max_tool_calls_per_step=5,
+        max_total_tool_calls=5,
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            {
+                "goal": "Compare alpha and beta",
+                "messages": [],
+                "plan": None,
+                "current_step": 0,
+                "observations": [],
+                "tool_observations": [],
+                "findings": [],
+                "evidence": [],
+                "sources": [],
+                "notes": [],
+                "errors": [],
+                "pending_action": None,
+                "tool_calls_in_current_step": 0,
+                "total_tool_calls": 0,
+                "review_verdicts": [],
+                "pending_review_verdict": None,
+                "replans": [],
+                "delegations": [],
+                "final_answer": None,
+                "research_report": None,
+                "artifact_path": None,
+            },
+            config={"recursion_limit": 100},
+        )
+    )
+
+    assert researcher.branch_calls == []
+    assert result["total_tool_calls"] == 1
+    assert result["delegations"] == []
+    assert (
+        result["tool_observations"][0].result.metadata["error_type"]
+        == "DelegationBudgetExceededError"
+    )

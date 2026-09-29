@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import cast
 
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
 
 from mini_deerflow.actions import (
     ActionDecision,
@@ -19,6 +18,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.answer_synthesis import AnswerSynthesisDraft, DraftClaim
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.conversation import ConversationRecord, SQLiteConversationRepository
@@ -41,7 +41,9 @@ from mini_deerflow.runtime import (
     RuntimeLimits,
     open_default_agent_runtime,
 )
+from mini_deerflow.sandbox import SessionSandboxResolver
 from mini_deerflow.schemas import Plan, PlanStep
+from mini_deerflow.structured_output import StructuredChatModel
 from mini_deerflow.tools import ToolResult
 from mini_deerflow.tracing import ExecutionTrace, ExecutionTracer, TraceSink
 from mini_deerflow.web import (
@@ -69,7 +71,7 @@ _ARTIFACT_PATH = "reports/day-15-demo.md"
 
 DEMO_LIMITS = RuntimeLimits(
     max_tool_calls_per_step=4,
-    max_total_tool_calls=8,
+    max_total_tool_calls=10,
     max_replan_cycles=1,
     recursion_limit=120,
     max_delegation_concurrency=2,
@@ -106,7 +108,13 @@ class _ScenarioRunnable:
 class _ScenarioModel:
     """Scripted structured-output model; it performs no transport calls."""
 
-    _SUPPORTED_SCHEMAS = (Plan, ActionDecision, ReviewDecision, ReplacementWork)
+    _SUPPORTED_SCHEMAS = (
+        Plan,
+        ActionDecision,
+        ReviewDecision,
+        ReplacementWork,
+        AnswerSynthesisDraft,
+    )
 
     def __init__(
         self,
@@ -152,7 +160,47 @@ class _ScenarioModel:
             return self._action_response(messages)
         if schema is ReviewDecision:
             return self._review_response(messages)
+        if schema is AnswerSynthesisDraft:
+            return self._answer_response(messages)
         raise AssertionError("offline scenario received an unsupported model request")
+
+    def _answer_response(self, messages: object) -> AnswerSynthesisDraft:
+        context = _tagged_message_payload(
+            messages,
+            opening="<answer_context>\n",
+            closing="\n</answer_context>",
+        )
+        language = context.get("language")
+        evidence = context.get("evidence")
+        if language not in {"vi", "en"} or not isinstance(evidence, list):
+            raise TypeError("offline answer context has an invalid shape")
+        evidence_indices = list(range(1, len(evidence) + 1))
+        if not evidence_indices:
+            return AnswerSynthesisDraft(
+                language=language,
+                limitations=[
+                    (
+                        "Chưa thu thập được bằng chứng công khai phù hợp."
+                        if language == "vi"
+                        else "No suitable public evidence was collected."
+                    )
+                ],
+            )
+        return AnswerSynthesisDraft(
+            language=language,
+            summary=[
+                DraftClaim(
+                    text=(
+                        "Kết quả được tổng hợp từ bằng chứng công khai đã xác thực."
+                        if language == "vi"
+                        else (
+                            "The result is synthesized from validated public evidence."
+                        )
+                    ),
+                    evidence_indices=evidence_indices,
+                )
+            ],
+        )
 
     def _action_response(self, messages: object) -> object:
         context = _tagged_message_payload(
@@ -526,6 +574,7 @@ class OfflineDemoBackend:
         self._storage_root = Path(storage_root).resolve(strict=False)
         self._checkpoint_path = self._storage_root / "checkpoints.sqlite"
         self._workspaces_root = self._storage_root / "workspaces"
+        self._sandbox_resolver = SessionSandboxResolver(self._workspaces_root)
         self._resources: dict[tuple[str, str], _ScenarioResources] = {}
         self._traces: defaultdict[tuple[str, str], list[ExecutionTrace]] = defaultdict(
             list
@@ -534,14 +583,13 @@ class OfflineDemoBackend:
         self._interrupt_after_delegation = interrupt_after_delegation
         self._settings = Settings(
             api_key="offline-demo-placeholder",
-            base_url="https://offline.invalid/v1",
-            jina_api_key=None,
+            base_url="https://api.example.invalid/v1",
             model_name="offline-scripted-model",
             temperature=0.0,
             request_timeout=1.0,
             max_retries=0,
-            web_request_timeout=1.0,
-            web_max_response_bytes=1_024,
+            wiki_request_timeout=1.0,
+            structured_output_mode="native",
             _env_file=None,
         )
 
@@ -628,13 +676,24 @@ class OfflineDemoBackend:
         return await repository.list_conversations()
 
     async def load_conversation(self, thread_id: str) -> ConversationSnapshot:
+        resources = _ScenarioResources.create(DEFAULT_DEMO_GOAL)
+
+        def model_factory(settings: Settings) -> StructuredChatModel:
+            if settings is not self._settings:
+                raise AssertionError("offline runtime received unexpected settings")
+            return cast(StructuredChatModel, resources.model)
+
         async with open_default_agent_runtime(
             self._settings,
-            self._workspaces_root / thread_id,
+            self._sandbox_resolver.resolve(thread_id),
             self._checkpoint_path,
             allow_write=True,
             limits=DEMO_LIMITS,
             context_budget=DEMO_CONTEXT_BUDGET,
+            model_factory=model_factory,
+            web_provider=resources.provider,
+            web_target_validator=PublicWebTargetValidator(resources.resolver),
+            researcher_subagent=resources.researcher,
             artifact_path=_ARTIFACT_PATH,
         ) as runtime:
             return await runtime.load_conversation(thread_id)
@@ -680,14 +739,14 @@ class OfflineDemoBackend:
             run_id_factory=lambda: run_id,
         )
 
-        def model_factory(settings: Settings) -> ChatOpenAI:
+        def model_factory(settings: Settings) -> StructuredChatModel:
             if settings is not self._settings:
                 raise AssertionError("offline runtime received unexpected settings")
-            return cast(ChatOpenAI, resources.model)
+            return cast(StructuredChatModel, resources.model)
 
         async with open_default_agent_runtime(
             self._settings,
-            self._workspaces_root / thread_id,
+            self._sandbox_resolver.resolve(thread_id),
             self._checkpoint_path,
             allow_write=True,
             limits=DEMO_LIMITS,

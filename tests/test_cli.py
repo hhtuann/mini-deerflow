@@ -11,6 +11,7 @@ from mini_deerflow.cli import (
     main,
     resume_research_agent,
     run_research_agent,
+    run_research_planner,
 )
 from mini_deerflow.config import Settings
 from mini_deerflow.persistence import (
@@ -22,6 +23,7 @@ from mini_deerflow.runtime import (
     AgentRuntime,
     RuntimeLimits,
 )
+from mini_deerflow.sandbox import SessionSandboxResolver
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.state import AgentState, create_initial_state
 from mini_deerflow.tracing import (
@@ -52,6 +54,34 @@ def make_final_state() -> AgentState:
     state["final_answer"] = "The bounded agent run completed."
 
     return state
+
+
+def test_run_research_planner_propagates_structured_output_mode() -> None:
+    goal = "Research planning in tool-using AI agents."
+    settings = Settings(
+        api_key="test-google-key",
+        structured_output_mode="prompt_json",
+        _env_file=None,
+    )
+    model = object()
+    expected_plan = make_plan()
+
+    with (
+        patch("mini_deerflow.cli.Settings", return_value=settings),
+        patch("mini_deerflow.cli.create_chat_model", return_value=model),
+        patch(
+            "mini_deerflow.cli.create_research_plan",
+            return_value=expected_plan,
+        ) as create_plan,
+    ):
+        actual = run_research_planner(goal)
+
+    assert actual is expected_plan
+    create_plan.assert_called_once_with(
+        model,
+        goal,
+        structured_output_mode="prompt_json",
+    )
 
 
 def test_main_plan_prints_plan_as_json(capsys) -> None:
@@ -151,6 +181,34 @@ def test_main_run_prints_final_answer(
     )
     assert call.kwargs["checkpoint_path"] == tmp_path / "checkpoints.sqlite"
     assert call.kwargs["tracer"] is None
+
+
+def test_main_run_preserves_vietnamese_unicode(capsys, tmp_path: Path) -> None:
+    expected_state = make_final_state()
+    expected_state["final_answer"] = "Messi và Ronaldo đều có thế mạnh riêng."
+
+    with patch(
+        "mini_deerflow.cli.run_research_agent",
+        new_callable=AsyncMock,
+        return_value=expected_state,
+    ):
+        exit_code = main(
+            [
+                "run",
+                "Messi và Ronaldo ai mạnh hơn?",
+                "--workspace",
+                str(tmp_path),
+                "--allow-write",
+                "--thread-id",
+                "unicode-cli-test",
+            ]
+        )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == "Messi và Ronaldo đều có thế mạnh riêng.\n"
+    assert captured.err == ""
 
 
 def test_main_run_can_emit_opt_in_redacted_json_trace(capsys) -> None:
@@ -298,7 +356,7 @@ def test_run_research_agent_builds_and_runs_runtime(
 
     open_runtime.assert_called_once_with(
         settings,
-        tmp_path,
+        SessionSandboxResolver(tmp_path).resolve(thread_id),
         checkpoint_path,
         allow_write=True,
         limits=limits,
@@ -623,7 +681,7 @@ def test_resume_research_agent_builds_and_resumes_runtime(
     settings_class.assert_called_once_with()
     open_runtime.assert_called_once_with(
         settings,
-        tmp_path,
+        SessionSandboxResolver(tmp_path).resolve(thread_id),
         checkpoint_path,
         allow_write=True,
         limits=limits,

@@ -5,6 +5,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from mini_deerflow.actions import (
+    MAX_COMPLETION_SUMMARY_CHARS,
     ActionDecision,
     AgentAction,
     CompleteStepAction,
@@ -18,7 +19,7 @@ from mini_deerflow.structured_output import (
     create_structured_output_runnable,
 )
 
-ACTION_SELECTOR_SYSTEM_PROMPT = """
+ACTION_SELECTOR_SYSTEM_PROMPT = f"""
 You are the action-selection component of a bounded deep research agent.
 
 Select exactly one next action for the current plan step.
@@ -30,10 +31,14 @@ Valid action types:
 - complete_step: finish the current step with an evidence-based summary.
 
 For a tool call, use this exact shape:
-{"action_type": "tool_call", "tool_name": "...", "arguments": {}}
+{{"action_type": "tool_call", "tool_name": "...", "arguments": {{}}}}
 
 For step completion, use this exact shape:
-{"action_type": "complete_step", "summary": "...", "sources": []}
+{{"action_type": "complete_step", "summary": "...", "sources": []}}
+
+The complete_step.summary field MUST be concise and no longer than
+{MAX_COMPLETION_SUMMARY_CHARS} characters. Summarize only the evidence needed
+to close the current plan step; do not dump the full research context into it.
 
 Source rules:
 1. sources may contain only valid HTTP or HTTPS URLs.
@@ -59,18 +64,24 @@ Rules:
    and tool-call budget are available, call the tool instead of completing
    the step with an avoidable limitation.
 9. If a tool call failed, adapt using another valid action.
-10. If a tool-call budget is zero, do not request another tool call.
+10. If remaining_allocated_step_tool_calls or remaining_total_tool_calls is
+    zero, do not request another tool call. The allocated quota reserves the
+    global budget for later plan steps even when the hard per-step remainder
+    is larger.
 11. Complete a step only when its success criteria are supported by the
     available context. State a limitation only when no valid tool or no
     remaining budget can collect the missing evidence.
 12. Do not include chain-of-thought. Return only the structured decision.
 """.strip()
 
-ACTION_SELECTION_MAX_ATTEMPTS = 2
+ACTION_SELECTION_MAX_ATTEMPTS = 3
 
-ACTION_FORMAT_CORRECTION_MESSAGE = """
+ACTION_FORMAT_CORRECTION_MESSAGE = f"""
 The previous response did not match the required ActionDecision schema.
 Return exactly one valid structured action.
+For complete_step, summary MUST be no longer than
+{MAX_COMPLETION_SUMMARY_CHARS} characters. Compress the evidence into a concise
+step summary instead of repeating the full context.
 For complete_step, sources may contain only valid HTTP/HTTPS URLs.
 Every source must exactly match a URL in successful evidence records.
 For local-only evidence, describe the evidence in summary and return
@@ -81,6 +92,32 @@ Do not change or invent facts merely to satisfy the schema.
 
 class ActionSelectionError(RuntimeError):
     """Raised when model output cannot become a valid agent action."""
+
+
+def _format_action_validation_hint(
+    error: OutputParserException | ValidationError,
+) -> str:
+    """Describe schema failures without echoing model output or evidence."""
+
+    if isinstance(error, OutputParserException):
+        return (
+            "The previous response could not be parsed as the required "
+            "ActionDecision JSON object."
+        )
+
+    issues: list[str] = []
+    for issue in error.errors(
+        include_url=False,
+        include_input=False,
+    )[:4]:
+        location = ".".join(str(part) for part in issue.get("loc", ()))
+        issue_type = str(issue.get("type", "validation_error"))
+        issues.append(f"{location or '<root>'}: {issue_type}")
+
+    if not issues:
+        return "The previous response failed ActionDecision schema validation."
+
+    return "Schema issues: " + "; ".join(issues)
 
 
 @runtime_checkable
@@ -168,11 +205,18 @@ class LLMActionSelector:
         last_error: OutputParserException | ValidationError | None = None
 
         for attempt in range(1, ACTION_SELECTION_MAX_ATTEMPTS + 1):
+            correction_message = ACTION_FORMAT_CORRECTION_MESSAGE
+            if last_error is not None:
+                correction_message = (
+                    f"{correction_message}\n\n"
+                    "Previous response issue (schema-only; raw output omitted):\n"
+                    f"{_format_action_validation_hint(last_error)}"
+                )
             attempt_messages = (
                 [
                     *base_messages,
                     HumanMessage(
-                        content=ACTION_FORMAT_CORRECTION_MESSAGE,
+                        content=correction_message,
                     ),
                 ]
                 if attempt > 1

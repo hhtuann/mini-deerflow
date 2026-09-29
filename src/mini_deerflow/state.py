@@ -8,12 +8,16 @@ from mini_deerflow.actions import AgentAction, ToolObservation
 from mini_deerflow.conversation import ConversationContext
 from mini_deerflow.delegation import DelegationRecord
 from mini_deerflow.evidence import (
+    AnswerLanguage,
     EvidenceRecord,
+    RunCompletionStatus,
     StepFinding,
+    UserFacingAnswer,
     merge_citation_sources,
     merge_evidence_records,
 )
 from mini_deerflow.review import (
+    FinalizationReason,
     ReplanRecord,
     ReviewRoute,
     ReviewVerdict,
@@ -47,6 +51,10 @@ class AgentState(TypedDict):
     evidence: Annotated[list[EvidenceRecord], merge_evidence_records]
     sources: Annotated[list[str], merge_citation_sources]
     final_answer: str | None
+    public_answer: NotRequired[UserFacingAnswer | None]
+    output_language: NotRequired[AnswerLanguage]
+    completion_status: NotRequired[RunCompletionStatus]
+    finalization_reason: NotRequired[FinalizationReason | None]
     research_report: NotRequired[str | None]
     artifact_path: str | None
     errors: Annotated[list[str], add]
@@ -98,6 +106,9 @@ def create_initial_state(
         evidence=[],
         sources=[],
         final_answer=None,
+        public_answer=None,
+        completion_status="running",
+        finalization_reason=None,
         research_report=None,
         artifact_path=None,
         errors=[],
