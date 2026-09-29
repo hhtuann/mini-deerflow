@@ -27,3 +27,9 @@ dist/
 workspaces/
 artifacts/
 .mini-deerflow/
+
+# Local project documentation
+docs/
+
+# Local Claude/Codex-style agent permissions
+.claude/settings.local.json
