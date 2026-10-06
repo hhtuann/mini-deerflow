@@ -11,6 +11,7 @@ from mini_deerflow.actions import (
 from mini_deerflow.agent_workflow import build_agent_workflow
 from mini_deerflow.decision import ActionContext
 from mini_deerflow.delegation import (
+    BoundedResearcherSubagent,
     BranchFinding,
     BranchResult,
     DelegateResearchTool,
@@ -36,6 +37,106 @@ class NeverCalledWebTool:
 
     async def run(self, tool_input: ToolInput) -> ToolResult:
         raise AssertionError(f"Unexpected provider call: {tool_input}")
+
+
+class RecordingWebTool:
+    name = "web_search"
+    description = "Return deterministic branch-specific evidence and record real calls."
+    input_model = QueryInput
+    timeout_seconds = 1.0
+    idempotent = True
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def run(self, tool_input: ToolInput) -> ToolResult:
+        if not isinstance(tool_input, QueryInput):
+            raise TypeError("recording web tool requires QueryInput")
+        self.queries.append(tool_input.query)
+        branch_id = tool_input.query.removesuffix(" query")
+        return ToolResult.ok(
+            data={
+                "results": [
+                    {
+                        "url": f"https://example.com/{branch_id}",
+                        "title": f"Source {branch_id}",
+                        "snippet": f"Deterministic evidence for {branch_id}.",
+                    }
+                ]
+            }
+        )
+
+
+class DeterministicBranchSelector:
+    async def select_action(self, context: ActionContext) -> AgentAction:
+        branch_id = context.step.title.removeprefix("Delegated branch ")
+        source = f"https://example.com/{branch_id}"
+        if not context.observations:
+            return ToolCallAction(
+                action_type="tool_call",
+                tool_name="web_search",
+                arguments={"query": f"{branch_id} query"},
+            )
+        return CompleteStepAction(
+            action_type="complete_step",
+            summary=f"Supported finding for branch {branch_id}.",
+            sources=[source],
+        )
+
+
+class RealDelegationParentSelector:
+    def __init__(self) -> None:
+        self.actions: deque[AgentAction] = deque(
+            [
+                ToolCallAction(
+                    action_type="tool_call",
+                    tool_name="delegate_research",
+                    arguments={
+                        "delegation_id": "wave-real",
+                        "tasks": [
+                            {
+                                "branch_id": "beta",
+                                "objective": "Research beta independently.",
+                                "success_criteria": "Return one supported beta finding.",
+                                "tool_call_budget": 2,
+                                "delegation_depth": 1,
+                            },
+                            {
+                                "branch_id": "alpha",
+                                "objective": "Research alpha independently.",
+                                "success_criteria": "Return one supported alpha finding.",
+                                "tool_call_budget": 2,
+                                "delegation_depth": 1,
+                            },
+                        ],
+                    },
+                ),
+                CompleteStepAction(
+                    action_type="complete_step",
+                    summary="Parent completes from both delegated findings.",
+                    sources=[
+                        "https://example.com/alpha",
+                        "https://example.com/beta",
+                    ],
+                ),
+                CompleteStepAction(
+                    action_type="complete_step",
+                    summary="No additional work is required for step two.",
+                    sources=[],
+                ),
+                CompleteStepAction(
+                    action_type="complete_step",
+                    summary="No additional work is required for step three.",
+                    sources=[],
+                ),
+            ]
+        )
+
+    async def select_action(self, context: ActionContext) -> AgentAction:
+        del context
+        if not self.actions:
+            raise AssertionError("Completed real delegation was dispatched again")
+        return self.actions.popleft()
 
 
 class CheckpointFakeResearcher:
@@ -169,6 +270,32 @@ def planner(goal: str) -> Plan:
     )
 
 
+def real_delegation_planner(goal: str) -> Plan:
+    return Plan(
+        goal=goal,
+        steps=[
+            PlanStep(
+                step_number=1,
+                title="Real delegated comparison",
+                objective="Collect evidence from alpha and beta branches.",
+                success_criteria="Return both branch findings with provenance.",
+            ),
+            PlanStep(
+                step_number=2,
+                title="Confirm delegated evidence",
+                objective="Confirm both delegated findings are retained.",
+                success_criteria="The parent state retains both evidence records.",
+            ),
+            PlanStep(
+                step_number=3,
+                title="Finalize bounded comparison",
+                objective="Finish without additional research calls.",
+                success_criteria="The workflow finalizes from delegated evidence.",
+            ),
+        ],
+    )
+
+
 async def run_and_resume(
     checkpoint_path: Path,
 ) -> tuple[AgentState, AgentState, object]:
@@ -203,6 +330,50 @@ async def run_and_resume(
         resumed = await runtime.resume(thread_id="day12-thread")
 
     return first, resumed, researcher
+
+
+async def run_real_delegation_and_resume(
+    checkpoint_path: Path,
+) -> tuple[AgentState, AgentState, RecordingWebTool, int, int]:
+    web_tool = RecordingWebTool()
+    branch_registry = ToolRegistry([web_tool])
+    researcher = BoundedResearcherSubagent(
+        DeterministicBranchSelector(),
+        branch_registry,
+    )
+    delegation_tool = DelegateResearchTool(
+        researcher,
+        branch_registry,
+        max_concurrency=2,
+    )
+
+    async with open_sqlite_checkpointer(checkpoint_path) as checkpointer:
+        graph = build_agent_workflow(
+            real_delegation_planner,
+            RealDelegationParentSelector(),
+            ToolRegistry([delegation_tool]),
+            action_registry=ToolRegistry([delegation_tool]),
+            checkpointer=checkpointer,
+            max_tool_calls_per_step=5,
+            max_total_tool_calls=13,
+        )
+        runtime = AgentRuntime(
+            graph=graph,
+            limits=RuntimeLimits(
+                max_tool_calls_per_step=5,
+                max_total_tool_calls=13,
+            ),
+            checkpointer=checkpointer,
+        )
+        first = await runtime.run(
+            "Compare alpha and beta through real delegated tools",
+            thread_id="real-delegation-thread",
+        )
+        calls_after_first_run = len(web_tool.queries)
+        resumed = await runtime.resume(thread_id="real-delegation-thread")
+        calls_after_resume = len(web_tool.queries)
+
+    return first, resumed, web_tool, calls_after_first_run, calls_after_resume
 
 
 def test_workflow_fan_in_preserves_boundaries_and_resume_skips_completed_work(
@@ -252,6 +423,67 @@ def test_workflow_fan_in_preserves_boundaries_and_resume_skips_completed_work(
     assert first["artifact_path"] is None
     assert first["pending_action"] is None
     assert first["errors"]
+
+
+def test_canonical_delegation_executes_real_branch_tools_and_resume_does_not_replay(
+    tmp_path: Path,
+) -> None:
+    first, resumed, web_tool, calls_after_first_run, calls_after_resume = asyncio.run(
+        run_real_delegation_and_resume(tmp_path / "real-delegation.sqlite")
+    )
+
+    assert calls_after_first_run == 2
+    assert calls_after_resume == 2
+    assert sorted(web_tool.queries) == ["alpha query", "beta query"]
+    assert first == resumed
+    assert first["total_tool_calls"] == 3
+    assert len(first["tool_observations"]) == 3
+
+    branch_observations = first["tool_observations"][1:]
+    assert [
+        (
+            observation.branch_id,
+            observation.delegation_id,
+            observation.branch_tool_call_number,
+            observation.action.arguments["query"],
+        )
+        for observation in branch_observations
+    ] == [
+        ("alpha", "wave-real", 1, "alpha query"),
+        ("beta", "wave-real", 1, "beta query"),
+    ]
+
+    delegation = first["delegations"][0]
+    assert [result.branch_id for result in delegation.results] == ["alpha", "beta"]
+    assert [result.tool_calls_used for result in delegation.results] == [1, 1]
+    assert delegation.reserved_tool_calls == 4
+    assert delegation.used_tool_calls == 2
+    assert delegation.charged_tool_calls == 2
+
+    assert [record.url for record in first["evidence"]] == [
+        "https://example.com/alpha",
+        "https://example.com/beta",
+    ]
+    assert [record.provenance.branch_id for record in first["evidence"]] == [
+        "alpha",
+        "beta",
+    ]
+    assert all(
+        record.provenance.delegation_id == "wave-real" for record in first["evidence"]
+    )
+    assert all(
+        record.provenance.branch_tool_call_number == 1 for record in first["evidence"]
+    )
+    assert [
+        finding.branch_id for finding in first["findings"] if finding.branch_id
+    ] == [
+        "alpha",
+        "beta",
+    ]
+    assert first["sources"] == [
+        "https://example.com/alpha",
+        "https://example.com/beta",
+    ]
 
 
 def test_delegation_wave_cannot_consume_budget_allocated_to_later_steps() -> None:
