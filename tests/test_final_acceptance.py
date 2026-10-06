@@ -631,9 +631,11 @@ def test_final_mvp_acceptance_survives_interruption_and_resume(
         assert sum(event.kind is TraceKind.ARTIFACT for event in events) == 1
 
         interrupted_run = [
-            event for event in events if event.run_id == "day14-interrupted-run"
+            event for event in events if event.root_run_id == "day14-interrupted-run"
         ]
-        resumed_run = [event for event in events if event.run_id == "day14-resumed-run"]
+        resumed_run = [
+            event for event in events if event.root_run_id == "day14-resumed-run"
+        ]
         assert interrupted_run[-1].kind is TraceKind.RUN
         assert interrupted_run[-1].outcome is TraceOutcome.FAILED
         assert resumed_run[-1].kind is TraceKind.RUN

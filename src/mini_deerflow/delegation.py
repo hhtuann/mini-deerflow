@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Annotated, Literal, Protocol, Self, cast, runtime_checkable
 
 from pydantic import (
@@ -50,6 +52,14 @@ from mini_deerflow.evidence import (
 )
 from mini_deerflow.schemas import PlanStep
 from mini_deerflow.tools import ToolInput, ToolRegistry, ToolResult, ToolRunner
+from mini_deerflow.tracing import (
+    ExecutionEventType,
+    ExecutionStatus,
+    TraceErrorCategory,
+    TraceErrorCode,
+    TraceOutcome,
+    current_execution_tracer,
+)
 
 MAX_DELEGATION_BRANCHES = 3
 MIN_DELEGATION_BRANCHES = 2
@@ -310,7 +320,47 @@ class BoundedResearcherSubagent:
                     tool_calls_used=len(observations),
                 )
 
-            result = await self._runner.run(action.tool_name, action.arguments)
+            tracer = current_execution_tracer()
+            tool_call_id = (
+                tracer.tool_call_id(call_number) if tracer is not None else None
+            )
+            started_at = time.monotonic()
+            if tracer is not None:
+                tracer.emit_event(
+                    ExecutionEventType.TOOL_STARTED,
+                    node="delegated_researcher",
+                    tool_name=action.tool_name,
+                    tool_call_id=tool_call_id,
+                    metadata={
+                        "step_number": 1,
+                        "tool_call_number": call_number,
+                    },
+                )
+            try:
+                result = await self._runner.run(action.tool_name, action.arguments)
+            except asyncio.CancelledError:
+                if tracer is not None:
+                    tracer.emit_event(
+                        ExecutionEventType.TOOL_FAILED,
+                        status=ExecutionStatus.CANCELLED,
+                        outcome=TraceOutcome.CANCELLED,
+                        node="delegated_researcher",
+                        tool_name=action.tool_name,
+                        tool_call_id=tool_call_id,
+                        duration_ms=max(
+                            0,
+                            round((time.monotonic() - started_at) * 1_000),
+                        ),
+                        error_category=TraceErrorCategory.RUNTIME,
+                        error_code=TraceErrorCode.RUNTIME_FAILURE,
+                        metadata={
+                            "step_number": 1,
+                            "tool_call_number": call_number,
+                            "success": False,
+                            "failure_category": "cancelled",
+                        },
+                    )
+                raise
             observation = ToolObservation(
                 step_number=1,
                 step_tool_call_number=call_number,
@@ -321,10 +371,48 @@ class BoundedResearcherSubagent:
                 branch_tool_call_number=call_number,
             )
             observations.append(observation)
+            produced_evidence = extract_evidence_records(observation)
             evidence = merge_evidence_records(
                 evidence,
-                extract_evidence_records(observation),
+                produced_evidence,
             )
+            if tracer is not None:
+                tracer.emit_event(
+                    (
+                        ExecutionEventType.TOOL_COMPLETED
+                        if result.success
+                        else ExecutionEventType.TOOL_FAILED
+                    ),
+                    node="delegated_researcher",
+                    tool_name=action.tool_name,
+                    tool_call_id=tool_call_id,
+                    duration_ms=max(0, round((time.monotonic() - started_at) * 1_000)),
+                    evidence_count=len(produced_evidence),
+                    error_category=(
+                        None if result.success else TraceErrorCategory.TOOL
+                    ),
+                    error_code=(
+                        None if result.success else TraceErrorCode.TOOL_FAILURE
+                    ),
+                    metadata={
+                        "step_number": 1,
+                        "tool_call_number": call_number,
+                        "success": result.success,
+                        "evidence_count": len(produced_evidence),
+                    },
+                )
+                if produced_evidence:
+                    tracer.emit_event(
+                        ExecutionEventType.EVIDENCE_PRODUCED,
+                        node="delegated_researcher",
+                        tool_name=action.tool_name,
+                        tool_call_id=tool_call_id,
+                        evidence_count=len(produced_evidence),
+                        metadata={
+                            "tool_call_number": call_number,
+                            "evidence_count": len(produced_evidence),
+                        },
+                    )
 
         return BranchResult(
             branch_id=task.branch_id,
@@ -490,45 +578,135 @@ class DelegateResearchTool:
                 },
             )
 
+        tracer = current_execution_tracer()
+        if tracer is not None:
+            tracer.emit_event(
+                ExecutionEventType.DELEGATION_STARTED,
+                node="execute_tool",
+                tool_name=self.name,
+                delegation_id=request.delegation_id,
+                branch_count=len(ordered_tasks),
+                reserved_tool_calls=reserved,
+                metadata={
+                    "requested_branches": len(ordered_tasks),
+                    "budget_reserved": reserved,
+                    "budget_remaining": admission_tool_call_cap,
+                },
+            )
+
         semaphore = asyncio.Semaphore(self._max_concurrency)
 
         async def dispatch(task: ScopedResearchTask) -> BranchResult:
-            try:
-                context = build_research_task_context(
-                    task,
-                    self._branch_registry,
-                    self._context_budget,
-                )
-                async with semaphore:
-                    result = await asyncio.wait_for(
-                        self._researcher.research(context),
-                        timeout=self._branch_timeout_seconds,
+            scope = (
+                tracer.branch_scope(request.delegation_id, task.branch_id)
+                if tracer is not None
+                else nullcontext(None)
+            )
+            with scope:
+                failure_category: str | None = None
+                if tracer is not None:
+                    tracer.emit_event(
+                        ExecutionEventType.BRANCH_STARTED,
+                        node="delegated_researcher",
+                        delegation_id=request.delegation_id,
+                        branch_id=task.branch_id,
+                        metadata={
+                            "budget_reserved": task.tool_call_budget,
+                        },
                     )
-                if (
-                    not isinstance(result, BranchResult)
-                    or result.branch_id != task.branch_id
-                    or result.tool_calls_used > task.tool_call_budget
-                ):
-                    return BranchResult(
+                try:
+                    context = build_research_task_context(
+                        task,
+                        self._branch_registry,
+                        self._context_budget,
+                    )
+                    async with semaphore:
+                        result = await asyncio.wait_for(
+                            self._researcher.research(context),
+                            timeout=self._branch_timeout_seconds,
+                        )
+                    if (
+                        not isinstance(result, BranchResult)
+                        or result.branch_id != task.branch_id
+                        or result.tool_calls_used > task.tool_call_budget
+                    ):
+                        failure_category = "invalid_result"
+                        result = BranchResult(
+                            branch_id=task.branch_id,
+                            status="cancelled",
+                            error="Branch returned an invalid or over-budget result.",
+                        )
+                except TimeoutError:
+                    failure_category = "timeout"
+                    result = BranchResult(
                         branch_id=task.branch_id,
                         status="cancelled",
-                        error="Branch returned an invalid or over-budget result.",
+                        error="Branch timed out before producing a checkpointable result.",
                     )
+                except asyncio.CancelledError:
+                    if tracer is not None:
+                        tracer.emit_event(
+                            ExecutionEventType.BRANCH_FAILED,
+                            status=ExecutionStatus.CANCELLED,
+                            outcome=TraceOutcome.CANCELLED,
+                            node="delegated_researcher",
+                            delegation_id=request.delegation_id,
+                            branch_id=task.branch_id,
+                            metadata={"failure_category": "cancelled"},
+                        )
+                    raise
+                except Exception:  # noqa: BLE001 - normalize the subagent seam
+                    failure_category = "unexpected_failure"
+                    result = BranchResult(
+                        branch_id=task.branch_id,
+                        status="controlled_failure",
+                        error="Branch failed before producing a valid result.",
+                    )
+
+                branch_evidence_count = sum(
+                    len(extract_evidence_records(observation))
+                    for observation in result.observations
+                )
+                if tracer is not None:
+                    if result.status == "success":
+                        tracer.emit_event(
+                            ExecutionEventType.BRANCH_COMPLETED,
+                            node="delegated_researcher",
+                            delegation_id=request.delegation_id,
+                            branch_id=task.branch_id,
+                            used_tool_calls=result.tool_calls_used,
+                            evidence_count=branch_evidence_count,
+                            metadata={
+                                "budget_used": result.tool_calls_used,
+                                "evidence_count": branch_evidence_count,
+                            },
+                        )
+                    else:
+                        failure_category = failure_category or "controlled_failure"
+                        tracer.emit_event(
+                            ExecutionEventType.BRANCH_FAILED,
+                            status=(
+                                ExecutionStatus.CANCELLED
+                                if result.status == "cancelled"
+                                else ExecutionStatus.FAILED
+                            ),
+                            outcome=(
+                                TraceOutcome.CANCELLED
+                                if result.status == "cancelled"
+                                else TraceOutcome.FAILED
+                            ),
+                            node="delegated_researcher",
+                            delegation_id=request.delegation_id,
+                            branch_id=task.branch_id,
+                            used_tool_calls=result.tool_calls_used,
+                            evidence_count=branch_evidence_count,
+                            metadata={
+                                "failure_category": failure_category,
+                                "budget_used": result.tool_calls_used,
+                                "evidence_count": branch_evidence_count,
+                            },
+                        )
                 return result
-            except TimeoutError:
-                return BranchResult(
-                    branch_id=task.branch_id,
-                    status="cancelled",
-                    error="Branch timed out before producing a checkpointable result.",
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - normalize the subagent seam
-                return BranchResult(
-                    branch_id=task.branch_id,
-                    status="controlled_failure",
-                    error="Branch failed before producing a valid result.",
-                )
 
         results = list(
             await asyncio.gather(*(dispatch(task) for task in ordered_tasks))
@@ -542,6 +720,57 @@ class DelegateResearchTool:
             for task, result in zip(ordered_tasks, results, strict=True)
         )
         fan_in = deterministic_fan_in(results, parent_step_number=parent_step_number)
+        failed_count = len(fan_in.failed_branches)
+        cancelled_count = len(fan_in.cancelled_branches)
+        if tracer is not None:
+            event_metadata = {
+                "requested_branches": len(ordered_tasks),
+                "successful_branches": len(fan_in.successful_branches),
+                "failed_branches": failed_count,
+                "cancelled_branches": cancelled_count,
+                "budget_reserved": reserved,
+                "budget_used": used,
+                "budget_charged": charged,
+                "evidence_promoted": len(fan_in.evidence),
+                "limitations_produced": len(fan_in.limitations),
+            }
+            tracer.emit_event(
+                ExecutionEventType.FAN_IN_COMPLETED,
+                node="execute_tool",
+                tool_name=self.name,
+                delegation_id=request.delegation_id,
+                branch_count=len(results),
+                successful_branch_count=len(fan_in.successful_branches),
+                failed_branch_count=failed_count,
+                cancelled_branch_count=cancelled_count,
+                reserved_tool_calls=reserved,
+                used_tool_calls=used,
+                charged_tool_calls=charged,
+                evidence_count=len(fan_in.evidence),
+                citation_count=len(fan_in.citations),
+                metadata=event_metadata,
+            )
+            tracer.emit_event(
+                ExecutionEventType.DELEGATION_COMPLETED,
+                outcome=(
+                    TraceOutcome.PARTIAL_FAILURE
+                    if failed_count or cancelled_count
+                    else TraceOutcome.SUCCEEDED
+                ),
+                node="execute_tool",
+                tool_name=self.name,
+                delegation_id=request.delegation_id,
+                branch_count=len(results),
+                successful_branch_count=len(fan_in.successful_branches),
+                failed_branch_count=failed_count,
+                cancelled_branch_count=cancelled_count,
+                reserved_tool_calls=reserved,
+                used_tool_calls=used,
+                charged_tool_calls=charged,
+                evidence_count=len(fan_in.evidence),
+                citation_count=len(fan_in.citations),
+                metadata=event_metadata,
+            )
         record = DelegationRecord(
             delegation_id=request.delegation_id,
             parent_step_number=parent_step_number,
