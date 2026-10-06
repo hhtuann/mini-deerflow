@@ -141,6 +141,14 @@ def test_draft_rejects_unknown_evidence_index_and_model_authored_url() -> None:
         validate_answer_draft(invented_url, context)
 
 
+@pytest.mark.parametrize("invalid_index", [0, -1])
+def test_draft_rejects_nonpositive_evidence_indices_at_schema_boundary(
+    invalid_index: int,
+) -> None:
+    with pytest.raises(ValueError):
+        DraftClaim(text="Invalid evidence reference.", evidence_indices=[invalid_index])
+
+
 def test_known_contradiction_must_be_explicit() -> None:
     context = synthesis_context(
         limitations=["[contradiction] Hai nguồn dùng phạm vi thời gian khác nhau."],

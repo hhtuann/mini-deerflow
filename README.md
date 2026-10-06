@@ -441,7 +441,7 @@ uv run python evals/run_evals.py --dataset evals/dataset.json
 
 | Check | Latest verified result |
 | --- | --- |
-| Full pytest | 542 passed, 2 skipped |
+| Full pytest | 626 passed, 2 skipped |
 | Deterministic evaluator | 9/9 cases |
 | Evaluator invariants | 36/36 |
 | Ruff check | Pass |

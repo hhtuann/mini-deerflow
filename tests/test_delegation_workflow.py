@@ -211,9 +211,26 @@ def test_workflow_fan_in_preserves_boundaries_and_resume_skips_completed_work(
     first, resumed, researcher = asyncio.run(run_and_resume(tmp_path / "day12.sqlite"))
 
     assert researcher.branch_calls == ["alpha", "beta"]
+    assert [context.task.branch_id for context in researcher.contexts] == [
+        "alpha",
+        "beta",
+    ]
     assert first == resumed
     assert first["total_tool_calls"] == 3
     assert len(first["tool_observations"]) == 3
+    branch_observations = first["tool_observations"][1:]
+    assert [
+        (
+            observation.branch_id,
+            observation.delegation_id,
+            observation.branch_tool_call_number,
+            observation.action.arguments["query"],
+        )
+        for observation in branch_observations
+    ] == [
+        ("alpha", "wave-one", 1, "alpha"),
+        ("beta", "wave-one", 1, "beta"),
+    ]
     assert [item.branch_id for item in first["delegations"][0].results] == [
         "alpha",
         "beta",
@@ -222,6 +239,10 @@ def test_workflow_fan_in_preserves_boundaries_and_resume_skips_completed_work(
         "https://example.com/shared"
     ]
     assert first["sources"] == ["https://example.com/shared"]
+    assert first["evidence"][0].provenance.delegation_id == "wave-one"
+    # Duplicate URLs intentionally keep the newer observation's provenance.
+    assert first["evidence"][0].provenance.branch_id == "beta"
+    assert first["evidence"][0].provenance.branch_tool_call_number == 1
     assert all(
         str(citation) == "https://example.com/shared"
         for finding in first["findings"]
