@@ -429,6 +429,12 @@ This is an implemented application-level URL safety boundary, not a claim of com
 
 Execution traces use a closed typed schema and exclude prompts, queries, URLs, response bodies, excerpts, artifact content, arbitrary payloads, exceptions, and tracebacks. The CLI can emit redacted JSON Lines to stderr; Streamlit consumes a projected FIFO trace queue.
 
+The same trace pipeline now exposes structured execution events for run, node, route,
+tool, delegation, branch, evidence, and deterministic fan-in lifecycles. Branch runs carry
+parent-run, delegation, branch, and child-tool correlation without adding a UI dependency.
+See [`docs/execution-events.md`](docs/execution-events.md) for the hierarchy, safety,
+failure, and resume contracts.
+
 ## Testing and Evaluation
 
 ```bash

@@ -1,5 +1,6 @@
 import inspect
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -71,6 +72,7 @@ from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry, ToolRunner
 from mini_deerflow.tools.contracts import ToolResult
 from mini_deerflow.tracing import (
+    ExecutionEventType,
     ExecutionTracer,
     TraceErrorCategory,
     TraceErrorCode,
@@ -367,49 +369,98 @@ def build_agent_workflow(
         )
 
         delegated_tool: DelegateResearchTool | None = None
+        tool_call_id = resolved_tracer.tool_call_id(total_tool_call_number)
+        started_at = time.monotonic()
+        resolved_tracer.emit_event(
+            ExecutionEventType.TOOL_STARTED,
+            node="execute_tool",
+            tool_name=(
+                action.tool_name if action.tool_name in registry else "unregistered"
+            ),
+            tool_call_id=tool_call_id,
+            current_step=state["current_step"],
+            step_tool_calls=step_tool_call_number,
+            total_tool_calls=total_tool_call_number,
+            max_step_tool_calls=max_tool_calls_per_step,
+            max_total_tool_calls=max_total_tool_calls,
+            metadata={
+                "step_number": step.step_number,
+                "tool_call_number": total_tool_call_number,
+            },
+        )
 
-        if (
-            action_registry_is_restricted
-            and action.tool_name not in resolved_action_registry
-        ):
-            result = ToolResult.fail(
-                error="Tool is not available for research actions.",
+        try:
+            if (
+                action_registry_is_restricted
+                and action.tool_name not in resolved_action_registry
+            ):
+                result = ToolResult.fail(
+                    error="Tool is not available for research actions.",
+                    metadata={
+                        "tool_name": action.tool_name,
+                        "error_type": "ActionToolDeniedError",
+                    },
+                )
+            elif action.tool_name == DelegateResearchTool.name:
+                candidate = registry.get(action.tool_name)
+                if not isinstance(candidate, DelegateResearchTool):
+                    result = ToolResult.fail(
+                        error=(
+                            "Registered delegation tool has an invalid implementation."
+                        ),
+                        metadata={"error_type": "InvalidDelegationToolError"},
+                    )
+                else:
+                    delegated_tool = candidate
+                    tool_budget = calculate_step_tool_call_budget(
+                        state,
+                        max_tool_calls_per_step=max_tool_calls_per_step,
+                        max_total_tool_calls=max_total_tool_calls,
+                    )
+                    remaining_tool_calls = min(
+                        max_tool_calls_per_step - state["tool_calls_in_current_step"],
+                        max_total_tool_calls - state["total_tool_calls"],
+                    )
+                    result = await delegated_tool.run_with_parent_budget(
+                        action.arguments,
+                        parent_step_number=step.step_number,
+                        remaining_tool_calls=remaining_tool_calls,
+                        remaining_allocated_step_tool_calls=(
+                            tool_budget.remaining_allocated_step_tool_calls
+                        ),
+                    )
+            else:
+                result = await tool_runner.run(
+                    action.tool_name,
+                    action.arguments,
+                )
+        except BaseException:
+            resolved_tracer.emit_event(
+                ExecutionEventType.TOOL_FAILED,
+                node="execute_tool",
+                tool_name=(
+                    action.tool_name if action.tool_name in registry else "unregistered"
+                ),
+                tool_call_id=tool_call_id,
+                duration_ms=max(
+                    0,
+                    round((time.monotonic() - started_at) * 1_000),
+                ),
+                current_step=state["current_step"],
+                step_tool_calls=step_tool_call_number,
+                total_tool_calls=total_tool_call_number,
+                max_step_tool_calls=max_tool_calls_per_step,
+                max_total_tool_calls=max_total_tool_calls,
+                error_category=TraceErrorCategory.INTERNAL,
+                error_code=TraceErrorCode.UNEXPECTED_FAILURE,
                 metadata={
-                    "tool_name": action.tool_name,
-                    "error_type": "ActionToolDeniedError",
+                    "step_number": step.step_number,
+                    "tool_call_number": total_tool_call_number,
+                    "success": False,
+                    "failure_category": "unhandled_exception",
                 },
             )
-        elif action.tool_name == DelegateResearchTool.name:
-            candidate = registry.get(action.tool_name)
-            if not isinstance(candidate, DelegateResearchTool):
-                result = ToolResult.fail(
-                    error="Registered delegation tool has an invalid implementation.",
-                    metadata={"error_type": "InvalidDelegationToolError"},
-                )
-            else:
-                delegated_tool = candidate
-                tool_budget = calculate_step_tool_call_budget(
-                    state,
-                    max_tool_calls_per_step=max_tool_calls_per_step,
-                    max_total_tool_calls=max_total_tool_calls,
-                )
-                remaining_tool_calls = min(
-                    max_tool_calls_per_step - state["tool_calls_in_current_step"],
-                    max_total_tool_calls - state["total_tool_calls"],
-                )
-                result = await delegated_tool.run_with_parent_budget(
-                    action.arguments,
-                    parent_step_number=step.step_number,
-                    remaining_tool_calls=remaining_tool_calls,
-                    remaining_allocated_step_tool_calls=(
-                        tool_budget.remaining_allocated_step_tool_calls
-                    ),
-                )
-        else:
-            result = await tool_runner.run(
-                action.tool_name,
-                action.arguments,
-            )
+            raise
 
         observation = ToolObservation(
             step_number=step.step_number,
@@ -419,10 +470,17 @@ def build_agent_workflow(
             result=result,
         )
         evidence = extract_evidence_records(observation)
+        record = parse_delegation_record(result) if delegated_tool is not None else None
+        event_evidence_count = (
+            len(record.fan_in.evidence) if record is not None else len(evidence)
+        )
         trace_outcome, error_category, error_code = _tool_trace_classification(result)
-        resolved_tracer.emit(
-            kind=TraceKind.TOOL,
-            phase=TracePhase.OUTCOME,
+        resolved_tracer.emit_event(
+            (
+                ExecutionEventType.TOOL_COMPLETED
+                if result.success
+                else ExecutionEventType.TOOL_FAILED
+            ),
             outcome=trace_outcome,
             node="execute_tool",
             tool_name=action.tool_name
@@ -433,21 +491,27 @@ def build_agent_workflow(
             total_tool_calls=total_tool_call_number,
             max_step_tool_calls=max_tool_calls_per_step,
             max_total_tool_calls=max_total_tool_calls,
-            evidence_count=len(evidence),
+            tool_call_id=tool_call_id,
+            duration_ms=max(0, round((time.monotonic() - started_at) * 1_000)),
+            evidence_count=event_evidence_count,
             error_category=error_category,
             error_code=error_code,
+            metadata={
+                "step_number": step.step_number,
+                "tool_call_number": total_tool_call_number,
+                "success": result.success,
+                "evidence_count": event_evidence_count,
+            },
         )
 
-        if delegated_tool is not None:
-            record = parse_delegation_record(result)
-            if record is not None:
-                return _integrate_delegation(
-                    state,
-                    observation,
-                    record,
-                    step_tool_call_number=step_tool_call_number,
-                    total_tool_call_number=total_tool_call_number,
-                )
+        if record is not None:
+            return _integrate_delegation(
+                state,
+                observation,
+                record,
+                step_tool_call_number=step_tool_call_number,
+                total_tool_call_number=total_tool_call_number,
+            )
 
         return {
             "pending_action": None,
@@ -533,29 +597,6 @@ def build_agent_workflow(
                     f"Branch {branch_result.branch_id} rejected {rejected} "
                     "citation(s) absent from successful merged evidence."
                 )
-
-        failed_count = len(record.fan_in.failed_branches)
-        cancelled_count = len(record.fan_in.cancelled_branches)
-        resolved_tracer.emit(
-            kind=TraceKind.DELEGATION,
-            phase=TracePhase.OUTCOME,
-            outcome=(
-                TraceOutcome.PARTIAL_FAILURE
-                if failed_count or cancelled_count
-                else TraceOutcome.SUCCEEDED
-            ),
-            node="execute_tool",
-            tool_name=DelegateResearchTool.name,
-            branch_count=len(record.results),
-            successful_branch_count=len(record.fan_in.successful_branches),
-            failed_branch_count=failed_count,
-            cancelled_branch_count=cancelled_count,
-            reserved_tool_calls=record.reserved_tool_calls,
-            used_tool_calls=record.used_tool_calls,
-            charged_tool_calls=record.charged_tool_calls,
-            evidence_count=len(delegated_evidence),
-            citation_count=len(sources),
-        )
 
         return {
             "pending_action": None,
@@ -1329,7 +1370,12 @@ def build_agent_workflow(
 
     builder.add_conditional_edges(
         "decide_action",
-        route_after_decision,
+        resolved_tracer.wrap_route(
+            "decide_action",
+            route_after_decision,
+            decision_type="agent_action",
+            route_reason="selected_action",
+        ),
         {
             "execute_tool": "execute_tool",
             "complete_step": "complete_step",
@@ -1344,7 +1390,12 @@ def build_agent_workflow(
 
         builder.add_conditional_edges(
             "review",
-            route_after_review,
+            resolved_tracer.wrap_route(
+                "review",
+                route_after_review,
+                decision_type="review_verdict",
+                route_reason="reviewer_verdict",
+            ),
             {
                 "continue": "decide_action",
                 "replan": "replan",
@@ -1356,7 +1407,12 @@ def build_agent_workflow(
     else:
         builder.add_conditional_edges(
             "complete_step",
-            route_after_completion,
+            resolved_tracer.wrap_route(
+                "complete_step",
+                route_after_completion,
+                decision_type="plan_progress",
+                route_reason="remaining_steps_and_budget",
+            ),
             {
                 "decide_action": "decide_action",
                 "budget_exhausted": "budget_exhausted",
@@ -1372,7 +1428,12 @@ def build_agent_workflow(
         budget_routes["review"] = "review"
     builder.add_conditional_edges(
         "budget_exhausted",
-        route_after_budget_exhausted,
+        resolved_tracer.wrap_route(
+            "budget_exhausted",
+            route_after_budget_exhausted,
+            decision_type="budget_state",
+            route_reason="finalization_state",
+        ),
         budget_routes,
     )
     builder.add_edge("synthesize", END)

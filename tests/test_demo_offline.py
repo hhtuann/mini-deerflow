@@ -258,8 +258,9 @@ def test_fresh_backend_resumes_interrupted_checkpoint_deterministically(
     assert resumed.artifact.markdown_source == baseline.artifact.markdown_source
     assert all(event.run_id.startswith("day15-resume-") for event in resumed.traces)
     assert not any(event.kind in {"tool", "delegation"} for event in resumed.traces)
-    durable_run_ids = {
+    durable_parent_run_ids = {
         event.run_id
         for event in chat.turns[0].run.traces  # type: ignore[union-attr]
+        if event.kind == "run"
     }
-    assert durable_run_ids == {"day15-run-001", "day15-resume-001"}
+    assert durable_parent_run_ids == {"day15-run-001", "day15-resume-001"}
