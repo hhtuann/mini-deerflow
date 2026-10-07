@@ -667,9 +667,23 @@ def _details_for_entity(
             if event.run_id == latest.run_id
             and event.event_type is ExecutionEventType.EVIDENCE_PRODUCED
         )
+        reserved_tool_calls = next(
+            (
+                value
+                for event in entity.events
+                if isinstance((value := event.metadata.get("budget_reserved")), int)
+                and not isinstance(value, bool)
+            ),
+            None,
+        )
+        tool_call_display = (
+            f"{tool_count} / {reserved_tool_calls}"
+            if reserved_tool_calls is not None
+            else str(tool_count)
+        )
         fields.extend(
             (
-                GraphField("Tool calls", str(tool_count)),
+                GraphField("Tool calls", tool_call_display),
                 GraphField("Evidence produced", str(evidence_count)),
             )
         )

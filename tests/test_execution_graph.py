@@ -175,6 +175,7 @@ def _representative_events() -> tuple[ExecutionEvent, ...]:
             node_id="delegated_researcher",
             delegation_id="wave-1",
             branch_id="alpha",
+            metadata={"budget_reserved": 2},
         ),
         _event(
             8,
@@ -185,6 +186,7 @@ def _representative_events() -> tuple[ExecutionEvent, ...]:
             node_id="delegated_researcher",
             delegation_id="wave-1",
             branch_id="beta",
+            metadata={"budget_reserved": 1},
         ),
         _event(
             9,
@@ -420,6 +422,9 @@ def test_projection_merges_lifecycles_and_builds_delegation_hierarchy() -> None:
 
     assert alpha.status == "completed"
     assert beta.status == "failed"
+    assert next(
+        field.value for field in alpha.details if field.label == "Tool calls"
+    ) == ("1 / 2")
     assert delegation.status == "completed"
     assert delegation.safe_summary is not None and "1 failed" in delegation.safe_summary
     assert fan_in.status == "completed"
