@@ -10,7 +10,11 @@ from uuid import uuid4
 
 import streamlit as st
 
-from mini_deerflow.demo.components import render_demo_tabs, render_trace
+from mini_deerflow.demo.components import (
+    render_agent_graph,
+    render_demo_tabs,
+    render_trace,
+)
 from mini_deerflow.demo.jobs import DemoJobManager, JobSnapshot, JobState
 from mini_deerflow.demo.live_backend import LiveDemoBackend
 from mini_deerflow.demo.offline_scenario import OfflineDemoBackend
@@ -241,6 +245,14 @@ def _poll_active_job(service: DemoRuntimeService, manager: DemoJobManager) -> No
             expanded=bool(events),
         ):
             st.caption(f"Thread: {snapshot.thread_id}")
+        graph_provider = getattr(manager, "execution_graph", None)
+        live_graph = graph_provider() if callable(graph_provider) else None
+        if live_graph is not None and live_graph.nodes:
+            with st.expander("Live agent graph", expanded=True):
+                render_agent_graph(
+                    live_graph,
+                    key_prefix=f"live-{snapshot.job_id}-graph",
+                )
         if events:
             with st.expander("Live execution trace", expanded=False):
                 render_trace(events, key_prefix=f"live-{snapshot.job_id}")

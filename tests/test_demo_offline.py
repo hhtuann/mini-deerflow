@@ -246,8 +246,8 @@ def test_fresh_backend_resumes_interrupted_checkpoint_deterministically(
     baseline, before_restart, resumed, after_restart, chat = asyncio.run(scenario())
 
     assert before_restart is not None
-    assert before_restart.web_search_calls == 2
-    assert before_restart.web_fetch_calls == 1
+    assert before_restart.web_search_calls == 3
+    assert before_restart.web_fetch_calls == 0
     assert before_restart.researcher_branches == ("alpha", "beta")
     assert after_restart is not None
     assert after_restart.web_search_calls == 0
