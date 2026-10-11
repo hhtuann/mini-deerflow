@@ -7,8 +7,9 @@ runtime topology without parsing log messages. The stream makes parent runs, can
 workflow nodes, parent tools, delegated branch/sub-agent runs, child tools, evidence,
 failures, and deterministic fan-in structurally observable.
 
-This contract is the data foundation for **WAVE 2 — Agent Graph UI**. WAVE 1 contains
-no graph projection, visualization, node inspector, or UI dependency.
+This remains the canonical WAVE 1 event contract and now feeds the implemented
+[WAVE 2 Agent Graph UI](agent-graph.md). WAVE 1 itself excludes graph projection,
+visualization, node inspectors, and UI dependencies; WAVE 2 supplies that downstream consumer.
 
 ## Architecture
 
@@ -157,7 +158,7 @@ branch_id = alpha
 
 Derived identifiers are bounded to the model's 128-character identifier limit. When the
 readable composition would exceed that limit, the tracer uses a deterministic hash-based
-identifier. WAVE 2 can reconstruct parent/child, delegation/branch, and branch/tool
+identifier. WAVE 2 reconstructs parent/child, delegation/branch, and branch/tool
 relationships directly from these fields without parsing log text.
 
 ## Canonical workflow instrumentation
@@ -227,8 +228,9 @@ Parent
   -> Parent
 ```
 
-The integration test uses the synthetic IDs below and observes this representative
-sequence:
+The integration test uses synthetic IDs and injected offline research tools below;
+its `web_search` events do not describe the default live runtime's Wikipedia tools.
+It observes this representative sequence:
 
 ```text
 run_started(run_id=parent-run)
@@ -425,6 +427,23 @@ failure can lose sink delivery, and a re-entered boundary can emit another event
 delivery state of a prior event is unknown. The guarantee is non-interference with
 checkpointed business execution, not exactly-once observability.
 
+## WAVE 2 projection and consumer
+
+`project_execution_graph` in `src/mini_deerflow/demo/graph_projection.py` derives an
+immutable `ExecutionGraphProjection` from the same closed WAVE 1 `ExecutionEvent`
+stream. It uses structured identities and lifecycle fields, with no raw log parsing
+or event-taxonomy redesign. See [Agent graph](agent-graph.md) for the consumer contract.
+
+`project_demo_run` exposes this projection as `DemoRunView.execution_graph` in
+`view_models.py`; `QueueTraceSink.execution_graph` in `jobs.py` projects live event
+history. `render_agent_graph` in `components.py` renders the Streamlit graph and safe
+node inspector. These are read-only downstream consumers that preserve checkpoint,
+budget, provenance, citation, and turn-isolation invariants.
+
+Historical views use the same serialized turn traces in the existing SQLite
+conversation repository's `turns.trace_json`. WAVE 2 adds no persistence subsystem
+and does not change the event-delivery or checkpoint guarantees above.
+
 ## Verification
 
 Accepted WAVE 1 verification results:
@@ -458,13 +477,14 @@ Key proof lives in:
 
 ## Scope boundary
 
-This implementation does not contain:
+The WAVE 1 event-contract scope excludes:
 
 - Graph visualization or Agent Graph UI.
 - React Flow, Cytoscape, Mermaid live graph rendering, or node inspector UI.
-- No WAVE 1 Workspace feature and no ContextSnapshot or ArtifactVersion implementation.
+- A WAVE 1 Workspace feature, ContextSnapshot, or ArtifactVersion implementation.
 - SkillRegistry, SlideSkill, source ingestion, or Notebook UI.
 - SandboxProvider changes or multi-user authentication.
 - A replacement evidence or citation architecture.
 
-WAVE 2 will build ExecutionGraphProjection from ExecutionEvents.
+WAVE 2 now implements `ExecutionGraphProjection`, the Streamlit Agent graph, and its
+node inspector as downstream consumers; these additions do not expand WAVE 1's scope.

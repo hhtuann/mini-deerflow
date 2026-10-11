@@ -136,7 +136,9 @@ flowchart TD
     Replan --> Decide
     Review -->|finish| Synthesize[synthesize]
     Decide -->|budget exhausted| Exhausted[budget_exhausted]
-    Exhausted --> Synthesize
+    Exhausted -->|continue| Decide
+    Exhausted -->|review| Review
+    Exhausted -->|finish| Synthesize
     Synthesize --> End([END])
 ```
 
@@ -178,7 +180,7 @@ deterministic mentor scenario. It is network-free and stores its data under
 
 The offline walkthrough is **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.
 
-External decision/data seams are replaced with scripted model, provider, resolver, and researcher behavior; trace identity/time is also deterministic. The offline backend constructs settings with `_env_file=None`, needs no model credentials, and does not fall back to a live provider.
+Model decisions, provider data, resolver behavior, and trace identity/time are deterministic. Delegated branches use the real `BoundedResearcherSubagent` and registered tool execution with scripted action selection: alpha's `web_search` succeeds, beta's fails safely, and the parent completes after fan-in. The offline backend constructs settings with `_env_file=None`, needs no model credentials, and does not fall back to a live provider.
 
 ```mermaid
 flowchart LR
@@ -212,12 +214,21 @@ separate. Detail tabs are created only when that turn has relevant data:
 
 | Per-turn tab | Purpose |
 | --- | --- |
+| Agent graph | Workflow / Current run views, runtime delegation hierarchy, and safe node inspector |
 | Execution | Goal, plan, current step, budgets, and limitations |
 | Evidence & Citations | Bounded evidence, provenance, accepted citations, and rejected count |
 | Delegation | Wave/branch status, budget accounting, and fan-in limitations |
 | Review & Replan | Structured verdicts/findings and replacement-step metadata; no raw rationale |
 | Trace | Filtered, ordered, safe execution timeline |
 | Research report | Structured preview, exact internal Markdown report, and download |
+
+The **Workflow** graph shows possible canonical routes; **Current run** reconstructs
+observed execution from structured events, including branch-owned tools and fan-in.
+An active job also displays a live graph. Use **Inspect node** to select and highlight
+an entity; native chart clicks do not drive the Python inspector. The offline mentor
+scenario demonstrates alpha completed, beta failed, and parent completed. See
+[`docs/agent-graph.md`](docs/agent-graph.md) for architecture, safety, replay behavior,
+and accepted UI limitations.
 
 ```text
 Runtime state and trace
@@ -433,7 +444,8 @@ The same trace pipeline now exposes structured execution events for run, node, r
 tool, delegation, branch, evidence, and deterministic fan-in lifecycles. Branch runs carry
 parent-run, delegation, branch, and child-tool correlation without adding a UI dependency.
 See [`docs/execution-events.md`](docs/execution-events.md) for the hierarchy, safety,
-failure, and resume contracts.
+failure, and resume contracts, and [`docs/agent-graph.md`](docs/agent-graph.md) for the
+read-only graph projection that consumes them.
 
 ## Testing and Evaluation
 
@@ -447,7 +459,7 @@ uv run python evals/run_evals.py --dataset evals/dataset.json
 
 | Check | Latest verified result |
 | --- | --- |
-| Full pytest | 627 passed, 2 skipped |
+| Full pytest | 640 passed, 2 skipped |
 | Deterministic evaluator | 9/9 cases |
 | Evaluator invariants | 36/36 |
 | Ruff check | Pass |
