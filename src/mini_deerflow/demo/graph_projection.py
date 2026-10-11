@@ -522,12 +522,42 @@ def _attach_delegation_edges(
             continue
         if matching_branches:
             for branch in matching_branches:
+                latest = max(branch.events, key=lambda event: event.sequence)
+                label = "outcome unobserved"
+                if (
+                    latest.event_type is ExecutionEventType.BRANCH_FAILED
+                    and latest.status
+                    in {
+                        ExecutionStatus.FAILED,
+                        ExecutionStatus.CANCELLED,
+                    }
+                ):
+                    label = latest.status.value
+                elif (
+                    latest.event_type is ExecutionEventType.BRANCH_COMPLETED
+                    and latest.status is ExecutionStatus.COMPLETED
+                ):
+                    evidence_observed = (latest.evidence_count or 0) > 0 or any(
+                        event.event_type is ExecutionEventType.EVIDENCE_PRODUCED
+                        and event.root_run_id == latest.root_run_id
+                        and event.run_id == latest.run_id
+                        and event.delegation_id == latest.delegation_id
+                        and event.branch_id == latest.branch_id
+                        and event.sequence <= latest.sequence
+                        and (event.evidence_count or 0) > 0
+                        for event in events
+                    )
+                    label = (
+                        "completed · evidence produced"
+                        if evidence_observed
+                        else "completed · no evidence observed"
+                    )
                 edges.append(
                     ExecutionGraphEdge(
                         branch.id,
                         fan_in.id,
-                        "returns_evidence",
-                        label="fan-in",
+                        "fan_in_participant",
+                        label=label,
                         selected=True,
                     )
                 )

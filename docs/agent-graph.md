@@ -204,16 +204,38 @@ shows the observed tool names and does not substitute conceptual names.
 ## Fan-in and Parent Continuation
 
 The fan-in node corresponds to WAVE 1's explicit `FAN_IN_COMPLETED` event, emitted
-after `deterministic_fan_in`. Each matching branch connects through a
-`returns_evidence` edge, including a failed branch whose result contributes a
-limitation rather than promoted findings. The relationship does not imply every
-branch supplied evidence. Without observed branches, delegation connects directly
-to fan-in.
+after `deterministic_fan_in`. Every observed matching branch connects through a
+`fan_in_participant` edge. Its label follows the latest sequence-ordered branch
+lifecycle event:
+
+| Latest branch lifecycle | Edge label |
+| --- | --- |
+| `BRANCH_COMPLETED` with `COMPLETED` and positive terminal `evidence_count` OR a positive correlated `EVIDENCE_PRODUCED` counter at or before the terminal sequence | `completed · evidence produced` |
+| `BRANCH_COMPLETED` with `COMPLETED` and no positive evidence observations | `completed · no evidence observed` |
+| `BRANCH_FAILED` with `FAILED` | `failed` |
+| `BRANCH_FAILED` with `CANCELLED` | `cancelled` |
+| No terminal outcome in the latest branch lifecycle | `outcome unobserved` |
+
+Correlated `EVIDENCE_PRODUCED` events must match the terminal branch's
+`root_run_id`, `run_id`, `delegation_id`, and `branch_id`, with `sequence` less than
+or equal to the terminal sequence. A positive observed counter proves evidence
+production even when terminal `evidence_count` is zero. Only when neither source
+has a positive counter does a completed branch receive
+`completed · no evidence observed`.
+These edges describe participation and observed outcome, not
+per-branch promotion; none uses `returns_evidence`. Failed or cancelled branches
+may have produced evidence before ending, but their outcome labels remain `failed`
+or `cancelled`. Upstream evidence counters do not prove per-branch promotion.
+Without observed branches, delegation connects directly to fan-in.
 
 The inspector exposes successful/failed/cancelled branch counts, evidence promoted,
-and limitations produced when available. A `parent_continues` edge connects fan-in
-to the next observed parent `NODE_STARTED` after its sequence. Aggregation, evidence
-promotion, citation revalidation, and failed-branch exclusion remain runtime policy.
+and limitations produced as aggregate fan-in counts when available. A
+`parent_continues` edge connects fan-in to the next observed parent `NODE_STARTED`
+after its sequence; parent continuation and ownership are unchanged. Aggregation,
+evidence promotion, and citation revalidation remain runtime policy.
+`deterministic_fan_in` extracts evidence from `result.observations` across all branch
+results, then limits findings to successful branches. Failed-branch findings are
+excluded; evidence from failed branch observations is not categorically excluded.
 
 ## Node Inspector
 
@@ -354,9 +376,9 @@ count caption.
 
 [`tests/test_execution_graph.py`](../tests/test_execution_graph.py) verifies static
 topology equality, lifecycle merging, delegation/branch/tool ownership, budgets,
-selected routes, partial failure, replay/order independence, secret-metadata
-exclusion, JSON-only chart highlighting, real offline child tools, and Streamlit
-renderer smoke behavior.
+selected routes, partial failure, fan-in outcome classification, replay/order
+independence, secret-metadata exclusion, JSON-only chart highlighting, real offline
+child tools, and Streamlit renderer smoke behavior.
 
 The companion `test_demo_jobs.py`, `test_demo_view_models.py`, `test_demo_app.py`, and
 `test_demo_offline.py` cover job snapshots, safe projection, chat/details integration,

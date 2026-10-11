@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Sequence
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from mini_deerflow.actions import CompleteStepAction
@@ -443,12 +444,155 @@ def test_projection_merges_lifecycles_and_builds_delegation_hierarchy() -> None:
     }
     assert (delegation.id, alpha.id, "spawns", "sub-agent") in relations
     assert (delegation.id, beta.id, "spawns", "sub-agent") in relations
-    assert (alpha.id, fan_in.id, "returns_evidence", "fan-in") in relations
-    assert (beta.id, fan_in.id, "returns_evidence", "fan-in") in relations
+    assert (
+        alpha.id,
+        fan_in.id,
+        "fan_in_participant",
+        "completed · evidence produced",
+    ) in relations
+    assert (beta.id, fan_in.id, "fan_in_participant", "failed") in relations
+    assert not any(edge.relation == "returns_evidence" for edge in graph.edges)
+    assert alpha.parent_id == beta.parent_id == fan_in.parent_id == delegation.id
+    assert (
+        next(node for node in graph.nodes if node.kind == "run").status == "completed"
+    )
+    assert any(
+        edge.source == fan_in.id
+        and edge.relation == "parent_continues"
+        and edge.target in {node.id for node in graph.nodes if node.label == "Review"}
+        for edge in graph.edges
+    )
     assert any(
         edge.relation == "selected_route" and edge.label == "replan"
         for edge in graph.edges
     )
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "terminal_evidence", "produced_evidence", "label"),
+    [
+        (ExecutionStatus.COMPLETED, 1, 1, "completed · evidence produced"),
+        (ExecutionStatus.COMPLETED, 1, 0, "completed · evidence produced"),
+        (ExecutionStatus.COMPLETED, 0, 1, "completed · evidence produced"),
+        (ExecutionStatus.COMPLETED, 0, 0, "completed · no evidence observed"),
+        (ExecutionStatus.COMPLETED, None, 1, "completed · evidence produced"),
+        (ExecutionStatus.COMPLETED, None, 0, "completed · no evidence observed"),
+        (ExecutionStatus.FAILED, 0, 0, "failed"),
+        (ExecutionStatus.FAILED, 1, 1, "failed"),
+        (ExecutionStatus.CANCELLED, 0, 0, "cancelled"),
+        (ExecutionStatus.CANCELLED, 1, 1, "cancelled"),
+        (None, None, 1, "outcome unobserved"),
+        (None, None, 0, "outcome unobserved"),
+    ],
+)
+def test_fan_in_participation_distinguishes_outcome_from_evidence(
+    terminal_status: ExecutionStatus | None,
+    terminal_evidence: int | None,
+    produced_evidence: int,
+    label: str,
+) -> None:
+    branch_fields = {
+        "run_id": "alpha-run",
+        "parent_run_id": "parent-run",
+        "delegation_id": "wave-outcome",
+        "branch_id": "alpha",
+    }
+    events = [
+        _event(
+            1,
+            ExecutionEventType.DELEGATION_STARTED,
+            ExecutionStatus.STARTED,
+            delegation_id="wave-outcome",
+        ),
+        _event(
+            2,
+            ExecutionEventType.BRANCH_STARTED,
+            ExecutionStatus.STARTED,
+            **branch_fields,
+        ),
+        _event(
+            3,
+            ExecutionEventType.EVIDENCE_PRODUCED,
+            ExecutionStatus.OBSERVED,
+            tool_call_id="alpha-tool",
+            tool_name="web_search",
+            evidence_count=produced_evidence,
+            **branch_fields,
+        ),
+        _event(
+            4,
+            ExecutionEventType.EVIDENCE_PRODUCED,
+            ExecutionStatus.OBSERVED,
+            run_id="beta-run",
+            parent_run_id="parent-run",
+            delegation_id="wave-outcome",
+            branch_id="beta",
+            tool_call_id="beta-tool",
+            tool_name="web_search",
+            evidence_count=1,
+        ),
+    ]
+    if terminal_status is not None:
+        events.append(
+            _event(
+                5,
+                (
+                    ExecutionEventType.BRANCH_COMPLETED
+                    if terminal_status is ExecutionStatus.COMPLETED
+                    else ExecutionEventType.BRANCH_FAILED
+                ),
+                terminal_status,
+                evidence_count=terminal_evidence,
+                **branch_fields,
+            )
+        )
+    events.extend(
+        (
+            _event(
+                6,
+                ExecutionEventType.EVIDENCE_PRODUCED,
+                ExecutionStatus.OBSERVED,
+                tool_call_id="alpha-late-tool",
+                tool_name="web_search",
+                evidence_count=1,
+                **branch_fields,
+            ),
+            _event(
+                7,
+                ExecutionEventType.FAN_IN_COMPLETED,
+                ExecutionStatus.COMPLETED,
+                delegation_id="wave-outcome",
+                metadata={"evidence_promoted": 0},
+            ),
+        )
+    )
+
+    graph = project_execution_graph(events)
+    alpha = _branch_node(graph, "alpha")
+    fan_in = next(node for node in graph.nodes if node.kind == "fan_in")
+    branch_edges = [
+        edge
+        for edge in graph.edges
+        if edge.source == alpha.id and edge.target == fan_in.id
+    ]
+    assert len(branch_edges) == 1
+    assert branch_edges[0].relation == "fan_in_participant"
+    assert branch_edges[0].label == label
+    assert branch_edges[0].selected
+    assert alpha.status == (
+        "running" if terminal_status is None else terminal_status.value
+    )
+    assert alpha.parent_id == fan_in.parent_id
+    assert not any(edge.relation == "returns_evidence" for edge in graph.edges)
+    assert (
+        next(
+            field.value
+            for field in fan_in.details
+            if field.label == "Evidence promoted"
+        )
+        == "0"
+    )
+    assert project_execution_graph(tuple(reversed(events)) + tuple(events)) == graph
 
 
 def test_projection_is_order_independent_and_duplicate_delivery_is_idempotent() -> None:
@@ -531,7 +675,38 @@ def test_offline_walkthrough_projects_real_child_tools_and_partial_failure(
     assert main_run.status == "completed"
     assert {node.parent_id for node in child_tools} == {alpha.id, beta.id}
     assert {node.status for node in child_tools} == {"completed", "failed"}
-    assert any(node.kind == "fan_in" for node in graph.nodes)
+    fan_in = next(node for node in graph.nodes if node.kind == "fan_in")
+    assert alpha.parent_id == beta.parent_id == fan_in.parent_id == delegation.id
+    branch_edges = {
+        edge.source: (edge.relation, edge.label)
+        for edge in graph.edges
+        if edge.target == fan_in.id and edge.source in {alpha.id, beta.id}
+    }
+    assert branch_edges == {
+        alpha.id: ("fan_in_participant", "completed · evidence produced"),
+        beta.id: ("fan_in_participant", "failed"),
+    }
+    assert not any(edge.relation == "returns_evidence" for edge in graph.edges)
+    assert (
+        next(
+            field.value for field in beta.details if field.label == "Evidence produced"
+        )
+        == "0"
+    )
+    assert (
+        int(
+            next(
+                field.value
+                for field in fan_in.details
+                if field.label == "Evidence promoted"
+            )
+        )
+        >= 1
+    )
+    assert any(
+        edge.source == fan_in.id and edge.relation == "parent_continues"
+        for edge in graph.edges
+    )
     selected_routes = {
         edge.label for edge in graph.edges if edge.relation == "selected_route"
     }
