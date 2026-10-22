@@ -39,10 +39,17 @@ The numbers describe this reproduction, not a universal filesystem limit. See
 
 Tool callers cannot supply extended or device namespace paths. On Windows,
 drive-relative and rooted paths, alternate data streams, reserved device names,
-and trailing-dot/space components are explicitly rejected. This intentionally
+wildcards, invalid Windows punctuation, ASCII control characters, and
+trailing-dot/space components are explicitly rejected. This intentionally
 tightens ambiguous Windows inputs; ordinary relative artifact names and POSIX
 behavior are preserved. Internal prefixes are not persisted as artifact names
 or returned by file-tool success payloads. Existing safe failure messages remain.
+
+Component validation prefers `os.path.isreserved()` when available (Windows
+Python 3.13+). Python 3.12 uses explicit character, alias, and device-name checks,
+including device stems with extensions and the Windows superscript-digit aliases.
+Neither path depends on the deprecated `Path.is_reserved()` method. Windows rules
+remain gated to Windows, so POSIX filename behavior is unchanged.
 
 ## Supported contract and limits
 
@@ -77,3 +84,12 @@ Run these together with `test_workspace.py`, `test_sandbox.py`,
 `test_file_tools.py`, and the demo/persistence regressions. A short pytest
 `--basetemp` allows the boundary test to construct the exact observed lengths;
 the test itself deliberately creates the long destination rather than avoiding it.
+
+`tests/test_windows_path_compatibility.py` is a stdlib-only suite for native API
+selection, the 3.12 fallback, invalid characters, ordinary artifacts, and relative
+containment. It can run under another installed Python without installing project
+dependencies: set `PYTHONPATH=src` and use
+`python -m unittest discover -s tests -p test_windows_path_compatibility.py -v`.
+Native API comparisons skip when that API is unavailable; POSIX filesystem cases
+skip on Windows. Passing a simulated API-selection test is not verification on
+another Python runtime.
