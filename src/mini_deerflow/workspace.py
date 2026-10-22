@@ -4,14 +4,17 @@ from pathlib import Path
 
 def _is_reserved_windows_component(part: str) -> bool:
     """Prefer current Windows rules, with a Python 3.12-compatible fallback."""
-    isreserved = getattr(os.path, "isreserved", None)
-    if isreserved is not None:
-        return isreserved(part)
-
+    # Validate component syntax before the pathname API can interpret "z:stream"
+    # as a drive-relative path and overlook its alternate-stream separator.
     if part.endswith((".", " ")) or any(
         ord(char) < 32 or char in '<>:"/\\|?*' for char in part
     ):
         return True
+
+    isreserved = getattr(os.path, "isreserved", None)
+    if isreserved is not None:
+        return isreserved(part)
+
     stem = part.partition(".")[0].rstrip(" ").upper()
     return stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or (
         len(stem) == 4 and stem[:3] in {"COM", "LPT"} and stem[3] in "123456789¹²³"

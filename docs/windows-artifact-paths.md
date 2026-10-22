@@ -45,9 +45,13 @@ tightens ambiguous Windows inputs; ordinary relative artifact names and POSIX
 behavior are preserved. Internal prefixes are not persisted as artifact names
 or returned by file-tool success payloads. Existing safe failure messages remain.
 
-Component validation prefers `os.path.isreserved()` when available (Windows
-Python 3.13+). Python 3.12 uses explicit character, alias, and device-name checks,
-including device stems with extensions and the Windows superscript-digit aliases.
+Component validation always rejects invalid characters and trailing-dot/space
+aliases before consulting `os.path.isreserved()` for additional native checks
+(Windows Python 3.13+). This order matters: the pathname API can treat an isolated
+`z:stream` as drive-relative and overlook its colon, even though a component
+inside `reports/z:stream` must not contain an alternate-stream separator.
+Python 3.12 retains explicit device-name checks, including device stems with
+extensions and the Windows superscript-digit aliases.
 Neither path depends on the deprecated `Path.is_reserved()` method. Windows rules
 remain gated to Windows, so POSIX filename behavior is unchanged.
 
@@ -90,6 +94,9 @@ selection, the 3.12 fallback, invalid characters, ordinary artifacts, and relati
 containment. It can run under another installed Python without installing project
 dependencies: set `PYTHONPATH=src` and use
 `python -m unittest discover -s tests -p test_windows_path_compatibility.py -v`.
+ADS regressions require rejection before filesystem resolution under fallback,
+real native, and native-always-false conditions. Native/fallback comparisons use
+complete relative pathnames to avoid isolated-component drive parsing.
 Native API comparisons skip when that API is unavailable; POSIX filesystem cases
 skip on Windows. Passing a simulated API-selection test is not verification on
 another Python runtime.

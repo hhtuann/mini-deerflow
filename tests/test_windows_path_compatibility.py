@@ -29,6 +29,10 @@ INVALID_COMPONENTS = (
     "LPT³.log",
     "report.md.",
     "report.md ",
+    "z:stream",
+    "a:evil.txt",
+    "z:",
+    "report:stream",
     *(f"report{char}name.md" for char in '*?"<>|:'),
     *(f"report{chr(code)}name.md" for code in range(32)),
 )
@@ -81,6 +85,26 @@ class ReservedComponentCompatibilityTests(unittest.TestCase):
         native.assert_any_call("NUL")
         self.assertEqual(native.call_count, 2)
 
+    def test_invalid_component_syntax_cannot_be_allowed_by_native_api(self) -> None:
+        native = Mock(return_value=False)
+        components = (
+            "z:stream",
+            "a:evil.txt",
+            "z:",
+            "report:stream",
+            "report.",
+            "report ",
+            *(f"report{char}name.md" for char in '*?"<>|:'),
+            *(f"report{chr(code)}name.md" for code in range(32)),
+        )
+        with patch.object(os.path, "isreserved", native, create=True):
+            for component in components:
+                with self.subTest(component=repr(component)):
+                    self.assertTrue(
+                        workspace_module._is_reserved_windows_component(component)
+                    )
+        native.assert_not_called()
+
     @unittest.skipUnless(
         hasattr(os.path, "isreserved"), "Native API requires Windows Python 3.13+"
     )
@@ -91,7 +115,9 @@ class ReservedComponentCompatibilityTests(unittest.TestCase):
                 with self.subTest(component=repr(component)):
                     self.assertEqual(
                         workspace_module._is_reserved_windows_component(component),
-                        native(component),
+                        # Give the pathname API an unambiguous relative path:
+                        # an isolated "z:stream" can be parsed as drive-relative.
+                        native(f"reports/{component}"),
                     )
 
 
@@ -110,6 +136,41 @@ class WindowsWorkspaceCompatibilityTests(unittest.TestCase):
                 with self.assertRaises(WorkspacePathError):
                     self.workspace.resolve_path(f"{component}/report.md")
         self.assertEqual(self.workspace.list_files(), ())
+
+    def test_ads_paths_rejected_before_resolution_under_both_api_paths(self) -> None:
+        apis = [("fallback", None), ("native-false", Mock(return_value=False))]
+        native = getattr(os.path, "isreserved", None)
+        if native is not None:
+            apis.append(("real-native", native))
+        with patch.object(
+            workspace_module, "_resolved_path", side_effect=AssertionError
+        ):
+            for api_name, detector in apis:
+                with patch.object(os.path, "isreserved", detector, create=True):
+                    for relative in (
+                        "reports/z:stream",
+                        "reports/a:evil.txt",
+                        "reports/z:",
+                        "reports/report:stream",
+                    ):
+                        for operation in (
+                            "resolve_path",
+                            "read_text",
+                            "write_text",
+                            "list_files",
+                        ):
+                            with (
+                                self.subTest(
+                                    api=api_name, path=relative, operation=operation
+                                ),
+                                self.assertRaises(WorkspacePathError),
+                            ):
+                                arguments = (
+                                    (relative, "denied")
+                                    if operation == "write_text"
+                                    else (relative,)
+                                )
+                                getattr(self.workspace, operation)(*arguments)
 
     def test_ordinary_artifacts_accepted_without_deprecated_api(self) -> None:
         with patch.object(
