@@ -16,13 +16,17 @@ from mini_deerflow.actions import (
     ActionDecision,
     CompleteStepAction,
     ToolCallAction,
-    ToolObservation,
 )
 from mini_deerflow.answer_synthesis import AnswerSynthesisDraft, DraftClaim
 from mini_deerflow.config import Settings
 from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.conversation import ConversationRecord, SQLiteConversationRepository
-from mini_deerflow.delegation import BranchFinding, BranchResult, ResearchTaskContext
+from mini_deerflow.decision import ActionContext
+from mini_deerflow.delegation import (
+    BoundedResearcherSubagent,
+    BranchResult,
+    ResearchTaskContext,
+)
 from mini_deerflow.demo.service import (
     DEFAULT_DEMO_GOAL,
     ContinueDemoCommand,
@@ -44,7 +48,7 @@ from mini_deerflow.runtime import (
 from mini_deerflow.sandbox import SessionSandboxResolver
 from mini_deerflow.schemas import Plan, PlanStep
 from mini_deerflow.structured_output import StructuredChatModel
-from mini_deerflow.tools import ToolResult
+from mini_deerflow.tools import ToolRegistry, WebFetchTool, WebSearchTool
 from mini_deerflow.tracing import ExecutionTrace, ExecutionTracer, TraceSink
 from mini_deerflow.web import (
     FetchedPage,
@@ -233,22 +237,13 @@ class _ScenarioModel:
                     },
                 )
             if remaining == 2:
-                return ToolCallAction(
-                    type="tool_call",
-                    tool_name="web_search",
-                    arguments={"query": "bounded final mvp evidence"},
-                )
-            if remaining == 1:
-                return ToolCallAction(
-                    type="tool_call",
-                    tool_name="web_fetch",
-                    arguments={"url": FETCH_SOURCE},
-                )
-            if remaining == 0:
                 return CompleteStepAction(
                     type="complete_step",
-                    summary="Collected safe search and fetch evidence for the MVP.",
-                    sources=[FETCH_SOURCE, INVENTED_SOURCE, UNSAFE_URL],
+                    summary=(
+                        "Recorded deterministic safety and provider limitations "
+                        "before delegated evidence collection."
+                    ),
+                    sources=[INVENTED_SOURCE, UNSAFE_URL],
                 )
 
         if title == "Delegate independent evidence checks":
@@ -269,14 +264,14 @@ class _ScenarioModel:
                                     "Return one bounded finding or a controlled "
                                     "limitation."
                                 ),
-                                "tool_call_budget": 1,
+                                "tool_call_budget": (1 if branch_id == "beta" else 2),
                                 "delegation_depth": 1,
                             }
                             for branch_id in ("beta", "alpha")
                         ],
                     },
                 )
-            if remaining == 2:
+            if remaining == 1:
                 if self._interrupt_after_delegation:
                     raise RuntimeError(
                         "deterministic interruption after delegation checkpoint"
@@ -296,7 +291,7 @@ class _ScenarioModel:
                 summary=(
                     "Concluded the bounded MVP demonstration from validated evidence."
                 ),
-                sources=[SEARCH_SOURCE],
+                sources=[DELEGATED_SOURCE],
             )
 
         raise AssertionError(
@@ -412,6 +407,14 @@ class _DeterministicWebProvider:
                 f"{SECRET_CANARY} {RAW_PAYLOAD_CANARY} {MACHINE_PATH_CANARY}",
                 category=WebProviderErrorCategory.AUTHENTICATION,
             )
+        if query == "delegated bounded evidence":
+            return [
+                SearchResult(
+                    title="Delegated deterministic source",
+                    url=DELEGATED_SOURCE,
+                    snippet="Independent evidence from the alpha branch.",
+                )
+            ]
         return [
             SearchResult(
                 title="Deterministic MVP source",
@@ -433,61 +436,60 @@ class _DeterministicWebProvider:
         )
 
 
+class _PartialBranchSelector:
+    """Drive real bounded branch tools with deterministic decisions."""
+
+    async def select_action(
+        self,
+        context: ActionContext,
+    ) -> ToolCallAction | CompleteStepAction:
+        branch_id = "beta" if "beta" in context.goal else "alpha"
+        if not context.observations:
+            query = (
+                f"{SECRET_CANARY} controlled beta failure"
+                if branch_id == "beta"
+                else "delegated bounded evidence"
+            )
+            return ToolCallAction(
+                type="tool_call",
+                tool_name="web_search",
+                arguments={"query": query},
+            )
+        return CompleteStepAction(
+            type="complete_step",
+            summary=(
+                "The alpha branch found independent supporting evidence."
+                if branch_id == "alpha"
+                else "The beta branch could not verify its delegated claim."
+            ),
+            sources=[DELEGATED_SOURCE],
+        )
+
+
 class _PartialResearcher:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        provider: _DeterministicWebProvider,
+        resolver: _FakePublicResolver,
+    ) -> None:
         self.calls: list[str] = []
+        registry = ToolRegistry(
+            [
+                WebSearchTool(provider),
+                WebFetchTool(provider, PublicWebTargetValidator(resolver)),
+            ]
+        )
+        self._researcher = BoundedResearcherSubagent(
+            _PartialBranchSelector(),
+            registry,
+            context_budget=DEMO_CONTEXT_BUDGET,
+        )
 
     async def research(self, context: ResearchTaskContext) -> BranchResult:
         branch_id = context.task.branch_id
         self.calls.append(branch_id)
         await asyncio.sleep(0)
-        if branch_id == "beta":
-            return BranchResult(
-                branch_id=branch_id,
-                status="controlled_failure",
-                error="Controlled branch limitation: beta returned no usable evidence.",
-                finding=BranchFinding(
-                    summary=FALSE_FACT_CANARY,
-                    citations=[INVENTED_SOURCE],
-                ),
-            )
-
-        action = ToolCallAction(
-            type="tool_call",
-            tool_name="web_search",
-            arguments={"query": "delegated bounded evidence"},
-        )
-        observation = ToolObservation(
-            step_number=1,
-            step_tool_call_number=1,
-            total_tool_call_number=1,
-            branch_id=branch_id,
-            branch_tool_call_number=1,
-            action=action,
-            result=ToolResult.ok(
-                data={
-                    "query": "delegated bounded evidence",
-                    "results": [
-                        {
-                            "url": DELEGATED_SOURCE,
-                            "title": "Delegated deterministic source",
-                            "snippet": ("Independent evidence from the alpha branch."),
-                        }
-                    ],
-                    "count": 1,
-                }
-            ),
-        )
-        return BranchResult(
-            branch_id=branch_id,
-            status="success",
-            observations=[observation],
-            finding=BranchFinding(
-                summary="The alpha branch found independent supporting evidence.",
-                citations=[DELEGATED_SOURCE],
-            ),
-            tool_calls_used=1,
-        )
+        return await self._researcher.research(context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,14 +517,16 @@ class _ScenarioResources:
         *,
         interrupt_after_delegation: bool = False,
     ) -> _ScenarioResources:
+        provider = _DeterministicWebProvider()
+        resolver = _FakePublicResolver()
         return cls(
             model=_ScenarioModel(
                 goal,
                 interrupt_after_delegation=interrupt_after_delegation,
             ),
-            provider=_DeterministicWebProvider(),
-            resolver=_FakePublicResolver(),
-            researcher=_PartialResearcher(),
+            provider=provider,
+            resolver=resolver,
+            researcher=_PartialResearcher(provider, resolver),
         )
 
     def diagnostics(self) -> OfflineScenarioDiagnostics:

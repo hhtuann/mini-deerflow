@@ -11,6 +11,10 @@ from queue import Empty, Queue
 from threading import Lock
 from typing import Literal, Self
 
+from mini_deerflow.demo.graph_projection import (
+    ExecutionGraphProjection,
+    project_execution_graph,
+)
 from mini_deerflow.demo.view_models import (
     DemoRunView,
     TraceEventView,
@@ -60,12 +64,14 @@ class QueueTraceSink:
     def __init__(self) -> None:
         self._queue: Queue[TraceEventView] = Queue()
         self._history: list[TraceEventView] = []
+        self._events: list[ExecutionTrace] = []
         self._history_lock = Lock()
 
     def emit(self, event: ExecutionTrace) -> None:
         view = project_trace_event(event)
         with self._history_lock:
             self._history.append(view)
+            self._events.append(event)
         self._queue.put(view)
 
     def drain(self) -> tuple[TraceEventView, ...]:
@@ -79,6 +85,13 @@ class QueueTraceSink:
     def history(self) -> tuple[TraceEventView, ...]:
         with self._history_lock:
             return tuple(self._history)
+
+    def execution_graph(self) -> ExecutionGraphProjection:
+        """Project the current safe event history without exposing raw events."""
+
+        with self._history_lock:
+            events = tuple(self._events)
+        return project_execution_graph(events)
 
 
 class DemoJobManager:
@@ -177,6 +190,13 @@ class DemoJobManager:
         with self._lock:
             sink = self._trace_sink
         return () if sink is None else sink.history()
+
+    def execution_graph(self) -> ExecutionGraphProjection:
+        """Return a live graph snapshot rebuilt from the current job events."""
+
+        with self._lock:
+            sink = self._trace_sink
+        return ExecutionGraphProjection() if sink is None else sink.execution_graph()
 
     @property
     def is_active(self) -> bool:

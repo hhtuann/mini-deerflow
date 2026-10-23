@@ -12,11 +12,15 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from mini_deerflow.answer_synthesis import infer_answer_language
 from mini_deerflow.conversation import ConversationRecord, TurnStatus
+from mini_deerflow.demo.graph_projection import (
+    ExecutionGraphProjection,
+    project_execution_graph,
+)
 from mini_deerflow.evidence import (
     UserFacingAnswer,
     contains_execution_metadata,
@@ -203,6 +207,9 @@ class DemoRunView:
     artifact: ArtifactView
     limitations: tuple[str, ...]
     turn_id: str | None = None
+    execution_graph: ExecutionGraphProjection = field(
+        default_factory=ExecutionGraphProjection
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,6 +571,7 @@ def project_demo_run(
         ),
         limitations=limitations,
         turn_id=state.get("turn_id"),
+        execution_graph=project_execution_graph(trace_events),
     )
 
 

@@ -170,3 +170,9 @@ The following are boundaries of the current implementation, not defects claimed 
 - any WAVE 1+ execution-event, proof, scheduling, or orchestration changes are outside this baseline and must preserve or deliberately revise the contracts above with new regression evidence.
 
 This document is the WAVE 0 reference point. Future architecture work should cite the specific invariant it changes, add or update regression coverage first, and preserve checkpoint, budget, provenance, citation, workspace, and turn-isolation guarantees unless an intentional design change is documented.
+
+## Downstream observability relationship
+
+The implemented observability path is runtime -> WAVE 1 `ExecutionEvent` -> WAVE 2 `ExecutionGraphProjection` -> Streamlit Agent graph. The [WAVE 1 event contract](execution-events.md) remains canonical; the [WAVE 2 Agent graph](agent-graph.md) is a read-only downstream consumer of those structured events.
+
+This relationship leaves this document as the WAVE 0 reference and preserves its checkpoint/resume, budget, evidence provenance, citation-validation, workspace, and turn-isolation invariants. The projection and UI observe execution without controlling it.
