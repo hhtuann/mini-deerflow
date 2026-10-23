@@ -79,6 +79,8 @@ For the canonical Phase 1 user guide, see
 frontmatter, metadata discovery versus activation, per-turn API/UI selection,
 context priorities, durable pins, offline commands and limitations.
 
+New skill activations must satisfy both the 32,768-byte raw UTF-8 instruction limit and the 56,000-character full JSON-serialized snapshot limit; see [activation limits and escaping examples](docs/context-engineering-skills.md#skill-files-discovery-is-not-activation).
+
 ```mermaid
 flowchart TB
     subgraph Presentation
@@ -482,7 +484,8 @@ without installs:
 
 | Check | Reported result |
 | --- | --- |
-| Full pytest | 765 passed, 6 skipped, 223 subtests |
+| Full pytest | 778 passed, 6 skipped, 223 subtests in 26.22 seconds |
+| Skill snapshot-size correction suite | 13 cases, all passed |
 | Deterministic evaluator | 9 cases / 36 invariants passed |
 | Lint, format, lock, diff | Passed |
 | Phase 1 offline demo | 37 requests; maximum 6,961 / 7,000 dynamic characters; 8 compacted requests; 15 passing boolean checks |
@@ -491,6 +494,7 @@ No live browser or live model validation was performed; Phase 0 mentor
 acceptance remains pending. Snapshot counts are not guarantees for future runs.
 
 ```powershell
+uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skill_snapshot_sizes.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
 uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skills.py tests/test_phase1_context.py tests/test_phase1_runtime.py tests/test_phase1_delegation.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
 uv run --offline --no-sync pytest -q -rs -p no:cacheprovider --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
 uv run --offline --no-sync ruff check . --no-cache

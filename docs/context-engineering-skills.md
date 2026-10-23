@@ -105,8 +105,37 @@ rediscovery; body-only changes can be picked up by a new activation, while an
 existing turn retains its pinned snapshot.
 
 Default registry limits are 128 entries, 4,096 frontmatter bytes, 65,536 file
-bytes, and 32,768 instruction bytes. Empty/NUL-containing or invalid UTF-8 bodies
-are rejected. Paths, traversal, symlinks, junctions and reparse points are not
+bytes, and 32,768 raw UTF-8 instruction bytes. Activation must satisfy **both**
+the existing instruction-byte limit and a new **56,000-character serialized
+`SkillContext` limit**, measured as:
+
+```python
+len(json.dumps(context.model_dump(mode="json"), ensure_ascii=False, sort_keys=True))
+```
+
+This uses Python's default JSON separators (including spaces) and counts the
+complete snapshot: ID, fingerprint, description, instructions, field names and
+structure, including all JSON escaping. `ensure_ascii=False` preserves ordinary
+Unicode characters, but newlines, quotes, backslashes and control characters
+still expand when escaped. A byte-valid body is therefore not necessarily
+activation-valid. For example, with otherwise valid small metadata:
+
+| Instruction body (Python expression) | Raw UTF-8 bytes | Activation size outcome |
+| --- | --- | --- |
+| `"a" * 32_768` | 32,768 | Passes both size limits |
+| `"é" * 16_384` | 32,768 | Passes both size limits |
+| `"a" + "\n" * 32_766 + "a"` | 32,768 | Fails the serialized cap: escaped instructions alone exceed 56,000 characters |
+
+For that newline-heavy candidate with ID `snapshot` and description
+`Snapshot boundary test`, the measured sizes were 32,768 raw UTF-8 body bytes,
+65,696 skill JSON characters and 65,879 characters including the default runtime
+envelope. It now fails activation before reaching the ledger.
+
+Highly escaped bodies that formerly passed the byte check can now be rejected
+at activation. An oversized snapshot raises a clear `SkillsError` before turn
+reservation; the durable body is never truncated to make it fit.
+Empty/NUL-containing or invalid UTF-8 bodies are rejected. Paths, traversal,
+symlinks, junctions and reparse points are not
 valid activation IDs or accepted registry entries. The root is trusted caller
 configuration; checks assume no hostile concurrent local filesystem mutation.
 
@@ -182,6 +211,10 @@ shortened to force a fit. If the mandatory payload still cannot fit,
 The original state, evidence and pinned skill body remain available for
 checkpointing, audit and report rendering; compaction affects projections only.
 
+The 2,000-character LLM-only skill cap and the default 60,000-character dynamic
+model-context budget are independent of the activation snapshot limits above;
+neither changes with the new activation check.
+
 `ProjectionMetadata` reports omitted/truncated/retained item counts, payload and
 budget characters, approximate tokens, skill ID/omission and policy version
 (`phase1-v1`). Planning computes metrics but excludes `context_projection` from
@@ -210,6 +243,19 @@ checkpoint exists, it owns the interrupted execution state. Neither path needs
 to reactivate the current skill file to recover the pinned body. Editing the
 file or configuring a different context budget affects new turns, not those pins.
 
+The ledger's `run_context_json` limit remains **60,000 characters**. The
+56,000-character activation cap leaves a **4,000-character reserve** for the
+runtime's context-budget and policy envelope (the default envelope adds **183
+characters**). The repository separately validates the complete serialized
+envelope, with the standard or configured budget, against 60,000 characters
+before opening the reservation transaction. The reserve does not guarantee a
+fit for pathologically enormous custom budget configurations.
+
+Historical ledger/checkpoint pins load unchanged and bypass the new activation
+rule; it applies to new activations, not `SkillContext` deserialization. There is
+no schema migration or storage-constraint change, and historical bodies are not
+truncated or rewritten.
+
 Legacy records without the optional pin fields use compatibility defaults;
 they cannot retroactively provide a historical skill/body pin. A completed
 resume loads the completed turn; it does not start a new turn. Checkpoint
@@ -225,6 +271,7 @@ resolution or synchronization. These commands do not require live credentials:
 
 ```powershell
 uv run --offline --no-sync python -m mini_deerflow.demo.phase1_offline
+uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skill_snapshot_sizes.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
 uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skills.py tests/test_phase1_context.py tests/test_phase1_runtime.py tests/test_phase1_delegation.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
 uv run --offline --no-sync pytest -q -rs -p no:cacheprovider --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
 uv run --offline --no-sync ruff check . --no-cache
@@ -245,8 +292,10 @@ compaction diagnostics; output sizes and counts are observations, not API guaran
 ### Local verification snapshot
 
 Verified locally on Windows Python **3.12.14** using the installed environment,
-without installs. Full pytest reported **765 passed, 6 skipped,
-223 subtests**; the deterministic evaluator passed **9 cases / 36 invariants**.
+without installs. The fresh full pytest run reported **778 passed, 6 skipped,
+223 subtests in 26.22 seconds**. The new snapshot-size correction suite
+(`tests/test_skill_snapshot_sizes.py`) reported **13 cases, all passed**;
+the deterministic evaluator passed **9 cases / 36 invariants**.
 Lint, format, lock and diff checks passed. The Phase 1 demo captured **37
 requests**, a maximum dynamic payload of **6,961 characters**, **8 compacted
 requests**, and **15 passing boolean checks**. Snapshot counts are not guarantees

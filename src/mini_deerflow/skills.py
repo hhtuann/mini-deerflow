@@ -4,6 +4,8 @@ SKILL.md uses UTF-8 JSON frontmatter between lines containing exactly ``---``.
 Required keys: id, description, applicability, version. Optional: conflicts (IDs).
 Discovery reads only bounded frontmatter, never the instruction body. Activation
 checks the discovered metadata and pins the complete file's SHA-256 and body.
+Activation also bounds the complete JSON-escaped snapshot, not just body bytes,
+so selected content fits the existing durable ledger without truncation.
 
 Consumers MUST treat instructions as subordinate to system/developer policies,
 user intent and existing tool permissions. Declared conflicts and content pinning
@@ -31,6 +33,13 @@ ShortText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)
 ]
 Fingerprint = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+# Independent limits: UTF-8 source bytes and JSON-escaped snapshot characters.
+# The ledger permits 60,000 characters; reserve 4,000 for the runtime's budget
+# and policy envelope. Do not apply the activation limit to SkillContext itself:
+# existing checkpoints/ledger snapshots may validly predate this selection rule.
+MAX_SKILL_INSTRUCTION_BYTES = 32_768
+MAX_SKILL_SNAPSHOT_JSON_CHARS = 56_000
 
 
 class SkillsError(ValueError):
@@ -110,7 +119,7 @@ class SkillsRegistry:
         *,
         max_frontmatter_bytes: int = 4096,
         max_file_bytes: int = 65_536,
-        max_instruction_bytes: int = 32_768,
+        max_instruction_bytes: int = MAX_SKILL_INSTRUCTION_BYTES,
         max_skills: int = 128,
     ) -> None:
         for value in (
@@ -124,7 +133,9 @@ class SkillsRegistry:
         self.root = Path(root) if root is not None else default_skills_root()
         self._frontmatter_limit = max_frontmatter_bytes
         self._file_limit = max_file_bytes
-        self._instruction_limit = min(max_instruction_bytes, 32_768)
+        self._instruction_limit = min(
+            max_instruction_bytes, MAX_SKILL_INSTRUCTION_BYTES
+        )
         self._max_skills = max_skills
         self._metadata: dict[str, SkillMetadata] | None = None
 
@@ -278,12 +289,24 @@ class SkillsRegistry:
             fingerprint = hashlib.sha256(content).hexdigest()
             if expected_fingerprint is not None and fingerprint != expected_fingerprint:
                 raise SkillsError("Skill content fingerprint changed.")
-            return SkillContext(
+            context = SkillContext(
                 id=skill_id,
                 fingerprint=fingerprint,
                 instructions=instructions,
                 description=header.description,
             )
+            # Match the runtime's ensure_ascii/separators, including metadata and
+            # escaping. A byte-compliant body can expand up to sixfold in JSON.
+            serialized = json.dumps(
+                context.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+            )
+            if len(serialized) > MAX_SKILL_SNAPSHOT_JSON_CHARS:
+                raise SkillsError(
+                    "The serialized skill snapshot exceeds the "
+                    f"{MAX_SKILL_SNAPSHOT_JSON_CHARS}-character JSON limit "
+                    f"({len(serialized)} characters after escaping)."
+                )
+            return context
         except (OSError, UnicodeError) as exc:
             raise SkillsError(f"Cannot activate skill: {exc}") from exc
 
