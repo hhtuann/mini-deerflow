@@ -566,6 +566,7 @@ This project exercises:
 
 ## Current Limitations
 
+- Windows artifact descendants support extended-length I/O; storage roots and SQLite paths must remain host-accessible. See [Windows artifact path portability](docs/windows-artifact-paths.md).
 - Live-provider research quality, cost, and latency are not benchmarked by acceptance tests.
 - Citation membership does not establish factual correctness or semantic entailment.
 - Context accounting is character-based; exact tokenizer accounting is not implemented.
