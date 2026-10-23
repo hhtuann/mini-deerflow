@@ -251,9 +251,11 @@ def test_streamlit_initial_surface_is_an_honest_chat(
     assert not app.exception
     assert [button.label for button in app.sidebar.button] == ["New chat", "Refresh"]
     assert [selectbox.label for selectbox in app.sidebar.selectbox] == [
-        "Execution mode"
+        "Execution mode",
+        "Skill for next turn",
     ]
     assert app.sidebar.selectbox[0].value == "Live web"
+    assert app.sidebar.selectbox[1].value is None
     assert len(app.chat_input) == 1
     assert app.chat_input[0].disabled is False
     assert not app.tabs

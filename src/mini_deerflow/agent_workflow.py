@@ -22,6 +22,7 @@ from mini_deerflow.answer_synthesis import (
     infer_answer_language,
 )
 from mini_deerflow.context_budget import (
+    CONTEXT_POLICY_VERSION,
     ContextBudget,
     ProjectionMetadata,
     fit_context_to_budget,
@@ -111,7 +112,11 @@ def _trace_projection(
 ) -> None:
     if projection is None:
         return
-    compacted = projection.omitted_items > 0 or projection.truncated_items > 0
+    compacted = (
+        projection.omitted_items > 0
+        or projection.truncated_items > 0
+        or projection.skill_omitted
+    )
     tracer.emit(
         kind=TraceKind.CONTEXT_BUDGET,
         phase=TracePhase.OUTCOME,
@@ -120,6 +125,12 @@ def _trace_projection(
         context_omitted_items=projection.omitted_items,
         context_truncated_items=projection.truncated_items,
         context_estimated_tokens=projection.estimated_tokens,
+        context_payload_chars=projection.payload_chars,
+        context_budget_chars=projection.budget_chars,
+        context_retained_items=projection.retained_items,
+        active_skill_id=projection.skill_id,
+        skill_instructions_omitted=projection.skill_omitted,
+        context_policy_version=projection.policy_version,
     )
 
 
@@ -241,19 +252,63 @@ def build_agent_workflow(
 
     tool_runner = ToolRunner(registry)
 
+    def wrap_node(name: str, node: Callable) -> Callable:
+        """Validate the pinned policy before every node, including resumed nodes."""
+
+        def validate_policy(state: AgentState) -> None:
+            version = state.get("context_policy_version", CONTEXT_POLICY_VERSION)
+            if version != CONTEXT_POLICY_VERSION:
+                raise ValueError(
+                    "Context policy mismatch: checkpoint context_policy_version "
+                    f"{version!r} is incompatible with {CONTEXT_POLICY_VERSION!r}; "
+                    "resume with the matching policy or start a new run."
+                )
+
+        if inspect.iscoroutinefunction(node):
+
+            async def guarded(state: AgentState) -> dict[str, object]:
+                validate_policy(state)
+                return await node(state)
+        else:
+
+            def guarded(state: AgentState) -> dict[str, object]:
+                validate_policy(state)
+                return node(state)
+
+        return resolved_tracer.wrap_node(name, guarded)
+
     def planner_node(
         state: AgentState,
     ) -> dict[str, object]:
         logger.info("Planning a bounded research goal")
 
         planner_parameters = inspect.signature(planner).parameters
-        if "conversation_context" in planner_parameters:
-            plan = planner(
-                state["goal"],
-                conversation_context=state.get("conversation_context"),
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in planner_parameters.values()
+        )
+        planner_kwargs = {
+            name: value
+            for name, value in {
+                "turn_id": state.get("turn_id"),
+                "turn_sequence": state.get("turn_sequence"),
+                "conversation_context": state.get("conversation_context"),
+                "active_skill": state.get("active_skill"),
+                "context_budget": state.get("context_budget")
+                or resolved_context_budget,
+                "on_context_projection": lambda projection: _trace_projection(
+                    resolved_tracer,
+                    "planner",
+                    projection,
+                ),
+            }.items()
+            if accepts_kwargs
+            or (
+                name in planner_parameters
+                and planner_parameters[name].kind != inspect.Parameter.POSITIONAL_ONLY
             )
-        else:
-            plan = planner(state["goal"])
+        }
+        plan = planner(state["goal"], **planner_kwargs)
 
         return {
             "plan": plan,
@@ -270,7 +325,7 @@ def build_agent_workflow(
             resolved_action_registry,
             max_tool_calls_per_step=max_tool_calls_per_step,
             max_total_tool_calls=max_total_tool_calls,
-            context_budget=resolved_context_budget,
+            context_budget=state.get("context_budget") or resolved_context_budget,
         )
         _trace_projection(
             resolved_tracer,
@@ -427,6 +482,9 @@ def build_agent_workflow(
                         remaining_tool_calls=remaining_tool_calls,
                         remaining_allocated_step_tool_calls=(
                             tool_budget.remaining_allocated_step_tool_calls
+                        ),
+                        context_budget=(
+                            state.get("context_budget") or resolved_context_budget
                         ),
                     )
             else:
@@ -707,6 +765,7 @@ def build_agent_workflow(
     async def review_node(
         state: AgentState,
     ) -> dict[str, object]:
+        stage_context_budget = state.get("context_budget") or resolved_context_budget
         plan = state["plan"]
 
         if plan is None:
@@ -745,20 +804,20 @@ def build_agent_workflow(
         # complete in AgentState for checkpointing and report rendering.
         projected_evidence, evidence_metadata = project_evidence_records(
             list(state.get("evidence", [])),
-            resolved_context_budget,
+            stage_context_budget,
         )
         projected_findings, findings_metadata = project_review_findings(
             list(state.get("findings", [])),
-            resolved_context_budget,
+            stage_context_budget,
         )
         projected_summaries, summaries_metadata = project_summaries(
             list(state["notes"]),
-            resolved_context_budget,
+            stage_context_budget,
         )
         projected_limitations = [
             truncate_text(
                 limitation,
-                resolved_context_budget.max_item_chars,
+                stage_context_budget.max_item_chars,
             )[0]
             for limitation in derive_review_limitations(
                 state["tool_observations"],
@@ -768,6 +827,7 @@ def build_agent_workflow(
 
         context = ReviewContext(
             goal=state["goal"],
+            active_skill=state.get("active_skill"),
             remaining_steps=remaining_steps,
             completed_step_summaries=projected_summaries,
             findings=projected_findings,
@@ -780,7 +840,7 @@ def build_agent_workflow(
 
         context = fit_context_to_budget(
             context,
-            resolved_context_budget,
+            stage_context_budget,
             merge_metadata(
                 evidence_metadata,
                 findings_metadata,
@@ -906,6 +966,7 @@ def build_agent_workflow(
     def replan_node(
         state: AgentState,
     ) -> dict[str, object]:
+        stage_context_budget = state.get("context_budget") or resolved_context_budget
         plan = state["plan"]
 
         if plan is None:
@@ -937,11 +998,12 @@ def build_agent_workflow(
 
         projected_summaries, summaries_metadata = project_summaries(
             list(state["notes"]),
-            resolved_context_budget,
+            stage_context_budget,
         )
 
         request = ReplanRequest(
             goal=state["goal"],
+            active_skill=state.get("active_skill"),
             review=verdict,
             completed_step_summaries=projected_summaries,
             replaced_steps=plan.steps[current_step:],
@@ -960,12 +1022,12 @@ def build_agent_workflow(
 
         request, replan_compaction_metadata = compact_replan_request(
             request,
-            resolved_context_budget,
+            stage_context_budget,
         )
 
         request = fit_context_to_budget(
             request,
-            resolved_context_budget,
+            stage_context_budget,
             merge_metadata(
                 summaries_metadata,
                 replan_compaction_metadata,
@@ -1099,6 +1161,7 @@ def build_agent_workflow(
     async def synthesize_node(
         state: AgentState,
     ) -> dict[str, object]:
+        stage_context_budget = state.get("context_budget") or resolved_context_budget
         errors = list(state["errors"])
         observations = state["tool_observations"]
 
@@ -1153,11 +1216,11 @@ def build_agent_workflow(
 
         if answer_synthesizer is not None:
             projected_evidence, synthesis_evidence_metadata = project_evidence_records(
-                answer_evidence, resolved_context_budget
+                answer_evidence, stage_context_budget
             )
             projected_findings, synthesis_findings_metadata = project_review_findings(
                 answer_findings,
-                resolved_context_budget,
+                stage_context_budget,
             )
             synthesis_limitations = list(
                 dict.fromkeys(
@@ -1172,6 +1235,7 @@ def build_agent_workflow(
             )
             synthesis_context = AnswerSynthesisContext(
                 goal=state["goal"],
+                active_skill=state.get("active_skill"),
                 language=output_language,
                 completion_status=completion_status,
                 finalization_reason=state.get("finalization_reason"),
@@ -1181,7 +1245,7 @@ def build_agent_workflow(
             )
             synthesis_context = fit_context_to_budget(
                 synthesis_context,
-                resolved_context_budget,
+                stage_context_budget,
                 merge_metadata(
                     synthesis_evidence_metadata,
                     synthesis_findings_metadata,
@@ -1339,31 +1403,31 @@ def build_agent_workflow(
 
     builder = StateGraph(AgentState)
 
-    builder.add_node("planner", resolved_tracer.wrap_node("planner", planner_node))
+    builder.add_node("planner", wrap_node("planner", planner_node))
     builder.add_node(
         "decide_action",
-        resolved_tracer.wrap_node("decide_action", decide_action_node),
+        wrap_node("decide_action", decide_action_node),
     )
     builder.add_node(
         "execute_tool",
-        resolved_tracer.wrap_node("execute_tool", execute_tool_node),
+        wrap_node("execute_tool", execute_tool_node),
     )
     builder.add_node(
         "complete_step",
-        resolved_tracer.wrap_node("complete_step", complete_step_node),
+        wrap_node("complete_step", complete_step_node),
     )
     builder.add_node(
         "budget_exhausted",
-        resolved_tracer.wrap_node("budget_exhausted", budget_exhausted_node),
+        wrap_node("budget_exhausted", budget_exhausted_node),
     )
     builder.add_node(
         "synthesize",
-        resolved_tracer.wrap_node("synthesize", synthesize_node),
+        wrap_node("synthesize", synthesize_node),
     )
 
     if reviewer is not None:
-        builder.add_node("review", resolved_tracer.wrap_node("review", review_node))
-        builder.add_node("replan", resolved_tracer.wrap_node("replan", replan_node))
+        builder.add_node("review", wrap_node("review", review_node))
+        builder.add_node("replan", wrap_node("replan", replan_node))
 
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "decide_action")

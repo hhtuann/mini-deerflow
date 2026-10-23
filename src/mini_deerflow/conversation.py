@@ -106,6 +106,8 @@ class TurnRecord(BaseModel):
     reserved_tool_calls: int = Field(default=0, ge=0)
     trace_events: tuple[str, ...] = ()
     safe_error: str | None = Field(default=None, max_length=240)
+    # Internal pre-checkpoint snapshot; never project into conversational context.
+    run_context_json: str | None = Field(default=None, max_length=60_000, repr=False)
 
 
 def sanitize_conversation_title(message: str, *, limit: int = 64) -> str:
@@ -135,10 +137,12 @@ class SQLiteConversationRepository:
         user_message: str,
         session_tool_call_limit: int,
         reserved_tool_calls: int,
+        run_context_json: str | None = None,
     ) -> TurnRecord:
         thread_id = _identifier(thread_id, "thread_id")
         turn_id = _identifier(turn_id, "turn_id")
         user_message = _message(user_message)
+        _validate_run_context_json(run_context_json)
         _positive(session_tool_call_limit, "session_tool_call_limit")
         _non_negative(reserved_tool_calls, "reserved_tool_calls")
         if reserved_tool_calls > session_tool_call_limit:
@@ -176,8 +180,9 @@ class SQLiteConversationRepository:
                 """
                 INSERT INTO turns(
                     thread_id, turn_id, sequence, user_message, status,
-                    checkpoint_namespace, created_at, reserved_tool_calls
-                ) VALUES (?, ?, 1, ?, 'running', ?, ?, ?)
+                    checkpoint_namespace, created_at, reserved_tool_calls,
+                    run_context_json
+                ) VALUES (?, ?, 1, ?, 'running', ?, ?, ?, ?)
                 """,
                 (
                     thread_id,
@@ -186,6 +191,7 @@ class SQLiteConversationRepository:
                     namespace,
                     now,
                     reserved_tool_calls,
+                    run_context_json,
                 ),
             )
             await connection.commit()
@@ -198,10 +204,12 @@ class SQLiteConversationRepository:
         turn_id: str,
         user_message: str,
         reserved_tool_calls: int,
+        run_context_json: str | None = None,
     ) -> tuple[TurnRecord, bool]:
         thread_id = _identifier(thread_id, "thread_id")
         turn_id = _identifier(turn_id, "turn_id")
         user_message = _message(user_message)
+        _validate_run_context_json(run_context_json)
         _non_negative(reserved_tool_calls, "reserved_tool_calls")
         now = _now()
         async with self._connection() as connection:
@@ -217,6 +225,8 @@ class SQLiteConversationRepository:
                     raise IdempotencyConflictError(
                         "turn_id is already bound to a different user message"
                     )
+                # Replay the original snapshot even if the skill has since changed.
+                # Runtime checks explicit request changes against persisted state.
                 return _turn_from_row(duplicate), False
             conversation = await _fetchone(
                 connection,
@@ -261,8 +271,9 @@ class SQLiteConversationRepository:
                 """
                 INSERT INTO turns(
                     thread_id, turn_id, sequence, user_message, status,
-                    checkpoint_namespace, created_at, reserved_tool_calls
-                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
+                    checkpoint_namespace, created_at, reserved_tool_calls,
+                    run_context_json
+                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)
                 """,
                 (
                     thread_id,
@@ -272,6 +283,7 @@ class SQLiteConversationRepository:
                     namespace,
                     now,
                     reserved_tool_calls,
+                    run_context_json,
                 ),
             )
             await connection.execute(
@@ -651,6 +663,7 @@ async def _initialize_schema(connection: aiosqlite.Connection) -> None:
             reserved_tool_calls INTEGER NOT NULL DEFAULT 0 CHECK(reserved_tool_calls >= 0),
             trace_json TEXT NOT NULL DEFAULT '[]',
             safe_error TEXT,
+            run_context_json TEXT CHECK(length(run_context_json) <= 60000),
             PRIMARY KEY(thread_id, turn_id),
             UNIQUE(thread_id, sequence),
             UNIQUE(thread_id, checkpoint_namespace)
@@ -659,6 +672,15 @@ async def _initialize_schema(connection: aiosqlite.Connection) -> None:
         ON turns(thread_id) WHERE status IN ('running','interrupted');
         """
     )
+    # Serialize inspection and ALTER so concurrent opens cannot race a migration.
+    await connection.execute("BEGIN IMMEDIATE")
+    cursor = await connection.execute("PRAGMA table_info(turns)")
+    columns = {row["name"] for row in await cursor.fetchall()}
+    if "run_context_json" not in columns:
+        await connection.execute(
+            "ALTER TABLE turns ADD COLUMN run_context_json TEXT "
+            "CHECK(length(run_context_json) <= 60000)"
+        )
     await connection.commit()
 
 
@@ -720,6 +742,7 @@ def _turn_from_row(row: aiosqlite.Row) -> TurnRecord:
         reserved_tool_calls=row["reserved_tool_calls"],
         trace_events=tuple(str(item) for item in raw_traces),
         safe_error=row["safe_error"],
+        run_context_json=row["run_context_json"],
     )
 
 
@@ -736,6 +759,15 @@ def _message(value: str) -> str:
     if not 1 <= len(normalized) <= 20_000:
         raise ValueError("user_message must contain between 1 and 20000 characters")
     return normalized
+
+
+def _validate_run_context_json(value: str | None) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise TypeError("run_context_json must be text or None")
+    if len(value) > 60_000:
+        raise ValueError("run_context_json must contain at most 60000 characters")
 
 
 def _positive(value: int, name: str) -> None:

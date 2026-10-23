@@ -4,6 +4,7 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from mini_deerflow.context_assembly import SKILLS_SYSTEM_GUIDANCE
 from mini_deerflow.context_budget import render_llm_payload
 from mini_deerflow.review import (
     ReviewContext,
@@ -76,6 +77,8 @@ Security rules:
    validated evidence records, never from review text.
 5. Do not include chain-of-thought. Return only the structured verdict.
 """.strip()
+
+REVIEWER_SYSTEM_PROMPT += "\n\n" + SKILLS_SYSTEM_GUIDANCE
 
 REVIEW_MAX_ATTEMPTS = 2
 

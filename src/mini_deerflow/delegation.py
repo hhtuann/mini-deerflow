@@ -9,6 +9,7 @@ fan-out, and returns a typed record for deterministic parent-side fan-in.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import time
 from collections.abc import Sequence
@@ -242,9 +243,15 @@ class BoundedResearcherSubagent:
         self._runner = ToolRunner(registry)
         self._context_budget = context_budget or ContextBudget()
 
-    async def research(self, context: ResearchTaskContext) -> BranchResult:
+    async def research(
+        self,
+        context: ResearchTaskContext,
+        *,
+        context_budget: ContextBudget | None = None,
+    ) -> BranchResult:
         from mini_deerflow.decision import ActionContext
 
+        resolved_context_budget = context_budget or self._context_budget
         task = context.task
         observations: list[ToolObservation] = []
         evidence: list[EvidenceRecord] = []
@@ -253,11 +260,11 @@ class BoundedResearcherSubagent:
             remaining_branch_tool_calls = task.tool_call_budget - len(observations)
             projected_observations, observation_metadata = project_observations(
                 observations,
-                self._context_budget,
+                resolved_context_budget,
             )
             projected_evidence, evidence_metadata = project_evidence_records(
                 evidence,
-                self._context_budget,
+                resolved_context_budget,
             )
             selector_context = ActionContext(
                 goal=task.objective,
@@ -281,7 +288,7 @@ class BoundedResearcherSubagent:
                 ActionContext,
                 fit_context_to_budget(
                     selector_context,
-                    self._context_budget,
+                    resolved_context_budget,
                     merge_metadata(observation_metadata, evidence_metadata),
                 ),
             )
@@ -541,9 +548,11 @@ class DelegateResearchTool:
         parent_step_number: int,
         remaining_tool_calls: int,
         remaining_allocated_step_tool_calls: int | None = None,
+        context_budget: ContextBudget | None = None,
     ) -> ToolResult:
         """Validate, reserve, dispatch, and deterministically merge one wave."""
 
+        resolved_context_budget = context_budget or self._context_budget
         try:
             request = self.input_model.model_validate(arguments)
         except ValidationError as error:
@@ -618,11 +627,33 @@ class DelegateResearchTool:
                     context = build_research_task_context(
                         task,
                         self._branch_registry,
-                        self._context_budget,
+                        resolved_context_budget,
+                    )
+                    # Keep the injected research(context) protocol intact while
+                    # allowing budget-aware researchers to use the pinned turn
+                    # policy for every subsequent child model context.
+                    research = self._researcher.research
+                    parameters = inspect.signature(research).parameters
+                    budget_parameter = parameters.get("context_budget")
+                    accepts_budget = (
+                        budget_parameter is not None
+                        and budget_parameter.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+                    ) or any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
+                    )
+                    research_kwargs = (
+                        {"context_budget": resolved_context_budget}
+                        if accepts_budget
+                        else {}
                     )
                     async with semaphore:
                         result = await asyncio.wait_for(
-                            self._researcher.research(context),
+                            research(context, **research_kwargs),
                             timeout=self._branch_timeout_seconds,
                         )
                     if (

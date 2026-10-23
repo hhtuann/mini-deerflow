@@ -34,6 +34,7 @@ from pydantic import (
 from mini_deerflow.actions import ToolObservation
 from mini_deerflow.evidence import EvidenceRecord, StepFinding
 from mini_deerflow.schemas import PlanStep
+from mini_deerflow.skills import Fingerprint, SkillContext, SkillId
 
 # Conservative heuristic: roughly four characters per token for the mixed
 # English/Vietnamese technical text this agent produces. This is an
@@ -55,6 +56,8 @@ FIXED_CONTEXT_RESERVE_CHARS = 1_024
 # metadata (which is itself serialized) can never push the payload over
 # the hard bound after the pressure pass finishes.
 METADATA_SLACK_CHARS = 48
+CONTEXT_POLICY_VERSION = "phase1-v1"
+MAX_SKILL_INSTRUCTION_CHARS = 2_000
 
 # Ceiling for one retained limitation string once pressure reaches that
 # tier; failure visibility survives, verbose failure text does not.
@@ -144,6 +147,22 @@ class ProjectionMetadata(ContextBudgetModel):
     estimated_tokens: int = Field(
         default=0,
         ge=0,
+    )
+    payload_chars: int = Field(default=0, ge=0)
+    budget_chars: int = Field(default=0, ge=0)
+    retained_items: int = Field(default=0, ge=0)
+    skill_id: SkillId | None = None
+    skill_omitted: bool = False
+    policy_version: str = CONTEXT_POLICY_VERSION
+
+
+class ProjectedSkillContext(ContextBudgetModel):
+    """LLM-only skill view; the immutable activation snapshot stays intact."""
+
+    id: SkillId
+    fingerprint: Fingerprint
+    instructions: str | None = Field(
+        default=None, max_length=MAX_SKILL_INSTRUCTION_CHARS
     )
 
 
@@ -363,6 +382,10 @@ def merge_metadata(
     return ProjectionMetadata(
         omitted_items=sum(item.omitted_items for item in metadata),
         truncated_items=sum(item.truncated_items for item in metadata),
+        skill_id=next(
+            (item.skill_id for item in reversed(metadata) if item.skill_id), None
+        ),
+        skill_omitted=any(item.skill_omitted for item in metadata),
     )
 
 
@@ -413,6 +436,9 @@ def _apply_pressure(
 
     Pressure tiers, applied in order and only as far as needed:
 
+    First omit optional skill instructions, oldest conversation turns and
+    successful observations already represented by evidence provenance.
+    Then use the existing tiers:
     1. drop the oldest evidence items (all of them may go);
     2. drop the oldest observations, always keeping the most recent one;
     3. replace older summaries with position markers, newest last;
@@ -440,6 +466,82 @@ def _apply_pressure(
             model.model_copy(update={"context_projection": meta}),
             meta,
         )
+
+    skill = getattr(working, "active_skill", None)
+    if size(working) > target and skill is not None and skill.instructions is not None:
+        metadata = metadata.model_copy(update={"skill_omitted": True})
+        working, metadata = commit(
+            working.model_copy(
+                update={
+                    "active_skill": ProjectedSkillContext(
+                        id=skill.id,
+                        fingerprint=skill.fingerprint,
+                    )
+                },
+            ),
+            metadata,
+        )
+
+    conversation = getattr(working, "conversation_context", None)
+    while size(working) > target and conversation is not None and conversation.messages:
+        oldest_turn = conversation.messages[0].turn_id
+        messages = tuple(
+            message
+            for message in conversation.messages
+            if message.turn_id != oldest_turn
+        )
+        removed = len(conversation.messages) - len(messages)
+        conversation = conversation.model_copy(
+            update={
+                "messages": messages,
+                "omitted_turns": conversation.omitted_turns + 1,
+                "estimated_characters": sum(
+                    len(message.content) for message in messages
+                ),
+            }
+        )
+        metadata = metadata.model_copy(
+            update={"omitted_items": metadata.omitted_items + removed}
+        )
+        working, metadata = commit(
+            working.model_copy(update={"conversation_context": conversation}),
+            metadata,
+        )
+
+    # Successful raw results duplicated in retained evidence are expendable,
+    # including the newest observation. Failures keep the existing visibility.
+    evidence_calls = {
+        (
+            record.provenance.step_number,
+            record.provenance.total_tool_call_number,
+            record.provenance.tool_name,
+            record.provenance.delegation_id,
+            record.provenance.branch_id,
+            record.provenance.branch_tool_call_number,
+        )
+        for record in getattr(working, "evidence", [])
+    }
+    observations = list(getattr(working, "observations", []))
+    for observation in list(observations):
+        if size(working) <= target:
+            break
+        identity = (
+            observation.step_number,
+            observation.total_tool_call_number,
+            observation.action.tool_name,
+            observation.delegation_id,
+            observation.branch_id,
+            observation.branch_tool_call_number,
+        )
+        if observation.result.success and identity in evidence_calls:
+            observations.remove(observation)
+            metadata = metadata.model_copy(
+                update={"omitted_items": metadata.omitted_items + 1}
+            )
+            working, metadata = commit(
+                working.model_copy(update={"observations": list(observations)}),
+                metadata,
+            )
 
     # Tier 1: oldest evidence first.
     while size(working) > target and len(getattr(working, "evidence", [])) > 0:
@@ -641,6 +743,7 @@ def fit_context_to_budget(
         return context
 
     metadata = merge_metadata(prior) if prior else ProjectionMetadata()
+    metadata = metadata.model_copy(update={"budget_chars": budget.max_total_chars})
     target = max(
         1,
         budget.max_total_chars - METADATA_SLACK_CHARS,
@@ -650,8 +753,70 @@ def fit_context_to_budget(
         update={"context_projection": metadata},
     )
 
+    skill = getattr(working, "active_skill", None)
+    if isinstance(skill, (SkillContext, ProjectedSkillContext)):
+        instructions = skill.instructions
+        truncated = (
+            instructions is not None and len(instructions) > MAX_SKILL_INSTRUCTION_CHARS
+        )
+        if truncated:
+            instructions, _ = truncate_text(instructions, MAX_SKILL_INSTRUCTION_CHARS)
+        metadata = metadata.model_copy(
+            update={
+                "skill_id": skill.id,
+                "skill_omitted": instructions is None,
+                "truncated_items": metadata.truncated_items + int(truncated),
+            }
+        )
+        working = working.model_copy(
+            update={
+                "active_skill": ProjectedSkillContext(
+                    id=skill.id,
+                    fingerprint=skill.fingerprint,
+                    instructions=instructions,
+                ),
+                "context_projection": metadata,
+            }
+        )
+
+    # Seed final metrics before pressure, then solve the tiny self-referential
+    # character-count fixed point. The final check uses the actual wire payload.
+    def finalize(
+        model: ContextBudgetModel, meta: ProjectionMetadata
+    ) -> ContextBudgetModel:
+        retained = sum(
+            len(getattr(model, name, []))
+            for name in (
+                "evidence",
+                "observations",
+                "findings",
+                "completed_step_summaries",
+                "limitations",
+                "replaced_steps",
+            )
+        )
+        conversation = getattr(model, "conversation_context", None)
+        if conversation is not None:
+            retained += len(conversation.messages)
+        meta = meta.model_copy(update={"retained_items": retained})
+        for _ in range(16):
+            result = model.model_copy(update={"context_projection": meta})
+            chars = payload_size(result)
+            tokens = estimate_token_count(render_llm_payload(result))
+            if meta.payload_chars == chars and meta.estimated_tokens == tokens:
+                return result
+            meta = meta.model_copy(
+                update={"payload_chars": chars, "estimated_tokens": tokens}
+            )
+        raise ContextBudgetExceededError("context projection metrics did not converge")
+
+    working = finalize(working, metadata)
+    metadata = working.context_projection
+
     if payload_size(working) > budget.max_total_chars:
         working, metadata = _apply_pressure(working, target, metadata)
+
+    working = finalize(working, metadata)
 
     if payload_size(working) > budget.max_total_chars:
         raise ContextBudgetExceededError(
@@ -660,14 +825,4 @@ def fit_context_to_budget(
             "deterministic compaction"
         )
 
-    metadata = metadata.model_copy(
-        update={
-            "estimated_tokens": estimate_token_count(
-                render_llm_payload(working),
-            ),
-        },
-    )
-
-    return working.model_copy(
-        update={"context_projection": metadata},
-    )
+    return working

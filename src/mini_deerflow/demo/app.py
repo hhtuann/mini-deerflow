@@ -31,6 +31,7 @@ from mini_deerflow.demo.view_models import (
     DemoRunView,
     sanitize_answer_markdown,
 )
+from mini_deerflow.skills import SkillsError, SkillsRegistry
 from mini_deerflow.tracing import TraceSink
 
 _SERVICE_KEY = "demo-runtime-service"
@@ -44,6 +45,8 @@ _LIVE_TRACES_KEY = "demo-live-traces"
 _PENDING_MESSAGE_KEY = "demo-pending-message"
 _MODE_KEY = "demo-execution-mode"
 _ACTIVE_MODE_KEY = "demo-active-execution-mode"
+_SKILL_KEY = "demo-selected-skill"
+_RESET_SKILL_KEY = "demo-reset-skill"
 
 _LIVE_MODE = "Live web"
 _OFFLINE_MODE = "Offline walkthrough"
@@ -146,11 +149,13 @@ def _submit_message(
     selected = st.session_state.get(_SELECTED_THREAD_KEY)
     st.session_state[_PENDING_MESSAGE_KEY] = message
     turn_id = _new_id("turn")
+    skill_id = st.session_state.get(_SKILL_KEY)
     if isinstance(selected, str):
         follow_up = ContinueDemoCommand(
             thread_id=selected,
             turn_id=turn_id,
             user_message=message,
+            skill_id=skill_id,
         )
 
         def task(trace_sink: TraceSink) -> DemoRunView:
@@ -167,6 +172,7 @@ def _submit_message(
             thread_id=thread_id,
             turn_id=turn_id,
             goal=message,
+            skill_id=skill_id,
         )
 
         def task(trace_sink: TraceSink) -> DemoRunView:
@@ -185,6 +191,8 @@ def _submit_message(
         turn_id=turn_id,
         task=task,
     )
+    # Selection applies to exactly this submitted turn, never implicitly to a follow-up.
+    st.session_state[_RESET_SKILL_KEY] = True
 
 
 def _submit_resume(
@@ -278,7 +286,31 @@ def _render_sidebar(
         )
     else:
         st.sidebar.badge("OFFLINE · deterministic", color="green")
-        st.sidebar.caption("No network calls; intended only for a walkthrough.")
+        st.sidebar.caption(
+            "Phase 0: scripted model and fixture evidence; no network calls. "
+            "Answers demonstrate a fixed scenario, not arbitrary research or skills."
+        )
+
+    try:
+        metadata = SkillsRegistry().discover()
+    except SkillsError:
+        metadata = ()
+        st.sidebar.warning("Skill catalog unavailable.")
+    by_id = {item.id: item for item in metadata}
+    reset_skill = st.session_state.pop(_RESET_SKILL_KEY, False)
+    if reset_skill or st.session_state.get(_SKILL_KEY) not in by_id:
+        st.session_state[_SKILL_KEY] = None
+    selected_skill = st.sidebar.selectbox(
+        "Skill for next turn",
+        options=(None, *by_id),
+        format_func=lambda value: "None" if value is None else value,
+        key=_SKILL_KEY,
+        disabled=active,
+        help="Explicitly select at most one skill. Selection resets after submission.",
+    )
+    if selected_skill is not None:
+        st.sidebar.text(by_id[selected_skill].description)
+        st.sidebar.text(f"Applicability: {by_id[selected_skill].applicability}")
 
     if st.sidebar.button(
         "New chat",
@@ -341,6 +373,8 @@ def _render_turn(turn) -> None:
     with st.chat_message("user"):
         st.text(turn.user_message)
     with st.chat_message("assistant"):
+        if turn.run is not None:
+            st.caption(f"Active skill: {turn.run.active_skill_id or 'None'}")
         if turn.status == "completed" and turn.assistant_message:
             allowed_urls = () if turn.run is None else turn.run.accepted_citations
             answer_markdown = sanitize_answer_markdown(

@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
 from mini_deerflow.actions import AgentAction, ToolObservation
+from mini_deerflow.context_budget import CONTEXT_POLICY_VERSION, ContextBudget
 from mini_deerflow.conversation import ConversationContext
 from mini_deerflow.delegation import DelegationRecord
 from mini_deerflow.evidence import (
@@ -23,12 +24,16 @@ from mini_deerflow.review import (
     ReviewVerdict,
 )
 from mini_deerflow.schemas import Plan
+from mini_deerflow.skills import SkillContext
 
 
 class AgentState(TypedDict):
     """Shared state passed between nodes in the research workflow."""
 
     goal: str
+    active_skill: NotRequired[SkillContext | None]
+    context_budget: NotRequired[ContextBudget]
+    context_policy_version: NotRequired[str]
     turn_id: NotRequired[str | None]
     turn_sequence: NotRequired[int | None]
     conversation_context: NotRequired[ConversationContext | None]
@@ -66,6 +71,8 @@ def create_initial_state(
     turn_id: str | None = None,
     turn_sequence: int | None = None,
     conversation_context: ConversationContext | None = None,
+    active_skill: SkillContext | None = None,
+    context_budget: ContextBudget | None = None,
 ) -> AgentState:
     """Create a complete and independent state for a new research run."""
 
@@ -90,6 +97,8 @@ def create_initial_state(
 
     state = AgentState(
         goal=normalized_goal,
+        active_skill=active_skill,
+        context_policy_version=CONTEXT_POLICY_VERSION,
         messages=messages,
         plan=None,
         current_step=0,
@@ -119,4 +128,6 @@ def create_initial_state(
         state["turn_sequence"] = turn_sequence
     if conversation_context is not None:
         state["conversation_context"] = conversation_context
+    if context_budget is not None:
+        state["context_budget"] = context_budget
     return state
