@@ -32,6 +32,7 @@ from mini_deerflow.tools import (
     WriteFileTool,
 )
 from mini_deerflow.tracing import (
+    ExecutionEventType,
     ExecutionTrace,
     ExecutionTracer,
     InMemoryTraceSink,
@@ -691,7 +692,11 @@ def test_delegation_partial_failure_and_fan_in_are_traced() -> None:
     assert [record.canonical_url for record in state["evidence"]] == [source]
     assert state["sources"] == [source]
     assert any("Controlled branch limitation" in error for error in state["errors"])
-    event = next(event for event in sink.events if event.kind is TraceKind.DELEGATION)
+    event = next(
+        event
+        for event in sink.events
+        if event.event_type is ExecutionEventType.DELEGATION_COMPLETED
+    )
     assert event.outcome is TraceOutcome.PARTIAL_FAILURE
     assert event.successful_branch_count == 1
     assert event.failed_branch_count == 1

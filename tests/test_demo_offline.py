@@ -246,8 +246,8 @@ def test_fresh_backend_resumes_interrupted_checkpoint_deterministically(
     baseline, before_restart, resumed, after_restart, chat = asyncio.run(scenario())
 
     assert before_restart is not None
-    assert before_restart.web_search_calls == 2
-    assert before_restart.web_fetch_calls == 1
+    assert before_restart.web_search_calls == 3
+    assert before_restart.web_fetch_calls == 0
     assert before_restart.researcher_branches == ("alpha", "beta")
     assert after_restart is not None
     assert after_restart.web_search_calls == 0
@@ -258,8 +258,9 @@ def test_fresh_backend_resumes_interrupted_checkpoint_deterministically(
     assert resumed.artifact.markdown_source == baseline.artifact.markdown_source
     assert all(event.run_id.startswith("day15-resume-") for event in resumed.traces)
     assert not any(event.kind in {"tool", "delegation"} for event in resumed.traces)
-    durable_run_ids = {
+    durable_parent_run_ids = {
         event.run_id
         for event in chat.turns[0].run.traces  # type: ignore[union-attr]
+        if event.kind == "run"
     }
-    assert durable_run_ids == {"day15-run-001", "day15-resume-001"}
+    assert durable_parent_run_ids == {"day15-run-001", "day15-resume-001"}

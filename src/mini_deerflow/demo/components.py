@@ -6,7 +6,29 @@ from collections.abc import Sequence
 
 import streamlit as st
 
+from mini_deerflow.demo.graph_projection import (
+    ExecutionGraphNode,
+    ExecutionGraphProjection,
+    project_static_workflow,
+)
 from mini_deerflow.demo.view_models import DemoRunView, TraceEventView
+
+_STATUS_COLORS = {
+    "pending": "#94a3b8",
+    "running": "#2563eb",
+    "completed": "#16a34a",
+    "failed": "#dc2626",
+    "cancelled": "#ea580c",
+    "skipped": "#64748b",
+}
+_NODE_SYMBOLS = {
+    "workflow_node": "roundRect",
+    "delegation": "diamond",
+    "branch": "circle",
+    "tool": "rect",
+    "run": "roundRect",
+    "fan_in": "triangle",
+}
 
 
 def render_status_strip(
@@ -248,6 +270,184 @@ def render_trace(
     )
 
 
+def build_graph_chart_spec(
+    graph: ExecutionGraphProjection,
+    *,
+    selected_node_id: str | None = None,
+) -> dict[str, object]:
+    """Build a JSON-only ECharts network spec from the safe graph view."""
+
+    categories = tuple(dict.fromkeys(node.kind for node in graph.nodes))
+    category_index = {name: index for index, name in enumerate(categories)}
+    nodes = [
+        {
+            "id": node.id,
+            "name": node.label,
+            "value": f"{node.kind.replace('_', ' ')} · {node.status}",
+            "category": category_index[node.kind],
+            "symbol": _NODE_SYMBOLS[node.kind],
+            "symbolSize": 62 if node.id == selected_node_id else 48,
+            "itemStyle": {
+                "color": _STATUS_COLORS[node.status],
+                "borderColor": "#f8fafc",
+                "borderWidth": 4 if node.id == selected_node_id else 1,
+                "shadowBlur": 12 if node.status == "running" else 0,
+                "shadowColor": _STATUS_COLORS[node.status],
+            },
+            "label": {
+                "show": True,
+                "position": "bottom",
+                "distance": 7,
+                "width": 120,
+                "overflow": "break",
+                "fontSize": 11,
+            },
+        }
+        for node in graph.nodes
+    ]
+    links = [
+        {
+            "source": edge.source,
+            "target": edge.target,
+            "value": edge.label or edge.relation.replace("_", " "),
+            "lineStyle": {
+                "width": 2.5 if edge.selected else 1.2,
+                "opacity": 0.9 if edge.selected else 0.55,
+                "curveness": 0.08,
+                "type": "solid" if edge.selected else "dashed",
+            },
+            "label": {
+                "show": bool(edge.label),
+                "formatter": edge.label or "",
+                "fontSize": 10,
+            },
+        }
+        for edge in graph.edges
+    ]
+    return {
+        "animationDurationUpdate": 350,
+        "aria": {
+            "enabled": True,
+            "description": (
+                "Agent execution graph. Node color indicates pending, running, "
+                "completed, failed, cancelled, or skipped status."
+            ),
+        },
+        "tooltip": {"trigger": "item", "formatter": "{b}<br/>{c}"},
+        "legend": [
+            {
+                "data": [name.replace("_", " ") for name in categories],
+                "bottom": 0,
+            }
+        ],
+        "series": [
+            {
+                "type": "graph",
+                "layout": "force",
+                "roam": True,
+                "draggable": True,
+                "cursor": "grab",
+                "data": nodes,
+                "links": links,
+                "categories": [{"name": name.replace("_", " ")} for name in categories],
+                "edgeSymbol": ["none", "arrow"],
+                "edgeSymbolSize": [0, 8],
+                "emphasis": {"focus": "adjacency", "lineStyle": {"width": 4}},
+                "force": {
+                    "repulsion": 520,
+                    "edgeLength": [90, 180],
+                    "gravity": 0.08,
+                },
+            }
+        ],
+    }
+
+
+def render_agent_graph(
+    runtime_graph: ExecutionGraphProjection,
+    *,
+    key_prefix: str = "agent-graph",
+) -> None:
+    """Render static topology or observed execution with a safe inspector."""
+
+    graph_mode = st.segmented_control(
+        "Graph view",
+        options=("Workflow", "Current run"),
+        default="Current run" if runtime_graph.nodes else "Workflow",
+        key=f"{key_prefix}-mode",
+        help=(
+            "Workflow shows possible canonical routes. Current run shows only "
+            "entities reconstructed from structured execution events."
+        ),
+    )
+    graph = project_static_workflow() if graph_mode == "Workflow" else runtime_graph
+    if not graph.nodes:
+        st.info("No structured execution events are available for this run yet.")
+        return
+
+    metrics = graph.metrics
+    metric_columns = st.columns(6)
+    metric_columns[0].metric("Nodes", metrics.nodes)
+    metric_columns[1].metric("Running", metrics.running)
+    metric_columns[2].metric("Completed", metrics.completed)
+    metric_columns[3].metric("Failed", metrics.failed)
+    metric_columns[4].metric("Tool calls", metrics.tool_calls)
+    metric_columns[5].metric("Sub-agents", metrics.sub_agents)
+    st.caption(f"Evidence observed: {metrics.evidence}")
+
+    node_by_id = {node.id: node for node in graph.nodes}
+    graph_column, inspector_column = st.columns([2.2, 1])
+    with inspector_column:
+        selected_node_id = st.selectbox(
+            "Inspect node",
+            options=tuple(node_by_id),
+            format_func=lambda node_id: (
+                f"{node_by_id[node_id].label} · {node_by_id[node_id].status}"
+            ),
+            key=f"{key_prefix}-{graph_mode}-selected-node",
+        )
+        selected_node = node_by_id[selected_node_id]
+        _render_node_inspector(selected_node)
+
+    with graph_column:
+        st.echarts_chart(
+            build_graph_chart_spec(graph, selected_node_id=selected_node_id),
+            height=620,
+            key=f"{key_prefix}-{graph_mode}-chart",
+            renderer="svg",
+        )
+        st.caption(
+            "Drag nodes or pan/zoom the graph. Use the node selector to highlight "
+            "an entity and inspect its safe details."
+        )
+
+
+def _render_node_inspector(node: ExecutionGraphNode) -> None:
+    st.subheader(node.label)
+    badge_color = {
+        "pending": "gray",
+        "running": "blue",
+        "completed": "green",
+        "failed": "red",
+        "cancelled": "orange",
+        "skipped": "gray",
+    }[node.status]
+    st.badge(node.status, color=badge_color)
+    if node.safe_summary:
+        st.caption(node.safe_summary)
+    if node.started_at is not None:
+        st.text(f"Started: {node.started_at}")
+    if node.completed_at is not None:
+        st.text(f"Completed: {node.completed_at}")
+    if node.duration_ms is not None:
+        st.text(f"Duration: {node.duration_ms} ms")
+    for field in node.details:
+        st.text(f"{field.label}: {field.value}")
+    with st.expander("Technical IDs", expanded=False):
+        for field in node.technical_details:
+            st.text(f"{field.label}: {field.value}")
+
+
 def render_artifact(view: DemoRunView, *, key_prefix: str = "demo") -> None:
     """Render a structured preview and the exact source without executing Markdown."""
 
@@ -291,7 +491,14 @@ def render_demo_tabs(
 
     traces = tuple(view.traces) if live_traces is None else tuple(live_traces)
     sections: list[tuple[str, object]] = [
-        ("Execution", lambda: render_overview(view, key_prefix=key_prefix))
+        (
+            "Agent graph",
+            lambda: render_agent_graph(
+                view.execution_graph,
+                key_prefix=f"{key_prefix}-graph",
+            ),
+        ),
+        ("Execution", lambda: render_overview(view, key_prefix=key_prefix)),
     ]
     if view.evidence or view.accepted_citations or view.rejected_citation_count:
         sections.append(

@@ -2,6 +2,53 @@ import os
 from pathlib import Path
 
 
+def _is_reserved_windows_component(part: str) -> bool:
+    """Prefer current Windows rules, with a Python 3.12-compatible fallback."""
+    # Validate component syntax before the pathname API can interpret "z:stream"
+    # as a drive-relative path and overlook its alternate-stream separator.
+    if part.endswith((".", " ")) or any(
+        ord(char) < 32 or char in '<>:"/\\|?*' for char in part
+    ):
+        return True
+
+    isreserved = getattr(os.path, "isreserved", None)
+    if isreserved is not None:
+        return isreserved(part)
+
+    stem = part.partition(".")[0].rstrip(" ").upper()
+    return stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or (
+        len(stem) == 4 and stem[:3] in {"COM", "LPT"} and stem[3] in "123456789¹²³"
+    )
+
+
+def _filesystem_path(path: Path) -> Path:
+    """Use extended Windows syntax only for absolute internal filesystem paths.
+
+    Keep policy checks and public paths in the ordinary namespace. Prefix even
+    short I/O roots so recursive directory walks can reach long descendants.
+    """
+    text = str(path)
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return path
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
+
+
+def _resolved_path(path: Path, *, strict: bool = False) -> Path:
+    """Resolve links through long paths, then restore ordinary comparison syntax."""
+    resolved = _filesystem_path(path).resolve(strict=strict)
+    text = str(resolved)
+    if os.name == "nt" and text.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + text[8:])
+    if os.name == "nt" and text.startswith("\\\\?\\"):
+        ordinary = Path(text[4:])
+        if len(ordinary.drive) != 2 or not ordinary.is_absolute():
+            raise WorkspacePathError("Unsupported Windows filesystem namespace.")
+        return ordinary
+    return resolved
+
+
 class WorkspaceError(Exception):
     """Base error raised by workspace operations."""
 
@@ -32,7 +79,7 @@ class Workspace:
 
         root_path.mkdir(parents=True, exist_ok=True)
 
-        self._root = root_path.resolve(strict=True)
+        self._root = _resolved_path(root_path.absolute(), strict=True)
 
         if not self._root.is_dir():
             raise WorkspaceError("Workspace root must be a directory.")
@@ -47,16 +94,26 @@ class Workspace:
     def resolve_path(self, relative_path: str | Path) -> Path:
         requested_path = Path(relative_path)
 
-        if requested_path.is_absolute():
+        if requested_path.is_absolute() or (
+            os.name == "nt" and (requested_path.drive or requested_path.root)
+        ):
             raise WorkspacePathError("Absolute paths are not allowed.")
 
-        resolved_path = (self._root / requested_path).resolve(strict=False)
+        if os.name == "nt" and any(
+            part not in {".", ".."} and _is_reserved_windows_component(part)
+            for part in requested_path.parts
+        ):
+            # Extended I/O must not introduce device names, alternate streams,
+            # or trailing-dot/space aliases that ordinary Win32 paths normalize.
+            raise WorkspacePathError("Ambiguous Windows file names are not allowed.")
+
+        resolved_path = _resolved_path(self._root / requested_path)
         self._ensure_inside_workspace(resolved_path)
 
         return resolved_path
 
     def read_text(self, relative_path: str | Path) -> str:
-        resolved_path = self.resolve_path(relative_path)
+        resolved_path = _filesystem_path(self.resolve_path(relative_path))
 
         if not resolved_path.is_file():
             raise WorkspaceError("Workspace path is not a readable file.")
@@ -80,11 +137,11 @@ class Workspace:
             raise WorkspaceLimitError("Content exceeds the workspace write limit.")
 
         resolved_path = self.resolve_path(relative_path)
-        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        _filesystem_path(resolved_path.parent).mkdir(parents=True, exist_ok=True)
 
         # Resolve again after creating parent directories. This reduces the chance
         # of writing through a newly introduced symlink or junction.
-        resolved_path = self.resolve_path(relative_path)
+        resolved_path = _filesystem_path(self.resolve_path(relative_path))
 
         if resolved_path.exists() and not resolved_path.is_file():
             raise WorkspaceError("Workspace path is not a writable file.")
@@ -99,16 +156,19 @@ class Workspace:
     ) -> tuple[str, ...]:
         resolved_directory = self.resolve_path(relative_directory)
 
-        if not resolved_directory.is_dir():
+        filesystem_directory = _filesystem_path(resolved_directory)
+        if not filesystem_directory.is_dir():
             raise WorkspaceError("Workspace path is not a directory.")
 
         files: list[str] = []
 
         for current_root, directory_names, file_names in os.walk(
-            resolved_directory,
+            filesystem_directory,
             followlinks=False,
         ):
-            current_path = Path(current_root)
+            current_path = resolved_directory / Path(current_root).relative_to(
+                filesystem_directory
+            )
 
             safe_directories: list[str] = []
 
@@ -118,7 +178,7 @@ class Workspace:
                 if self._is_link_or_junction(directory_path):
                     continue
 
-                resolved_child = directory_path.resolve(strict=False)
+                resolved_child = _resolved_path(directory_path)
 
                 if self._is_inside_workspace(resolved_child):
                     safe_directories.append(directory_name)
@@ -132,12 +192,12 @@ class Workspace:
                 if self._is_link_or_junction(file_path):
                     continue
 
-                resolved_file = file_path.resolve(strict=False)
+                resolved_file = _resolved_path(file_path)
 
                 if not self._is_inside_workspace(resolved_file):
                     continue
 
-                if resolved_file.is_file():
+                if _filesystem_path(resolved_file).is_file():
                     files.append(resolved_file.relative_to(self._root).as_posix())
 
         return tuple(sorted(files))
@@ -151,6 +211,7 @@ class Workspace:
 
     @staticmethod
     def _is_link_or_junction(path: Path) -> bool:
+        path = _filesystem_path(path)
         return path.is_symlink() or path.is_junction()
 
     @staticmethod
