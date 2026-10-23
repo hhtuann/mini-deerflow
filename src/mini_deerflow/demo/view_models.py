@@ -177,6 +177,12 @@ class TraceEventView:
     error_category: str | None
     error_code: str | None
     turn_id: str | None = None
+    context_payload_chars: int | None = None
+    context_budget_chars: int | None = None
+    context_retained_items: int | None = None
+    active_skill_id: str | None = None
+    skill_instructions_omitted: bool | None = None
+    context_policy_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +216,7 @@ class DemoRunView:
     execution_graph: ExecutionGraphProjection = field(
         default_factory=ExecutionGraphProjection
     )
+    active_skill_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +357,17 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
         ),
         error_code=event.error_code.value if event.error_code is not None else None,
         turn_id=event.turn_id,
+        context_payload_chars=getattr(event, "context_payload_chars", None),
+        context_budget_chars=getattr(event, "context_budget_chars", None),
+        context_retained_items=getattr(event, "context_retained_items", None),
+        active_skill_id=_safe_skill_id(getattr(event, "active_skill_id", None)),
+        skill_instructions_omitted=getattr(event, "skill_instructions_omitted", None),
+        context_policy_version=(
+            _plain_text(
+                getattr(event, "context_policy_version", None), 64, omit_urls=True
+            )
+            or None
+        ),
     )
 
 
@@ -572,7 +590,23 @@ def project_demo_run(
         limitations=limitations,
         turn_id=state.get("turn_id"),
         execution_graph=project_execution_graph(trace_events),
+        active_skill_id=_safe_skill_id(
+            getattr(state.get("active_skill"), "id", None)
+            if not isinstance(state.get("active_skill"), dict)
+            else state["active_skill"].get("id")
+        ),
     )
+
+
+def _safe_skill_id(value: object) -> str | None:
+    """Project only an exact bounded ID, never a skill body or serialized object."""
+    if (
+        isinstance(value, str)
+        and len(value) <= 64
+        and re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", value)
+    ):
+        return value
+    return None
 
 
 def _step_status(

@@ -1,4 +1,9 @@
-"""Deterministic, no-network runtime composition for the local mentor demo."""
+"""Phase 0 scripted, no-network runtime composition for the local mentor demo.
+
+The structured-output model follows a fixed scenario, not arbitrary user goals
+or skill guidance. Its fixture findings are walkthrough data, not live research.
+See ``phase1_offline`` for captured production-boundary context diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -620,6 +625,7 @@ class OfflineDemoBackend:
             thread_id=command.thread_id,
             goal=command.goal,
             turn_id=command.turn_id,
+            skill_id=command.skill_id,
             resources=resources,
             trace_sink=trace_sink,
         )
@@ -640,6 +646,7 @@ class OfflineDemoBackend:
             thread_id=command.thread_id,
             goal=command.user_message,
             turn_id=command.turn_id,
+            skill_id=command.skill_id,
             resources=resources,
             trace_sink=trace_sink,
         )
@@ -731,6 +738,7 @@ class OfflineDemoBackend:
         turn_id: str,
         resources: _ScenarioResources,
         trace_sink: TraceSink | None,
+        skill_id: str | None = None,
     ) -> _BackendResult:
         self._operation_counts[(thread_id, turn_id, operation)] += 1
         operation_number = self._operation_counts[(thread_id, turn_id, operation)]
@@ -762,6 +770,7 @@ class OfflineDemoBackend:
             artifact_path=_ARTIFACT_PATH,
             tracer=tracer,
         ) as runtime:
+            skill_kwargs = {} if skill_id is None else {"skill_id": skill_id}
             try:
                 if operation == "run":
                     if goal is None:
@@ -770,6 +779,7 @@ class OfflineDemoBackend:
                         goal,
                         thread_id=thread_id,
                         turn_id=turn_id,
+                        **skill_kwargs,
                     )
                 elif operation == "continue":
                     if goal is None:
@@ -778,6 +788,7 @@ class OfflineDemoBackend:
                         thread_id,
                         goal,
                         turn_id=turn_id,
+                        **skill_kwargs,
                     )
                 else:
                     state = await runtime.resume(thread_id=thread_id)

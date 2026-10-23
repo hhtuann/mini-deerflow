@@ -13,7 +13,12 @@ from pydantic import (
     ValidationError,
 )
 
-from mini_deerflow.context_budget import ProjectionMetadata, render_llm_payload
+from mini_deerflow.context_assembly import SKILLS_SYSTEM_GUIDANCE
+from mini_deerflow.context_budget import (
+    ProjectedSkillContext,
+    ProjectionMetadata,
+    render_llm_payload,
+)
 from mini_deerflow.evidence import (
     AnswerClaim,
     AnswerCompletionStatus,
@@ -24,6 +29,7 @@ from mini_deerflow.evidence import (
     StepFinding,
     UserFacingAnswer,
 )
+from mini_deerflow.skills import SkillContext
 from mini_deerflow.structured_output import (
     StructuredOutputMode,
     create_structured_output_runnable,
@@ -114,6 +120,8 @@ Evidence rules:
 7. Do not include execution traces, tool-call narration, or chain-of-thought.
 """.strip()
 
+SYNTHESIS_SYSTEM_PROMPT += "\n\n" + SKILLS_SYSTEM_GUIDANCE
+
 SYNTHESIS_FORMAT_CORRECTION_MESSAGE = """
 The previous response was not a valid grounded AnswerSynthesisDraft. Return
 only one JSON object with exactly these keys: language, summary, evidence,
@@ -164,6 +172,7 @@ class AnswerSynthesisDraft(SynthesisModel):
 
 class AnswerSynthesisContext(SynthesisModel):
     goal: str = Field(min_length=1, max_length=1_000)
+    active_skill: SkillContext | ProjectedSkillContext | None = None
     language: AnswerLanguage
     completion_status: AnswerCompletionStatus
     finalization_reason: str | None = Field(default=None, max_length=200)

@@ -23,6 +23,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     ToolObservation,
 )
+from mini_deerflow.context_budget import ContextBudget
 from mini_deerflow.conversation import ConversationContext, ConversationMessage
 from mini_deerflow.delegation import (
     BranchFinding,
@@ -42,6 +43,7 @@ from mini_deerflow.evidence import (
 )
 from mini_deerflow.review import ReplanRecord, ReviewFinding, ReviewVerdict
 from mini_deerflow.schemas import Plan
+from mini_deerflow.skills import SkillContext
 
 _THREAD_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
@@ -68,6 +70,8 @@ _ALLOWED_CHECKPOINT_TYPES = (
     DelegationRecord,
     ConversationMessage,
     ConversationContext,
+    ContextBudget,
+    SkillContext,
 )
 
 

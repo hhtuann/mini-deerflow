@@ -176,3 +176,39 @@ This document is the WAVE 0 reference point. Future architecture work should cit
 The implemented observability path is runtime -> WAVE 1 `ExecutionEvent` -> WAVE 2 `ExecutionGraphProjection` -> Streamlit Agent graph. The [WAVE 1 event contract](execution-events.md) remains canonical; the [WAVE 2 Agent graph](agent-graph.md) is a read-only downstream consumer of those structured events.
 
 This relationship leaves this document as the WAVE 0 reference and preserves its checkpoint/resume, budget, evidence provenance, citation-validation, workspace, and turn-isolation invariants. The projection and UI observe execution without controlling it.
+
+## Phase 1 implementation addendum
+
+The baseline above remains the historical WAVE 0 reference. This focused addendum
+records the subsequent context-engineering and skills integration; see the
+[canonical Phase 1 guide](context-engineering-skills.md) for API/UI usage,
+priority rules, reproducible commands and the local verification snapshot.
+
+- `skills.py` discovers bounded JSON frontmatter without instruction bodies and
+  activates exact IDs into immutable full-file SHA-256/body snapshots. The three
+  bundled skills are `research-brief`, `deep-research` and `source-comparison`.
+  Every new turn defaults to `None`; guidance grants no tools or permissions.
+- `context_assembly.py` and `context_budget.py` build bounded stage projections
+  used by planning, action selection, review, replan and synthesis in
+  `agent_workflow.py`. Planning/action contexts carry turn identity when present;
+  the planner's `on_context_projection` observer supplies redacted tracing.
+  Limits cover dynamic serialized JSON, excluding static trust instructions and
+  provider/message overhead. `ceil(chars / 4)` is approximate token reporting.
+- `state.py`, `persistence.py`, `conversation.py` and `runtime.py` retain
+  `active_skill`, `context_budget` and `context_policy_version` in checkpointed
+  state and ledger `run_context_json`. The reservation-time ledger pin covers
+  interruption before the first checkpoint; incompatible explicit policy
+  versions refuse execution. Matching completed-turn duplicate run/continue
+  requests replay stored state before skill reactivation.
+- `delegation.py` propagates the pinned context budget to compatible child seams
+  and the default bounded researcher. It does not propagate the parent's skill.
+  Projection compaction leaves durable evidence/provenance and skill pins intact.
+- `demo/phase1_offline.py` compares a same-goal unskilled baseline with a skilled
+  interrupted/resumed run and an unskilled follow-up, using a 7,000-character
+  context budget and scripted external seams. These checks do not validate live
+  browser/model behavior; Phase 0 mentor acceptance remains pending.
+
+The registry is source-checkout-local, not an installed external skill registry.
+Content hashes and static trust guidance do not solve prompt injection, and
+character budgeting is not all-in token metering. The baseline's tool, citation,
+workspace, checkpoint and turn-isolation boundaries continue to apply.

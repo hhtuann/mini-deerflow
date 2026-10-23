@@ -17,6 +17,7 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.context_budget import (
     ContextBudget,
+    ProjectedSkillContext,
     ProjectionMetadata,
     payload_size,
     truncate_text,
@@ -27,6 +28,7 @@ from mini_deerflow.evidence import (
     sanitize_finding_summary,
 )
 from mini_deerflow.schemas import Plan, PlanStep
+from mini_deerflow.skills import SkillContext
 
 ReviewRoute = Literal[
     "continue",
@@ -261,6 +263,7 @@ class ReviewContext(ReviewModel):
     """The bounded, evidence-focused input given to one review."""
 
     goal: ReviewGoal
+    active_skill: SkillContext | ProjectedSkillContext | None = None
     remaining_steps: list[PlanStep] = Field(
         max_length=MAX_RELATED_STEP_NUMBERS,
     )
@@ -294,6 +297,7 @@ class ReplanRequest(ReviewModel):
     """The bounded input given to the replanner after a replan verdict."""
 
     goal: ReviewGoal
+    active_skill: SkillContext | ProjectedSkillContext | None = None
     review: ReviewVerdict
     completed_step_summaries: list[CompletionSummary] = Field(
         default_factory=list,

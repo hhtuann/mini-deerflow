@@ -7,7 +7,7 @@ Mini DeerFlow is a local Python project with two entry points:
 - a live-capable CLI using the configured GLM 5.3 OpenAI-compatible endpoint plus Wikipedia research tools;
 - a Streamlit interface with a live research mode and a deterministic offline walkthrough.
 
-It is a completed learning MVP—not a production platform, DeerFlow clone, or upstream-compatible implementation.
+It is a local learning MVP—not a production platform, DeerFlow clone, or upstream-compatible implementation. Phase 0 mentor acceptance remains pending; Phase 1 adds explicit skills and bounded context assembly to the existing runtime.
 
 ## Project Status
 
@@ -23,6 +23,8 @@ It is a completed learning MVP—not a production platform, DeerFlow clone, or u
 | Tool, workspace, and fetch safety boundaries | Complete |
 | Redacted execution tracing | Complete |
 | Deterministic Streamlit mentor demo | Complete |
+| Phase 0 mentor acceptance | Pending |
+| Phase 1 context engineering and skills | Implemented; offline verification snapshot below |
 | Production deployment | Deferred |
 | Upstream DeerFlow parity | Not claimed |
 
@@ -72,6 +74,11 @@ Citation validation establishes one narrow property: the proposed citation's can
 
 ## Architecture
 
+For the canonical Phase 1 user guide, see
+[`docs/context-engineering-skills.md`](docs/context-engineering-skills.md): JSON
+frontmatter, metadata discovery versus activation, per-turn API/UI selection,
+context priorities, durable pins, offline commands and limitations.
+
 ```mermaid
 flowchart TB
     subgraph Presentation
@@ -97,7 +104,7 @@ flowchart TB
         Providers[Model and Wikipedia provider seams]
     end
     subgraph CrossCutting[Cross-cutting boundaries]
-        Context[Context budget]
+        Context[Stage context budget and optional skill projection]
         Evidence[Evidence and citations]
         Safety[URL, tool, and path safety]
         Trace[Redacted typed trace]
@@ -157,6 +164,7 @@ flowchart TD
 | Fan-in | Stable branch ordering and citation revalidation | Failed-branch findings are not promoted |
 | Persistence | SQLite conversation/turn ledger plus turn-isolated checkpoints | No exactly-once guarantee for external effects |
 | Context | Deterministic LLM-facing projections | Character budget; token count is only `ceil(chars / 4)` |
+| Skills | Explicit `research-brief`, `deep-research`, or `source-comparison` per turn | Default `None`; repository-local guidance, no permission grants or automatic child inheritance |
 | Safety | Tool, session sandbox, fetch-target, and rendering boundaries | Filesystem isolation only, not an OS/container sandbox |
 | Observability | Typed ordered trace and safe projections | No raw payload or production telemetry backend |
 | User answer | Concise evidence-based Markdown with validated links | No raw execution counters, prompts, or report dump |
@@ -175,6 +183,21 @@ registered in the default runtime. The UI never displays credentials. Checkpoint
 Choose **Offline walkthrough** from the `Execution mode` selector to use the original
 deterministic mentor scenario. It is network-free and stores its data under
 `.mini-deerflow/demo`.
+
+The sidebar's **Skill for next turn** defaults to **None** and resets after
+submission. Each historical turn retains its active skill ID. The original
+offline walkthrough uses fixed Phase 0 answers; the separate Phase 1 offline
+demo exercises production skill/context request assembly with scripted seams.
+It starts with an unskilled baseline using the same goal, then exercises a
+skilled interrupted/resumed run and an unskilled follow-up, with a 7,000-character
+dynamic context budget:
+
+```powershell
+uv run --offline --no-sync python -m mini_deerflow.demo.phase1_offline
+```
+
+Run from a provisioned checkout. This demonstrates integration and continuity,
+not live LLM quality or mentor acceptance.
 
 ## Deterministic Mentor Walkthrough
 
@@ -268,6 +291,10 @@ frontend security claim.
 - The SQLite ledger owns conversation metadata, ordered turns, status, tool-call budget,
   safe response text, and redacted trace JSON. LangGraph owns the execution checkpoint
   for each turn.
+- New turns pin `active_skill`, `context_budget`, and `context_policy_version` in
+  state/checkpoints and in ledger `run_context_json` at reservation time, covering
+  interruption before the first checkpoint. Resume preserves those pins and refuses
+  incompatible explicit policy versions; a new follow-up defaults to skill `None`.
 - Installed LangGraph resets `checkpoint_ns` on a root graph. The runtime therefore
   derives a deterministic internal saver `thread_id` from the public thread and turn
   namespace. The public `thread_id` remains stable in every API, ledger row, trace, and
@@ -449,24 +476,36 @@ read-only graph projection that consumes them.
 
 ## Testing and Evaluation
 
-```bash
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-uv lock --check
-uv run python evals/run_evals.py --dataset evals/dataset.json
+Run from a provisioned repository checkout. Commands below reproduce the checks.
+Verified locally on Windows Python 3.12.14 using the installed environment,
+without installs:
+
+| Check | Reported result |
+| --- | --- |
+| Full pytest | 765 passed, 6 skipped, 223 subtests |
+| Deterministic evaluator | 9 cases / 36 invariants passed |
+| Lint, format, lock, diff | Passed |
+| Phase 1 offline demo | 37 requests; maximum 6,961 / 7,000 dynamic characters; 8 compacted requests; 15 passing boolean checks |
+
+No live browser or live model validation was performed; Phase 0 mentor
+acceptance remains pending. Snapshot counts are not guarantees for future runs.
+
+```powershell
+uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skills.py tests/test_phase1_context.py tests/test_phase1_runtime.py tests/test_phase1_delegation.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
+uv run --offline --no-sync pytest -q -rs -p no:cacheprovider --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
+uv run --offline --no-sync ruff check . --no-cache
+uv run --offline --no-sync ruff format --check . --no-cache
+uv lock --check --offline
+uv run --offline --no-sync python evals/run_evals.py --dataset evals/dataset.json
 ```
 
-| Check | Latest verified result |
-| --- | --- |
-| Full pytest | 640 passed, 2 skipped |
-| Deterministic evaluator | 9/9 cases |
-| Evaluator invariants | 36/36 |
-| Ruff check | Pass |
-| Ruff format check | Pass |
-| Lock check | Pass |
-
-The two skipped tests require Windows symlink creation unavailable in the exercised environment. Results demonstrate tested contracts and failure behavior; they do not prove production readiness, live-provider quality, factual correctness, or absence of all bugs.
+Run pytest commands sequentially: pytest recreates the specified basetemp.
+The evaluator reads `evals/dataset.json`, runs each declared pytest case in a
+subprocess, and prints a JSON report with case/invariant outcomes. It manages
+its own per-case directories under `.mini-deerflow/eval-tmp`; it does not accept
+a pytest `--basetemp` argument. It is deterministic contract evaluation, not a
+live LLM judge. Inspect actual failures/skips and exit statuses before claiming
+verification; Windows symlink tests depend on host privileges.
 
 Coverage includes unit contracts, graph integration, persistence/resume, URL and workspace safety, context pressure, delegation, trace redaction, final acceptance, Streamlit `AppTest`, offline no-network behavior, and deterministic evaluator cases.
 
@@ -570,12 +609,16 @@ This project exercises:
 - Live-provider research quality, cost, and latency are not benchmarked by acceptance tests.
 - Citation membership does not establish factual correctness or semantic entailment.
 - Context accounting is character-based; exact tokenizer accounting is not implemented.
+- The bound covers serialized dynamic JSON, excluding static trust instructions,
+  message wrappers, provider overhead and output; it is not all-in token metering.
+- Bundled skills resolve from the source root, not an installed external registry.
+  Integrity checks and static trust instructions do not solve prompt injection.
 - Semantic context compression or vector memory is not implemented.
 - External side effects do not have an exactly-once guarantee.
 - Distributed execution, durable queues, cancellation, auth, and multi-tenancy are absent.
 - Production artifact serving, access control, egress isolation, and telemetry are absent.
 - Separate OS-process restart behavior has not been directly exercised.
-- Two workspace symlink tests were skipped in the verified Windows environment.
 - Complete SSRF/DNS-rebinding protection is not claimed.
 
-Mini DeerFlow has met its learning and mentor-demo goals. Production readiness and DeerFlow parity remain explicitly outside the verified scope.
+Phase 0 mentor acceptance remains pending. Offline checks do not establish live
+LLM validation. Production readiness and DeerFlow parity remain outside scope.

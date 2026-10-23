@@ -12,6 +12,7 @@ from mini_deerflow.actions import (
     ToolCallAction,
     parse_agent_action,
 )
+from mini_deerflow.context_assembly import SKILLS_SYSTEM_GUIDANCE
 from mini_deerflow.context_budget import render_llm_payload
 from mini_deerflow.decision import ActionContext
 from mini_deerflow.structured_output import (
@@ -73,6 +74,8 @@ Rules:
     remaining budget can collect the missing evidence.
 12. Do not include chain-of-thought. Return only the structured decision.
 """.strip()
+
+ACTION_SELECTOR_SYSTEM_PROMPT += "\n\n" + SKILLS_SYSTEM_GUIDANCE
 
 ACTION_SELECTION_MAX_ATTEMPTS = 3
 

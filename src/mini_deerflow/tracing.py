@@ -246,6 +246,12 @@ class ExecutionEvent(BaseModel):
     context_omitted_items: int | None = Field(default=None, ge=0)
     context_truncated_items: int | None = Field(default=None, ge=0)
     context_estimated_tokens: int | None = Field(default=None, ge=0)
+    context_payload_chars: int | None = Field(default=None, ge=0)
+    context_budget_chars: int | None = Field(default=None, ge=0)
+    context_retained_items: int | None = Field(default=None, ge=0)
+    active_skill_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    skill_instructions_omitted: bool | None = None
+    context_policy_version: Literal["phase1-v1"] | None = None
     error_category: TraceErrorCategory | None = None
     error_code: TraceErrorCode | None = None
 

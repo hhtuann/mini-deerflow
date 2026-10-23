@@ -10,6 +10,8 @@ def test_create_initial_state_returns_complete_state() -> None:
 
     assert state == {
         "goal": "Research LangGraph",
+        "active_skill": None,
+        "context_policy_version": "phase1-v1",
         "messages": [],
         "plan": None,
         "current_step": 0,

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -15,7 +16,7 @@ from mini_deerflow.answer_synthesis import (
     LLMAnswerSynthesizer,
 )
 from mini_deerflow.config import Settings
-from mini_deerflow.context_budget import ContextBudget
+from mini_deerflow.context_budget import CONTEXT_POLICY_VERSION, ContextBudget
 from mini_deerflow.conversation import (
     ActiveTurnError,
     ConversationAlreadyExistsError,
@@ -51,6 +52,7 @@ from mini_deerflow.planner import PlanningBudget, create_research_plan
 from mini_deerflow.replanner import create_replacement_plan
 from mini_deerflow.review import EvidenceReviewer, Replanner
 from mini_deerflow.schemas import Plan
+from mini_deerflow.skills import SkillContext, SkillsRegistry
 from mini_deerflow.state import AgentState, create_initial_state
 from mini_deerflow.structured_output import StructuredChatModel
 from mini_deerflow.tools import (
@@ -176,6 +178,8 @@ class AgentRuntime:
     checkpointer: AsyncCheckpointReader | None = None
     tracer: ExecutionTracer = field(default_factory=ExecutionTracer)
     conversation_repository: SQLiteConversationRepository | None = None
+    skills_registry: SkillsRegistry = field(default_factory=SkillsRegistry)
+    context_budget: ContextBudget = field(default_factory=ContextBudget)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph, AgentGraph):
@@ -208,9 +212,15 @@ class AgentRuntime:
         *,
         thread_id: str,
         turn_id: str | None = None,
+        skill_id: str | None = None,
     ) -> AgentState:
         """Run one research goal and return its final state."""
 
+        replay = await self._replay_existing_turn(thread_id, turn_id, goal, skill_id)
+        if replay is not None:
+            return replay
+        active_skill = self.skills_registry.activate(skill_id) if skill_id else None
+        run_context_json = self._run_context_json(active_skill)
         if self.conversation_repository is not None:
             resolved_turn_id = turn_id or _new_turn_id()
             if self.checkpointer is not None:
@@ -229,6 +239,7 @@ class AgentRuntime:
                     user_message=goal,
                     session_tool_call_limit=self.limits.max_session_tool_calls,
                     reserved_tool_calls=self.limits.max_total_tool_calls,
+                    run_context_json=run_context_json,
                 )
             except ConversationAlreadyExistsError as error:
                 try:
@@ -244,6 +255,7 @@ class AgentRuntime:
                     raise IdempotencyConflictError(
                         "turn_id is already bound to a different goal"
                     ) from error
+                self._check_turn_skill(existing, skill_id)
                 if existing.status == "completed":
                     return await self._load_turn_state(existing)
                 raise ActiveTurnError("the first turn is already active") from error
@@ -254,7 +266,9 @@ class AgentRuntime:
             )
 
         with self.tracer.run_scope(thread_id, "run", turn_id=turn_id):
-            initial_state = create_initial_state(goal)
+            initial_state = create_initial_state(
+                goal, active_skill=active_skill, context_budget=self.context_budget
+            )
 
             config = create_thread_config(
                 thread_id,
@@ -303,6 +317,7 @@ class AgentRuntime:
         user_message: str,
         *,
         turn_id: str | None = None,
+        skill_id: str | None = None,
     ) -> AgentState:
         """Create a new conversational turn on one persisted public thread."""
 
@@ -310,14 +325,22 @@ class AgentRuntime:
             raise CheckpointUnavailableError(
                 "continue_thread requires a configured conversation repository"
             )
+        replay = await self._replay_existing_turn(
+            thread_id, turn_id, user_message, skill_id
+        )
+        if replay is not None:
+            return replay
         resolved_turn_id = turn_id or _new_turn_id()
+        active_skill = self.skills_registry.activate(skill_id) if skill_id else None
         turn, created = await self.conversation_repository.reserve_follow_up(
             thread_id=thread_id,
             turn_id=resolved_turn_id,
             user_message=user_message,
             reserved_tool_calls=self.limits.max_total_tool_calls,
+            run_context_json=self._run_context_json(active_skill),
         )
         if not created:
+            self._check_turn_skill(turn, skill_id)
             if turn.status == "completed":
                 return await self._load_turn_state(turn)
             raise ActiveTurnError("the submitted turn is already active")
@@ -492,11 +515,27 @@ class AgentRuntime:
             recursion_limit=self.limits.recursion_limit,
             checkpoint_namespace=turn.checkpoint_namespace,
         )
+        pinned = json.loads(turn.run_context_json) if turn.run_context_json else {}
+        if (
+            pinned.get("context_policy_version", CONTEXT_POLICY_VERSION)
+            != CONTEXT_POLICY_VERSION
+        ):
+            raise ValueError("unsupported pinned context policy version")
         state = create_initial_state(
             turn.user_message,
             turn_id=turn.turn_id,
             turn_sequence=turn.sequence,
             conversation_context=context,
+            active_skill=(
+                SkillContext.model_validate(pinned["active_skill"])
+                if pinned.get("active_skill")
+                else None
+            ),
+            context_budget=(
+                ContextBudget.model_validate(pinned["context_budget"])
+                if pinned.get("context_budget")
+                else self.context_budget
+            ),
         )
         run_id = ""
         try:
@@ -638,6 +677,46 @@ class AgentRuntime:
             return None
         return cast(AgentState, channel_values)
 
+    def _run_context_json(self, active_skill: SkillContext | None) -> str:
+        return json.dumps(
+            {
+                "active_skill": active_skill.model_dump(mode="json")
+                if active_skill
+                else None,
+                "context_budget": self.context_budget.model_dump(mode="json"),
+                "context_policy_version": CONTEXT_POLICY_VERSION,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    async def _replay_existing_turn(
+        self, thread_id: str, turn_id: str | None, goal: str, skill_id: str | None
+    ) -> AgentState | None:
+        if self.conversation_repository is None or turn_id is None:
+            return None
+        try:
+            turn = await self.conversation_repository.get_turn(thread_id, turn_id)
+        except TurnNotFoundError:
+            return None
+        if turn.user_message != goal.strip():
+            raise IdempotencyConflictError(
+                "turn_id is already bound to a different goal"
+            )
+        self._check_turn_skill(turn, skill_id)
+        if turn.status == "completed":
+            return await self._load_turn_state(turn)
+        raise ActiveTurnError("the submitted turn is already active")
+
+    @staticmethod
+    def _check_turn_skill(turn: TurnRecord, skill_id: str | None) -> None:
+        pinned = json.loads(turn.run_context_json) if turn.run_context_json else {}
+        skill = pinned.get("active_skill") or {}
+        if skill.get("id") != skill_id:
+            raise IdempotencyConflictError(
+                "turn_id is already bound to a different skill"
+            )
+
 
 def _validate_agent_state_result(
     result: object,
@@ -663,6 +742,7 @@ def build_agent_runtime(
     artifact_path: str | None = None,
     tracer: ExecutionTracer | None = None,
     conversation_repository: SQLiteConversationRepository | None = None,
+    skills_registry: SkillsRegistry | None = None,
 ) -> AgentRuntime:
     """Build a testable runtime from explicitly supplied dependencies."""
 
@@ -692,6 +772,8 @@ def build_agent_runtime(
         checkpointer=checkpointer,
         tracer=resolved_tracer,
         conversation_repository=conversation_repository,
+        skills_registry=skills_registry or SkillsRegistry(),
+        context_budget=context_budget or ContextBudget(),
     )
 
 
@@ -711,6 +793,7 @@ def create_default_agent_runtime(
     artifact_path: str = "reports/research-report.md",
     tracer: ExecutionTracer | None = None,
     conversation_repository: SQLiteConversationRepository | None = None,
+    skills_registry: SkillsRegistry | None = None,
 ) -> AgentRuntime:
     """Create the default local Mini DeerFlow runtime."""
 
@@ -805,6 +888,7 @@ def create_default_agent_runtime(
         structured_output_mode=structured_output_mode,
     )
 
+    skill_options = {"skills_registry": skills_registry} if skills_registry else {}
     return build_agent_runtime(
         planner,
         action_selector,
@@ -819,6 +903,7 @@ def create_default_agent_runtime(
         artifact_path=artifact_path if allow_write else None,
         tracer=tracer,
         conversation_repository=conversation_repository,
+        **skill_options,
     )
 
 
@@ -838,6 +923,7 @@ async def open_default_agent_runtime(
     researcher_subagent: ResearcherSubagent | None = None,
     artifact_path: str = "reports/research-report.md",
     tracer: ExecutionTracer | None = None,
+    skills_registry: SkillsRegistry | None = None,
 ) -> AsyncIterator[AgentRuntime]:
     """Open a persistent runtime and close its checkpointer on exit."""
 
@@ -858,6 +944,7 @@ async def open_default_agent_runtime(
             artifact_path=artifact_path,
             tracer=tracer,
             conversation_repository=conversation_repository,
+            **({"skills_registry": skills_registry} if skills_registry else {}),
         )
 
 

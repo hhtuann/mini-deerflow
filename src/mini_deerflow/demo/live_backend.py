@@ -74,6 +74,7 @@ class LiveDemoBackend:
             thread_id=command.thread_id,
             goal=command.goal,
             turn_id=command.turn_id,
+            skill_id=command.skill_id,
             trace_sink=trace_sink,
         )
 
@@ -88,6 +89,7 @@ class LiveDemoBackend:
             thread_id=command.thread_id,
             goal=command.user_message,
             turn_id=command.turn_id,
+            skill_id=command.skill_id,
             trace_sink=trace_sink,
         )
 
@@ -131,6 +133,7 @@ class LiveDemoBackend:
         goal: str | None,
         turn_id: str | None,
         trace_sink: TraceSink | None,
+        skill_id: str | None = None,
     ) -> _BackendResult:
         events: list[ExecutionTrace] = []
         tracer = ExecutionTracer(_RecordingTraceSink(events, trace_sink))
@@ -143,6 +146,8 @@ class LiveDemoBackend:
             limits=self._limits,
             tracer=tracer,
         ) as runtime:
+            # Keep default calls compatible with existing runtime test doubles.
+            skill_kwargs = {} if skill_id is None else {"skill_id": skill_id}
             try:
                 if operation == "run":
                     assert goal is not None and turn_id is not None
@@ -150,6 +155,7 @@ class LiveDemoBackend:
                         goal,
                         thread_id=thread_id,
                         turn_id=turn_id,
+                        **skill_kwargs,
                     )
                 elif operation == "continue":
                     assert goal is not None and turn_id is not None
@@ -157,6 +163,7 @@ class LiveDemoBackend:
                         thread_id,
                         goal,
                         turn_id=turn_id,
+                        **skill_kwargs,
                     )
                 else:
                     state = await runtime.resume(thread_id=thread_id)

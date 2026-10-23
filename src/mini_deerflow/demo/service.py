@@ -69,6 +69,19 @@ def _validated_thread_id(thread_id: str) -> str:
         raise DemoCommandValidationError("thread_id is invalid") from error
 
 
+def _validated_skill_id(skill_id: str | None) -> str | None:
+    """Accept one exact ID; activation and catalog validation belong to runtime."""
+    if skill_id is None:
+        return None
+    if (
+        not isinstance(skill_id, str)
+        or len(skill_id) > 64
+        or re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", skill_id) is None
+    ):
+        raise DemoCommandValidationError("skill_id must be one exact skill ID")
+    return skill_id
+
+
 @dataclass(frozen=True, slots=True)
 class RunDemoCommand:
     """A validated request to create and run one demo thread."""
@@ -76,11 +89,13 @@ class RunDemoCommand:
     thread_id: str
     goal: str = DEFAULT_DEMO_GOAL
     turn_id: str = field(default_factory=lambda: f"turn-{uuid4().hex}")
+    skill_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", _validated_thread_id(self.thread_id))
         object.__setattr__(self, "goal", _validated_goal(self.goal))
         object.__setattr__(self, "turn_id", _validated_thread_id(self.turn_id))
+        object.__setattr__(self, "skill_id", _validated_skill_id(self.skill_id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +105,13 @@ class ContinueDemoCommand:
     thread_id: str
     user_message: str
     turn_id: str = field(default_factory=lambda: f"turn-{uuid4().hex}")
+    skill_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", _validated_thread_id(self.thread_id))
         object.__setattr__(self, "user_message", _validated_goal(self.user_message))
         object.__setattr__(self, "turn_id", _validated_thread_id(self.turn_id))
+        object.__setattr__(self, "skill_id", _validated_skill_id(self.skill_id))
 
 
 @dataclass(frozen=True, slots=True)

@@ -62,6 +62,7 @@ def render_overview(view: DemoRunView, *, key_prefix: str = "demo") -> None:
 
     st.subheader("Goal")
     st.text(view.goal)
+    st.text(f"Active skill for this turn: {view.active_skill_id or 'None'}")
 
     st.subheader("Plan")
     st.dataframe(
@@ -259,6 +260,15 @@ def render_trace(
                 "Branches": event.branch_count,
                 "Succeeded branches": event.successful_branch_count,
                 "Failed branches": event.failed_branch_count,
+                "Context payload chars": event.context_payload_chars,
+                "Context budget chars": event.context_budget_chars,
+                "Context retained items": event.context_retained_items,
+                "Context omitted items": event.context_omitted_items,
+                "Context truncated items": event.context_truncated_items,
+                "Estimated tokens": event.context_estimated_tokens,
+                "Active skill": event.active_skill_id or "",
+                "Skill instructions omitted": event.skill_instructions_omitted,
+                "Context policy version": event.context_policy_version or "",
                 "Error category": event.error_category or "",
                 "Error code": event.error_code or "",
             }

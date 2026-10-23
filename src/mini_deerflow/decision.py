@@ -16,6 +16,7 @@ from mini_deerflow.actions import (
 )
 from mini_deerflow.context_budget import (
     ContextBudget,
+    ProjectedSkillContext,
     ProjectionMetadata,
     fit_context_to_budget,
     merge_metadata,
@@ -23,9 +24,10 @@ from mini_deerflow.context_budget import (
     project_observations,
     project_summaries,
 )
-from mini_deerflow.conversation import ConversationContext
+from mini_deerflow.conversation import ConversationContext, SafeIdentifier
 from mini_deerflow.evidence import EvidenceRecord
 from mini_deerflow.schemas import PlanStep
+from mini_deerflow.skills import SkillContext
 from mini_deerflow.state import AgentState
 from mini_deerflow.tools import ToolRegistry
 
@@ -46,6 +48,17 @@ class ActionContext(BaseModel):
     )
 
     goal: ResearchGoal
+    turn_id: SafeIdentifier | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    turn_sequence: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        exclude_if=lambda value: value is None,
+    )
+    active_skill: SkillContext | ProjectedSkillContext | None = None
     conversation_context: ConversationContext | None = None
     step: PlanStep
     completed_step_summaries: list[CompletionSummary] = Field(
@@ -158,7 +171,7 @@ def build_action_context(
         max_total_tool_calls,
     )
 
-    resolved_budget = context_budget if context_budget is not None else ContextBudget()
+    resolved_budget = state.get("context_budget") or context_budget or ContextBudget()
 
     def _validate_execution_counters(
         step_tool_calls: int,
@@ -231,6 +244,9 @@ def build_action_context(
 
     context = ActionContext(
         goal=state["goal"],
+        turn_id=state.get("turn_id"),
+        turn_sequence=state.get("turn_sequence"),
+        active_skill=state.get("active_skill"),
         conversation_context=projected_conversation,
         step=step,
         completed_step_summaries=projected_summaries,
