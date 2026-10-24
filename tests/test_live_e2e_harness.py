@@ -132,7 +132,9 @@ def test_timeout_configuration_fails_before_provider_use(monkeypatch, capsys):
     monkeypatch.setenv(live_e2e.CONSENT_ENV, "YES")
     monkeypatch.setenv(live_e2e.KEY_ENV, "candidate-key")
     assert live_e2e.main(["--allow-paid-live", "--timeout-seconds", "29"]) == 2
-    assert live_e2e.main(["--allow-paid-live", "--timeout-seconds", "901"]) == 2
+    # The ceiling covers measured research (~682s) + presentation + margins;
+    # values above it stay blocked.
+    assert live_e2e.main(["--allow-paid-live", "--timeout-seconds", "1801"]) == 2
     assert "timeout must be" in capsys.readouterr().out
 
 
@@ -181,6 +183,31 @@ def test_failed_trace_diagnostics_allowlist_only():
         "last_trace_error_category": "provider",
         "last_trace_error_code": "runtime_failure",
     }
+    # The run-level failure (node-less, emitted last) must not hide the
+    # node-level seam that actually failed.
+    attributed = live_e2e.safe_failed_trace(
+        {
+            "traces": [
+                {
+                    "outcome": "failed",
+                    "node": "decide_action",
+                    "error_category": "internal",
+                    "error_code": "unexpected_failure",
+                },
+                {
+                    "outcome": "failed",
+                    "node": None,
+                    "error_category": "internal",
+                    "error_code": "unexpected_failure",
+                },
+            ]
+        }
+    )
+    assert attributed == {
+        "last_failed_node": "decide_action",
+        "last_trace_error_category": "internal",
+        "last_trace_error_code": "unexpected_failure",
+    }
     malicious = live_e2e.safe_failed_trace(
         {
             "traces": [
@@ -199,3 +226,102 @@ def test_failed_trace_diagnostics_allowlist_only():
         "last_trace_error_code": None,
     }
     assert live_e2e.safe_failed_trace({"traces": []}) == malicious
+
+
+def test_worker_request_timeout_accommodates_measured_planner_latency():
+    """Root-cause regression: 30s per-request bound timed out the planner.
+
+    Measured on the configured provider: trivial call ~3s; the planner's
+    structured response exceeded 30s and failed both live cases as
+    provider_timeout. The worker bound must stay above that measured
+    floor while remaining explicit and below the per-case wall clock.
+    """
+    timeout = live_e2e.WORKER_REQUEST_TIMEOUT_SECONDS
+    assert timeout > 30.0
+    assert timeout >= 120.0
+    assert timeout <= 300.0
+
+
+def test_poll_deadline_leaves_teardown_margin_before_hard_kill():
+    """A deadline breach must still write a child result before the kill.
+
+    The parent kills at timeout+15; teardown can wait for one in-flight
+    bounded request (120s) plus overhead, so polling must stop early.
+    """
+    grace = live_e2e.WORKER_POLL_GRACE_SECONDS
+    assert grace >= live_e2e.WORKER_REQUEST_TIMEOUT_SECONDS
+    assert grace >= live_e2e.WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS
+    started = 1000.0
+    for seconds in (30, 480, 900, 1800):
+        deadline = live_e2e.poll_deadline(started, seconds)
+        assert deadline < started + seconds
+        if seconds >= grace + 15:
+            assert (
+                deadline + live_e2e.WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS
+                <= started + seconds + 15
+            )
+
+
+def test_slide_planner_request_bound_exceeds_research_bound():
+    """The DeckPlan call is the heaviest schema; it gets the longest bound."""
+
+    assert (
+        live_e2e.WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS
+        > live_e2e.WORKER_REQUEST_TIMEOUT_SECONDS
+    )
+    assert live_e2e.WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS <= 300.0
+
+
+def test_presentation_failure_families_are_classified_by_type_only():
+    """Slide-stage failures classify without exposing payloads."""
+
+    from mini_deerflow.pptx.slide_agent import SlideAgentValidationError
+
+    error = SlideAgentValidationError("plan slide count does not match")
+    assert live_e2e.classify_failure(error) == "structured_validation"
+    wrapped = RuntimeError("opaque")
+    wrapped.__cause__ = error
+    assert live_e2e.classify_failure(wrapped) == "structured_validation"
+
+
+def test_provider_timeout_trace_is_classified_not_internal():
+    """A provider SDK timeout must surface as provider/model_provider_failure."""
+
+    from mini_deerflow.tracing import (
+        TraceErrorCategory,
+        TraceErrorCode,
+        TraceOutcome,
+        _classify_exception,
+    )
+
+    timeout_error = type("APITimeoutError", (Exception,), {})("private body")
+    assert _classify_exception(timeout_error) == (
+        TraceErrorCategory.PROVIDER,
+        TraceErrorCode.MODEL_PROVIDER_FAILURE,
+        TraceOutcome.PROVIDER_FAILED,
+    )
+    subclass = type("RateLimitError", (Exception,), {})("private body")
+    assert _classify_exception(subclass)[0] is TraceErrorCategory.PROVIDER
+    # Existing classifications stay unchanged.
+    from mini_deerflow.context_budget import ContextBudgetExceededError
+
+    budget = ContextBudgetExceededError("compaction cannot fit")
+    assert _classify_exception(budget)[0] is TraceErrorCategory.CONTEXT_BUDGET
+    assert _classify_exception(RuntimeError("x"))[0] is TraceErrorCategory.INTERNAL
+    reported = live_e2e.safe_failed_trace(
+        {
+            "traces": [
+                {
+                    "outcome": "provider_failed",
+                    "node": "planner",
+                    "error_category": "provider",
+                    "error_code": "model_provider_failure",
+                },
+            ]
+        }
+    )
+    assert reported == {
+        "last_failed_node": "planner",
+        "last_trace_error_category": "provider",
+        "last_trace_error_code": "model_provider_failure",
+    }

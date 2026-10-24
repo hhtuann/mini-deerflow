@@ -20,6 +20,27 @@ from urllib.parse import urlsplit
 
 CONSENT_ENV = "MINI_DEERFLOW_LIVE_E2E_CONSENT"
 KEY_ENV = "MINI_DEERFLOW_API_KEY"
+# Measured on the configured provider (glm-5.3 via api.z.ai coding endpoint):
+# a trivial chat answers in ~3s, but the research planner's single structured
+# response (reasoning + strict JSON plan) exceeded the previous 30s per-request
+# bound and failed BOTH live cases as provider_timeout (see diag evidence in
+# docs/phase3-live-e2e.md). 120s keeps every request explicitly bounded while
+# accommodating that measured latency; the per-case wall clock (timeout-seconds
+# plus the parent's hard kill) still governs the total budget.
+WORKER_REQUEST_TIMEOUT_SECONDS = 120.0
+# The DeckPlan slide-planner response is far larger than any research-call
+# schema (8 layout-specific payloads in one strict JSON object). Measured
+# in-flow: the deck job failed ~120s after submission under the shared 120s
+# bound while isolated runs at 300s succeeded - the planner call itself needs
+# a longer explicit per-request bound.
+WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS = 240.0
+# The child must stop polling early enough to let TestClient/ApiJobs teardown
+# finish (teardown waits for at most one in-flight bounded provider request,
+# now the 240s slide-planner call) and still write its result file before the
+# parent's hard kill at timeout-seconds + 15. Without this margin a deadline
+# breach produced no child result at all (observed "hard_timeout" with stage
+# "worker").
+WORKER_POLL_GRACE_SECONDS = 250.0
 CASES = {
     "vi": {
         "question": "Dựa trên nguồn đáng tin cậy, đánh giá lợi ích và hạn chế của năng lượng mặt trời đối với hệ thống điện.",
@@ -87,6 +108,15 @@ _FAILURE_FAMILIES = {
     "OutputParserException": "structured_output",
     "OutputParserError": "structured_output",
     "ValidationError": "structured_validation",
+    "SlideAgentValidationError": "structured_validation",
+    "SlideAgentConflictError": "artifact_conflict",
+    "SlideAgentError": "slide_agent",
+    "PptxValidationError": "pptx_validation",
+    "LayoutOverflowError": "pptx_layout_overflow",
+    "ArtifactConflictError": "artifact_conflict",
+    "ArtifactIntegrityError": "storage_integrity",
+    "ArtifactNotFoundError": "artifact_missing",
+    "ArtifactError": "artifact_storage",
     "ContextBudgetExceededError": "context_budget",
     "GraphRecursionError": "graph_recursion",
     "TimeoutError": "timeout",
@@ -144,12 +174,17 @@ def safe_failed_trace(job: dict) -> dict[str, str | None]:
         "url_denied",
         "web_provider_failure",
         "web_transport_failure",
+        "model_provider_failure",
         "tool_failure",
         "context_budget_exceeded",
         "checkpoint_failure",
         "runtime_failure",
         "unexpected_failure",
     }
+    # Prefer the most recent FAILED trace that names a workflow node: the
+    # run-level failure event (node-less) is emitted last and would otherwise
+    # hide which seam actually failed.
+    fallback: dict[str, str | None] | None = None
     for item in reversed(traces):
         if not isinstance(item, dict):
             continue
@@ -162,19 +197,30 @@ def safe_failed_trace(job: dict) -> dict[str, str | None]:
         node = item.get("node")
         category = item.get("error_category")
         code = item.get("error_code")
-        fields["last_failed_node"] = (
-            node if isinstance(node, str) and node in allowed_nodes else None
-        )
-        fields["last_trace_error_category"] = (
-            category
-            if isinstance(category, str) and category in allowed_categories
-            else None
-        )
-        fields["last_trace_error_code"] = (
-            code if isinstance(code, str) and code in allowed_codes else None
-        )
-        return fields
-    return fields
+        candidate = {
+            "last_failed_node": (
+                node if isinstance(node, str) and node in allowed_nodes else None
+            ),
+            "last_trace_error_category": (
+                category
+                if isinstance(category, str) and category in allowed_categories
+                else None
+            ),
+            "last_trace_error_code": (
+                code if isinstance(code, str) and code in allowed_codes else None
+            ),
+        }
+        if candidate["last_failed_node"] is not None:
+            return candidate
+        if fallback is None:
+            fallback = candidate
+    return fallback if fallback is not None else fields
+
+
+def poll_deadline(started: float, timeout_seconds: int) -> float:
+    """Polling deadline that leaves teardown headroom inside the hard kill."""
+
+    return started + max(1.0, timeout_seconds - WORKER_POLL_GRACE_SECONDS)
 
 
 def _poll(client: object, job: dict, *, deadline: float) -> dict:
@@ -243,9 +289,21 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                     self.failure_family = classify_failure(error)
                     raise
 
+        class DiagnosedSlideService(SlideAgentService):
+            """Record the typed failure family; never the payload."""
+
+            failure_family: str | None = None
+
+            async def generate(self, *args, **kwargs):
+                try:
+                    return await super().generate(*args, **kwargs)
+                except Exception as error:
+                    self.failure_family = classify_failure(error)
+                    raise
+
         settings = Settings(
             _env_file=None,
-            request_timeout=30.0,
+            request_timeout=WORKER_REQUEST_TIMEOUT_SECONDS,
             max_retries=0,
             wiki_request_timeout=10.0,
         )
@@ -266,10 +324,16 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
             )
             service = DemoRuntimeService(backend)
             store = PptxArtifactStore(root / "live", mode="live")
-            slide_agent = SlideAgentService(
+            slide_planner_settings = Settings(
+                _env_file=None,
+                request_timeout=WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS,
+                max_retries=0,
+                wiki_request_timeout=10.0,
+            )
+            slide_agent = DiagnosedSlideService(
                 service,
                 store,
-                planner_model_factory=lambda: create_chat_model(settings),
+                planner_model_factory=lambda: create_chat_model(slide_planner_settings),
                 structured_output_mode=settings.structured_output_mode,
             )
             app = create_app(
@@ -277,7 +341,7 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 services={"live": service},
                 slide_services={"live": slide_agent},
             )
-            deadline = started + deadline_seconds
+            deadline = poll_deadline(started, deadline_seconds)
             with TestClient(app) as client:
                 result["stage"] = "research"
                 response = client.post(
@@ -347,6 +411,13 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 deck_job = _poll(client, response.json(), deadline=deadline)
                 if deck_job["status"] != "completed":
                     result["reason_code"] = "presentation_job_failed"
+                    result["research_failure_family"] = slide_agent.failure_family
+                    message = deck_job.get("error_message")
+                    result["presentation_safe_error"] = (
+                        message
+                        if isinstance(message, str) and len(message) <= 240
+                        else None
+                    )
                     return _save(result_path, result)
                 result["presentation_seconds"] = round(
                     time.monotonic() - deck_started, 2
@@ -391,11 +462,15 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
     except TimeoutError:
         result["reason_code"] = "job_deadline_exceeded"
     except Exception:  # noqa: BLE001 - exception messages may leak provider data
-        result["reason_code"] = (
-            "configuration_failed"
-            if result["stage"] == "startup"
-            else "unexpected_failure"
-        )
+        # A teardown error after a recorded pass must not relabel the case.
+        if result.get("outcome") != "passed":
+            result["reason_code"] = (
+                "configuration_failed"
+                if result["stage"] == "startup"
+                else "unexpected_failure"
+            )
+        else:
+            result["reason_code"] = "none"
     return _save(result_path, result)
 
 
@@ -415,8 +490,13 @@ def main(argv: list[str] | None = None) -> int:
             "BLOCKED: explicit flag, YES consent and a non-fixture API key are required."
         )
         return 2
-    if not 30 <= args.timeout_seconds <= 900:
-        print("BLOCKED: timeout must be between 30 and 900 seconds.")
+    # Measured 2026-10-24 on glm-5.3/api.z.ai: research alone took ~682s (7
+    # tool calls, sequential reasoning model calls), leaving no room for the
+    # presentation stage inside the old 900s ceiling. 1800s keeps an explicit
+    # bound while covering research + presentation + teardown margin. The
+    # poll grace still enforces the child result before the hard kill.
+    if not 30 <= args.timeout_seconds <= 1800:
+        print("BLOCKED: timeout must be between 30 and 1800 seconds.")
         return 2
     if args.worker:
         if args.case not in CASES or args.worker_result is None:

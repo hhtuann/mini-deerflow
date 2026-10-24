@@ -53,6 +53,17 @@ def _is_slide_agent_conflict(error: BaseException) -> bool:
     return isinstance(error, SlideAgentConflictError)
 
 
+def _slide_validation_message(error: BaseException) -> str | None:
+    """Return the safe constant message of a slide validation failure."""
+
+    from mini_deerflow.pptx.slide_agent import SlideAgentValidationError
+
+    if not isinstance(error, SlideAgentValidationError):
+        return None
+    message = " ".join(str(error).split())[:200]
+    return f"Presentation planning failed: {message}"
+
+
 def _is_slide_agent_error(error: BaseException) -> bool:
     from mini_deerflow.pptx.artifacts import ArtifactError
     from mini_deerflow.pptx.slide_agent import SlideAgentError
@@ -286,6 +297,9 @@ def map_demo_error(error: BaseException, reference_id: str = "demo") -> str:
         return "Operation timed out."
     if _is_slide_agent_conflict(error):
         return "A different presentation already belongs to this turn."
+    validation_message = _slide_validation_message(error)
+    if validation_message is not None:
+        return validation_message
     if _is_slide_agent_error(error):
         return "Presentation generation failed."
 

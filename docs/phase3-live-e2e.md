@@ -99,6 +99,37 @@ Manual fact-check and Office decisions must be reported as **separate human gate
 
 `tests/test_live_e2e_harness.py` provides credential-free checks for the consent gate, dummy-key rejection, safe default, worker invocation, timeout validation, English/Vietnamese brief boundaries, polling and redacted report structure. Normal CI does **not** run the live provider test; no live GitHub Actions workflow is added.
 
+## Corrective fix (Phase 3.1)
+
+Recommended invocation for this provider (1200 s per case):
+
+```sh
+uv run --env-file .env python scripts/live_e2e.py --allow-paid-live --case both --timeout-seconds 1200 --output .mini-deerflow/live-e2e/report.json
+```
+
+### Root cause chain (all evidence-based)
+
+1. Original both-case failure: research job failed with family `provider_timeout` — the harness child forced `request_timeout=30.0`; a trivial provider call answers in ~3s but the planner's first structured call exceeds 30s on glm-5.3 (reasoning + strict JSON). Fixed: `WORKER_REQUEST_TIMEOUT_SECONDS = 120.0`.
+2. Vanishing-worker bug: after the timeout fix, a deadline breach produced NO child result (parent reported hard_timeout/stage worker) because TestClient/ApiJobs teardown waits for an in-flight bounded request. Fixed: `poll_deadline()` with `WORKER_POLL_GRACE_SECONDS` (250) so polling stops early enough to write the result before the hard kill; wall-clock ceiling raised to 1800s (measured research alone ~682s at 900s ceiling).
+3. Deterministic fallback crash (production bug): `build_user_facing_answer` raised pydantic ValidationError when a multi-citation finding summary (legal up to 4,000 chars) exceeded `AnswerClaim.text` max 1,000 — turning recoverable synthesis failures into total turn failures at the synthesize node (live evidence: last_failed_node=synthesize, family structured_validation). Fixed: `_bound_public_text()` truncates at sentence/word boundaries; limitations and sources capped too. Regression: tests/test_evidence.py.
+4. Live presentation failures: slide planner output is schema-legal but exceeds the renderer density preflight (live plans commonly dense; captured plan verified: title/table/comparison/metric/steps/conclusion slides overflowed). Fixed in SlideAgentService: (a) bounded hint-guided parse retry (sanitized validation facts only), (b) one bounded hint-guided re-plan for deterministic conversion violations, (c) deterministic density reduction `_reduce_spec_density` (progressive word-boundary trimming of titles/subtitles/items/labels/comparison columns/table cells/captions; illustrative markers preserved; no invention; renderer/validator density contract unchanged) BEFORE any re-plan. Slide planner request timeout raised to 240s (`WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS`) — DeckPlan is the heaviest schema.
+5. Diagnostics: provider SDK exception types now classified in tracing (`model_provider_failure`), harness classifies research AND presentation failures by exception type only (never messages), node attribution prefers node-bearing failed traces, `map_demo_error` surfaces safe constant SlideAgentValidationError messages ("Presentation planning failed: <safe constant>"), teardown error after a recorded pass no longer relabels the case.
+
+### Live verification (real provider, glm-5.3 via api.z.ai, 2026-10-24 UTC)
+
+- **vi: PASS** — research 502.89s (7 tool calls, 11 evidence, 7 accepted citations, membership valid), presentation 61.16s, 8 slides / 7 distinct layouts, PPTX 46,452 bytes sha256 `bef2555925d277e034fdab645977a537b0a7f580b611d19ee0bf29819fdc2399`, structure valid. Report: `.mini-deerflow/live-e2e/final6-vi.json`
+- **en: PASS** — research 735.66s (7 tool calls, 14 evidence, 4 accepted citations, membership valid), presentation 60.16s, 8 slides / 7 layouts, PPTX 39,511 bytes sha256 `f8d60c5d0fa8c8a80207c1a7a700d633a48c65027959e399513ab38ddee839dc`, structure valid. Report: `.mini-deerflow/live-e2e/final-en.json`
+- One minimal provider smoke test executed first (2.9s latency, type-only diagnostics). Bounded diagnostics: 2 isolated slide-planner probes + 1 offline-fixture replay before final paid runs.
+- Manual fact-check and Office visual acceptance remain **UNVERIFIED** (report fields).
+- Earlier failed-run evidence retained under `.mini-deerflow/live-e2e/` (diag-vi.json, fix*.json, final*.json, diag2/diag3) — do not delete.
+
+### Offline verification (executed after final changes)
+
+- pytest: 1283 passed, 11 skipped (9 Windows symlink-privilege, 1 Python 3.13+ native API, 1 POSIX-only), 223 subtests
+- ruff check/format: PASS (143 files); `uv lock --check --offline`: PASS (99 packages)
+- evaluator: 9/9 cases, 36/36 invariants
+- New regressions: harness 16 tests (classification by type only, poll deadline margins, timeout ceiling 1800, slide-planner bound); evidence fallback bounds; slide-agent 104 tests (hint retry, conversion re-plan, density trim, bounded caps)
+
 ## Current limitations
 
 - Real model/provider success and human review: **BLOCKED pending owner-run opt-in**.

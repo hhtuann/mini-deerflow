@@ -92,11 +92,32 @@ class TraceErrorCode(str, Enum):
     URL_DENIED = "url_denied"
     WEB_PROVIDER_FAILURE = "web_provider_failure"
     WEB_TRANSPORT_FAILURE = "web_transport_failure"
+    MODEL_PROVIDER_FAILURE = "model_provider_failure"
     TOOL_FAILURE = "tool_failure"
     CONTEXT_BUDGET_EXCEEDED = "context_budget_exceeded"
     CHECKPOINT_FAILURE = "checkpoint_failure"
     RUNTIME_FAILURE = "runtime_failure"
     UNEXPECTED_FAILURE = "unexpected_failure"
+
+
+# Model/provider SDK exception type names (matched by name across the MRO so
+# tracing never imports the provider SDK). Anything here is a provider-side
+# failure the runtime could not prevent; messages stay out of traces.
+_PROVIDER_ERROR_TYPE_NAMES = frozenset(
+    {
+        "APIError",
+        "APITimeoutError",
+        "APIConnectionError",
+        "APIStatusError",
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "RateLimitError",
+        "BadRequestError",
+        "NotFoundError",
+        "UnprocessableEntityError",
+        "InternalServerError",
+    }
+)
 
 
 class ExecutionEventType(str, Enum):
@@ -664,6 +685,12 @@ def _classify_exception(
             TraceErrorCategory.RUNTIME,
             TraceErrorCode.RUNTIME_FAILURE,
             TraceOutcome.FAILED,
+        )
+    if any(cls.__name__ in _PROVIDER_ERROR_TYPE_NAMES for cls in type(error).__mro__):
+        return (
+            TraceErrorCategory.PROVIDER,
+            TraceErrorCode.MODEL_PROVIDER_FAILURE,
+            TraceOutcome.PROVIDER_FAILED,
         )
     return (
         TraceErrorCategory.INTERNAL,
