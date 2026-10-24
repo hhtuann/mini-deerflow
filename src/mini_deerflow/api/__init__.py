@@ -20,6 +20,7 @@ from mini_deerflow.api.dto import (
     JobDTO,
     MessageRequest,
     Mode,
+    PresentationRequestDTO,
     ResumeRequest,
     SessionDTO,
     SkillDTO,
@@ -46,11 +47,24 @@ from mini_deerflow.pptx.artifacts import (
     ArtifactNotFoundError,
     PptxArtifactStore,
 )
+from mini_deerflow.pptx.slide_agent import (
+    PresentationRequest,
+    SlideAgentService,
+)
 from mini_deerflow.skills import SkillsError, SkillsRegistry
 
 Identifier = Annotated[
     str, ApiPath(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", max_length=128)
 ]
+
+
+def _live_slide_planner_model():
+    """Resolve the live planner model lazily so app creation stays offline-safe."""
+
+    from mini_deerflow.config import Settings
+    from mini_deerflow.model import create_chat_model
+
+    return create_chat_model(Settings())
 
 
 def _skills() -> SkillsDTO:
@@ -76,12 +90,16 @@ def create_app(
     storage_root: str | Path | None = None,
     services: Mapping[Mode, DemoRuntimeService] | None = None,
     presentation_stores: Mapping[Mode, PptxArtifactStore] | None = None,
+    slide_services: Mapping[Mode, SlideAgentService] | None = None,
 ) -> FastAPI:
     """Create an isolated app; supplied services override either default mode.
 
     An explicit storage root is the offline directory; live data is under its
     ``live`` child. Defaults preserve the Streamlit demo/live SQLite locations.
     Jobs are process-local and are never replayed on startup. Use one worker.
+    Slide generation defaults to the live provider (credentials are resolved
+    lazily at generation time); the offline mode requires an injected scripted
+    planner through ``slide_services`` and refuses with 503 otherwise.
     """
     root = (
         Path(storage_root) if storage_root is not None else Path(".mini-deerflow/demo")
@@ -108,6 +126,17 @@ def create_app(
         ):
             raise ValueError("Invalid presentation store modes.")
         stores.update(presentation_stores)
+    slide_agents: dict[Mode, SlideAgentService] = {
+        "live": SlideAgentService(
+            runtime_services["live"],
+            stores["live"],
+            planner_model_factory=_live_slide_planner_model,
+        )
+    }
+    if slide_services is not None:
+        if set(slide_services) - {"offline", "live"}:
+            raise ValueError("Unsupported slide service mode.")
+        slide_agents.update(slide_services)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -279,6 +308,47 @@ def create_app(
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    @app.post(
+        "/api/{mode}/conversations/{thread_id}/turns/{turn_id}/presentation",
+        response_model=JobDTO,
+        status_code=202,
+    )
+    async def generate_presentation(
+        mode: Mode,
+        thread_id: Identifier,
+        turn_id: Identifier,
+        body: PresentationRequestDTO,
+    ) -> JobDTO:
+        service = slide_agents.get(mode)
+        if service is None:
+            raise HTTPException(
+                503, "Presentation generation is unavailable in this mode."
+            )
+        request = PresentationRequest(
+            topic=body.topic,
+            audience=body.audience,
+            language=body.language,
+            slide_count=body.slide_count,
+            theme=body.theme,
+            instructions=body.instructions,
+        )
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            session = await load(mode, thread_id)
+        turn = next((turn for turn in session.turns if turn.turn_id == turn_id), None)
+        if turn is None:
+            raise HTTPException(404, "Turn was not found.")
+        if turn.status != "completed":
+            raise HTTPException(
+                409, "Complete or resume the turn before generating slides."
+            )
+
+        def task(sink):
+            result = asyncio.run(service.generate(thread_id, turn_id, request))
+            return result.view
+
+        return jobs.submit(mode, "presentation", thread_id, turn_id, task)
 
     @app.get("/api/{mode}/conversations/{thread_id}/turns/{turn_id}/presentation")
     async def presentation(

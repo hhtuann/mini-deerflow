@@ -32,7 +32,7 @@ from pydantic import (
 )
 
 from mini_deerflow.actions import ToolObservation
-from mini_deerflow.evidence import EvidenceRecord, StepFinding
+from mini_deerflow.evidence import EvidenceProvenance, EvidenceRecord, StepFinding
 from mini_deerflow.schemas import PlanStep
 from mini_deerflow.skills import Fingerprint, SkillContext, SkillId
 
@@ -510,6 +510,9 @@ def _apply_pressure(
 
     # Successful raw results duplicated in retained evidence are expendable,
     # including the newest observation. Failures keep the existing visibility.
+    # Provenance exists only on full evidence records; bounded projections
+    # (for example slide-planning evidence) carry no call identity, so they
+    # cannot deduplicate observations and are skipped unchanged.
     evidence_calls = {
         (
             record.provenance.step_number,
@@ -520,6 +523,7 @@ def _apply_pressure(
             record.provenance.branch_tool_call_number,
         )
         for record in getattr(working, "evidence", [])
+        if isinstance(getattr(record, "provenance", None), EvidenceProvenance)
     }
     observations = list(getattr(working, "observations", []))
     for observation in list(observations):

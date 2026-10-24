@@ -241,6 +241,13 @@ usage, crash recovery, the credential-free two-mode demo and verification status
 Final automated local acceptance: **PASS**; security review: **APPROVE**, with no
 open HIGH/MEDIUM findings. Manual viewer verification remains unverified.
 
+Task 2.3 (Issue #12) adds the Slide Agent backend: model-driven, evidence-grounded
+deck planning over a completed research turn, with key-based citation,
+URL-free plan text, illustrative-data markers and immutable turn-owned
+publication. See the [Slide Agent guide](docs/phase2-slide-agent.md) for the
+architecture, skills contract, HTTP API, credential-free demo and verification
+status. Final automated acceptance is pending.
+
 ## Deterministic Mentor Walkthrough
 
 The offline walkthrough is **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.

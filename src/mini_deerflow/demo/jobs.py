@@ -22,7 +22,7 @@ from mini_deerflow.demo.view_models import (
 )
 from mini_deerflow.tracing import ExecutionTrace, TraceSink
 
-JobOperation = Literal["run", "continue", "resume"]
+JobOperation = Literal["run", "continue", "resume", "presentation"]
 JobTask = Callable[[TraceSink], DemoRunView]
 JobErrorMapper = Callable[[BaseException, str], str]
 
@@ -129,8 +129,10 @@ class DemoJobManager:
         *,
         turn_id: str | None = None,
     ) -> str:
-        if operation not in ("run", "continue", "resume"):
-            raise ValueError("operation must be 'run', 'continue', or 'resume'")
+        if operation not in ("run", "continue", "resume", "presentation"):
+            raise ValueError(
+                "operation must be 'run', 'continue', 'resume', or 'presentation'"
+            )
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise ValueError("thread_id must not be empty")
         if not callable(task):

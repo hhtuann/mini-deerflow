@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, RootModel, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, RootModel, StringConstraints
 
 from mini_deerflow.demo.graph_projection import ExecutionGraphProjection
 from mini_deerflow.demo.view_models import (
@@ -36,6 +36,20 @@ class MessageRequest(DTO):
     skill_id: SkillId | None = None
 
 
+class PresentationRequestDTO(DTO):
+    topic: Message
+    audience: Annotated[
+        str,
+        StringConstraints(
+            strict=True, strip_whitespace=True, min_length=3, max_length=120
+        ),
+    ]
+    language: Literal["vi", "en"]
+    slide_count: Annotated[int, Field(strict=True, ge=5, le=12)] = 8
+    theme: Literal["light", "dark", "academic"] = "light"
+    instructions: Annotated[str, StringConstraints(strict=True, max_length=500)] = ""
+
+
 class ResumeRequest(DTO):
     pass
 
@@ -62,7 +76,7 @@ class JobDTO(DTO):
     mode: Mode
     thread_id: str
     turn_id: str | None
-    operation: Literal["run", "continue", "resume"]
+    operation: Literal["run", "continue", "resume", "presentation"]
     status: Literal["queued", "running", "completed", "failed"]
     error_message: str | None = None
     traces: tuple[TraceEventView, ...] = ()

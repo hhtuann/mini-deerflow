@@ -837,7 +837,11 @@ def test_http_caller_cannot_select_a_path_or_override_metadata(tmp_path, deck):
         assert response.status_code == 200
         assert response.content == deck[1]
         assert response.headers["etag"] == f'"{record.sha256}"'
-        assert client.post(url, json={"path": "../../secret"}).status_code == 405
+        # Since Task 2.3 the POST presentation-generation route exists, but a
+        # caller still cannot inject paths or metadata: any path-bearing body
+        # fails the closed PresentationRequestDTO schema before any handler
+        # logic, and generation stays unavailable without an injected planner.
+        assert client.post(url, json={"path": "../../secret"}).status_code == 422
         assert client.get(url.replace(f"/{TURN}/", "/unknown/")).status_code == 404
 
 

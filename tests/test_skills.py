@@ -36,6 +36,7 @@ def test_samples_and_default_root():
     assert [m.id for m in registry.discover()] == [
         "deep-research",
         "research-brief",
+        "slide-creation",
         "source-comparison",
     ]
     for metadata in registry.discover():
