@@ -341,11 +341,17 @@ def main(argv: list[str] | None = None) -> int:
                     case_result = json.loads(path.read_text(encoding="utf-8"))
                 else:
                     case_result = safe_result(
-                        case, outcome="failed", stage="worker", reason_code="no_child_result"
+                        case,
+                        outcome="failed",
+                        stage="worker",
+                        reason_code="no_child_result",
                     )
                 if child.returncode != 0 and case_result["outcome"] == "passed":
                     case_result = safe_result(
-                        case, outcome="failed", stage="worker", reason_code="child_exit_failure"
+                        case,
+                        outcome="failed",
+                        stage="worker",
+                        reason_code="child_exit_failure",
                     )
             except subprocess.TimeoutExpired:
                 case_result = safe_result(
@@ -354,7 +360,9 @@ def main(argv: list[str] | None = None) -> int:
             report["cases"].append(case_result)
     report["finished_at_utc"] = datetime.now(UTC).isoformat()
     report["status"] = (
-        "PASS" if all(item["outcome"] == "passed" for item in report["cases"]) else "FAIL"
+        "PASS"
+        if all(item["outcome"] == "passed" for item in report["cases"])
+        else "FAIL"
     )
     rendered = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
