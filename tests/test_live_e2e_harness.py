@@ -43,10 +43,19 @@ def test_worker_direct_invocation_cannot_bypass_consent(monkeypatch, tmp_path: P
     monkeypatch.setenv(live_e2e.KEY_ENV, "candidate-key")
     monkeypatch.delenv(live_e2e.CONSENT_ENV, raising=False)
     output = tmp_path / "no-result.json"
-    assert live_e2e.main([
-        "--worker", "--worker-result", str(output),
-        "--case", "vi", "--allow-paid-live",
-    ]) == 2
+    assert (
+        live_e2e.main(
+            [
+                "--worker",
+                "--worker-result",
+                str(output),
+                "--case",
+                "vi",
+                "--allow-paid-live",
+            ]
+        )
+        == 2
+    )
     assert not output.exists()
 
 
@@ -87,13 +96,18 @@ def test_poll_reaches_terminal_job_using_only_real_response_shape():
 
     for status in ("completed", "failed"):
         client = Client(status)
-        assert live_e2e._poll(
-            client, {"job_id": "fake-job"}, deadline=monotonic() + 1
-        )["status"] == status
+        assert (
+            live_e2e._poll(client, {"job_id": "fake-job"}, deadline=monotonic() + 1)[
+                "status"
+            ]
+            == status
+        )
         assert client.calls == ["/api/live/jobs/fake-job"]
 
 
-def test_result_has_no_prompts_credentials_raw_sources_or_exception_text(tmp_path: Path):
+def test_result_has_no_prompts_credentials_raw_sources_or_exception_text(
+    tmp_path: Path,
+):
     payload = live_e2e.safe_result(
         "en", outcome="failed", stage="research", reason_code="research_job_failed"
     )
@@ -103,7 +117,14 @@ def test_result_has_no_prompts_credentials_raw_sources_or_exception_text(tmp_pat
     saved = json.loads(output.read_text(encoding="utf-8"))
     assert saved["manual_fact_check"] == "UNVERIFIED"
     assert saved["manual_office_visual"] == "UNVERIFIED"
-    for private in ("api_key", "prompt", "exception", "traceback", "canonical_url", "path"):
+    for private in (
+        "api_key",
+        "prompt",
+        "exception",
+        "traceback",
+        "canonical_url",
+        "path",
+    ):
         assert private not in saved
 
 

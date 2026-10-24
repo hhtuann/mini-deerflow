@@ -41,8 +41,6 @@ jobs:
         run: uv lock --check --offline
       - name: Ruff lint
         run: uv run --no-sync ruff check --no-cache .
-      - name: Temporary formatter diff for task 3.1
-        run: uv run --no-sync ruff format --diff scripts/live_e2e.py tests/test_live_e2e_harness.py
       - name: Ruff formatting
         run: uv run --no-sync ruff format --check .
       - name: Complete Python regression (report skips)

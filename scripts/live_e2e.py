@@ -44,7 +44,9 @@ def consent_ready(env: dict[str, str]) -> bool:
     )
 
 
-def safe_result(case: str, *, outcome: str, stage: str, reason_code: str) -> dict[str, object]:
+def safe_result(
+    case: str, *, outcome: str, stage: str, reason_code: str
+) -> dict[str, object]:
     """No credentials, prompts, source URLs, payloads or exception messages."""
     return {
         "case": case,
@@ -80,7 +82,9 @@ def _poll(client: object, job: dict, *, deadline: float) -> dict:
 
 
 def _save(path: Path, result: dict[str, object]) -> int:
-    path.write_text(json.dumps(result, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(result, ensure_ascii=True, sort_keys=True), encoding="utf-8"
+    )
     return 0 if result["outcome"] == "passed" else 1
 
 
@@ -143,7 +147,10 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 result["stage"] = "research"
                 response = client.post(
                     "/api/live/conversations",
-                    json={"message": CASES[case]["question"], "skill_id": "slide-creation"},
+                    json={
+                        "message": CASES[case]["question"],
+                        "skill_id": "slide-creation",
+                    },
                 )
                 if response.status_code != 202:
                     result["reason_code"] = "research_submit_http_error"
@@ -161,7 +168,11 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                     result["reason_code"] = "research_snapshot_unavailable"
                     return _save(result_path, result)
                 source = next(
-                    (item for item in snapshot.json()["turns"] if item["turn_id"] == turn),
+                    (
+                        item
+                        for item in snapshot.json()["turns"]
+                        if item["turn_id"] == turn
+                    ),
                     None,
                 )
                 if not source or source["status"] != "completed" or not source["run"]:
@@ -173,7 +184,9 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 evidence_urls = {item["canonical_url"] for item in evidence}
                 result["evidence_count"] = len(evidence)
                 result["accepted_citations"] = len(citations)
-                result["citation_membership_valid"] = set(citations).issubset(evidence_urls)
+                result["citation_membership_valid"] = set(citations).issubset(
+                    evidence_urls
+                )
                 result["tool_calls_used"] = run["budget"]["total_tool_calls"]
                 if result["citation_membership_valid"] is not True:
                     result["reason_code"] = "citation_membership_mismatch"
@@ -198,7 +211,9 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 if deck_job["status"] != "completed":
                     result["reason_code"] = "presentation_job_failed"
                     return _save(result_path, result)
-                result["presentation_seconds"] = round(time.monotonic() - deck_started, 2)
+                result["presentation_seconds"] = round(
+                    time.monotonic() - deck_started, 2
+                )
 
                 result["stage"] = "verification"
                 metadata_response = client.get(endpoint + "/metadata")
@@ -216,17 +231,20 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 result["pptx_bytes"] = len(data)
                 result["pptx_sha256"] = hashlib.sha256(data).hexdigest()
                 result["pptx_structure_valid"] = bool(valid)
-                if not all((
-                    valid,
-                    metadata["slide_count"] == 8,
-                    len(metadata["outline"]) == 8,
-                    len(metadata["layouts"]) >= 4,
-                    data == stored,
-                    metadata["sha256"] == record.sha256,
-                    result["pptx_sha256"] == record.sha256,
-                    download.headers.get("content-type") == PPTX_MIME,
-                    download.headers.get("content-disposition") == 'attachment; filename="presentation.pptx"',
-                )):
+                if not all(
+                    (
+                        valid,
+                        metadata["slide_count"] == 8,
+                        len(metadata["outline"]) == 8,
+                        len(metadata["layouts"]) >= 4,
+                        data == stored,
+                        metadata["sha256"] == record.sha256,
+                        result["pptx_sha256"] == record.sha256,
+                        download.headers.get("content-type") == PPTX_MIME,
+                        download.headers.get("content-disposition")
+                        == 'attachment; filename="presentation.pptx"',
+                    )
+                ):
                     result["reason_code"] = "artifact_contract_mismatch"
                     return _save(result_path, result)
                 result["stage"] = "completed"
@@ -237,7 +255,9 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
         result["reason_code"] = "job_deadline_exceeded"
     except Exception:  # noqa: BLE001 - exception messages may leak provider data
         result["reason_code"] = (
-            "configuration_failed" if result["stage"] == "startup" else "unexpected_failure"
+            "configuration_failed"
+            if result["stage"] == "startup"
+            else "unexpected_failure"
         )
     return _save(result_path, result)
 
@@ -249,10 +269,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=int, default=480)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-result", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--worker-result", type=Path, default=None, help=argparse.SUPPRESS
+    )
     args = parser.parse_args(argv)
     if not args.allow_paid_live or not consent_ready(os.environ):
-        print("BLOCKED: explicit flag, YES consent and a non-fixture API key are required.")
+        print(
+            "BLOCKED: explicit flag, YES consent and a non-fixture API key are required."
+        )
         return 2
     if not 30 <= args.timeout_seconds <= 900:
         print("BLOCKED: timeout must be between 30 and 900 seconds.")
@@ -295,10 +319,13 @@ def main(argv: list[str] | None = None) -> int:
         for case in selected:
             path = Path(work) / f"{case}.json"
             command = [
-                sys.executable, str(Path(__file__).resolve()),
-                "--allow-paid-live", "--worker", "--case", case,
-                "--timeout-seconds", str(args.timeout_seconds),
-                "--worker-result", str(path),
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--allow-paid-live",
+                "--worker",
+                "--case",
+                case,
+                "--timeout-seconds",
             ]
             try:
                 child = subprocess.run(
