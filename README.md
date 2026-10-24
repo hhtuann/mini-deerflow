@@ -32,6 +32,7 @@ It is a local learning MVP—not a production platform, DeerFlow clone, or upstr
 | Streamlit retirement | Deferred until manual mentor acceptance and a separate cleanup |
 | Phase 0 mentor acceptance | Pending |
 | Phase 1 context engineering and skills | Implemented; offline verification snapshot below |
+| Phase 2 PPTX core (Issue #8, task 2.1) | PASS — automated local acceptance; review APPROVE; manual viewer verification unverified |
 | Production deployment | Deferred |
 | Upstream DeerFlow parity | Not claimed |
 
@@ -218,6 +219,21 @@ uv run --offline --no-sync python -m mini_deerflow.demo.phase1_offline
 
 Run from a provisioned checkout. This demonstrates integration and continuity,
 not live LLM quality or mentor acceptance.
+
+### Phase 2 standalone PPTX demo
+
+The [PPTX core guide](docs/phase2-pptx-core.md) documents the eight editable
+layouts, three static themes, caller-owned bytes API, independent validator and
+final verification results. Task 2.1 has no runtime/API/UI integration. From a
+provisioned checkout, use a fresh caller-owned output directory:
+
+```powershell
+uv run --offline python -m mini_deerflow.demo.phase2_pptx_offline --output-dir .mini-deerflow/phase2-review-evidence
+```
+
+The demo refuses to overwrite `phase2-offline.pptx`. Structural validation is
+not visual verification; actual viewer text fit remains unverified. Automated
+task 2.1 acceptance passed with final review APPROVE; see the guide for evidence.
 
 ## Deterministic Mentor Walkthrough
 
