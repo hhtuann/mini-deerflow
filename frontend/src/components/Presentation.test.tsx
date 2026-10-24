@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PresentationWorkspace from './Presentation';
@@ -47,9 +47,10 @@ describe('PresentationWorkspace', () => {
   let posts: { path: string; body: Record<string, unknown> }[] = [];
   let metadataStatus = 404;
   let metadataPayload: PresentationMetadata | null = null;
+  let metadataFetches: string[] = [];
   const completedTurn = session.turns[0];
   beforeEach(() => {
-    posts = []; metadataStatus = 404; metadataPayload = null;
+    posts = []; metadataStatus = 404; metadataPayload = null; metadataFetches = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
       const path = String(input);
       if (init?.method === 'POST') {
@@ -57,6 +58,7 @@ describe('PresentationWorkspace', () => {
         return new Response(JSON.stringify({ ...job, operation: 'presentation', status: 'queued' }), { status: 202 });
       }
       if (path.endsWith('/presentation/metadata')) {
+        metadataFetches.push(path);
         return metadataPayload && metadataStatus === 200
           ? new Response(JSON.stringify(metadataPayload))
           : new Response(JSON.stringify({ detail: 'Presentation was not found.' }), { status: metadataStatus });
@@ -67,11 +69,13 @@ describe('PresentationWorkspace', () => {
   afterEach(() => vi.unstubAllGlobals());
   function mount(props: Partial<Parameters<typeof PresentationWorkspace>[0]> = {}) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    return render(<QueryClientProvider client={client}>
+    const view = render(<QueryClientProvider client={client}>
       <PresentationWorkspace mode="offline" thread="chat-one" turn={completedTurn} job={undefined} busy={false} {...props} />
     </QueryClientProvider>);
+    return { ...view, client };
   }
   const user = userEvent.setup();
+  const turnOneKey = ['offline', 'presentation-metadata', 'chat-one', 'turn-one'] as const;
 
   it('shows an honest empty state when no artifact exists and blocks invalid submission', async () => {
     mount();
@@ -155,5 +159,71 @@ describe('PresentationWorkspace', () => {
   it('prefills the topic from this turn only (no cross-turn inference)', () => {
     mount({ turn: { ...completedTurn, user_message: 'Câu hỏi riêng của lượt này về dữ liệu' } });
     expect(screen.getByLabelText(/Topic/)).toHaveValue('Câu hỏi riêng của lượt này về dữ liệu');
+  });
+
+  // Transition regressions: ONE mounted component and ONE QueryClient each;
+  // only the mocked network changes between verifications.
+  it('A: 200 -> 409 drops the stale deck and never re-generates', async () => {
+    metadataStatus = 200; metadataPayload = metadata;
+    const view = mount();
+    expect(await screen.findByRole('region', { name: /Saved presentation/ })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Download .pptx' })).toBeVisible();
+    metadataStatus = 409; metadataPayload = null;
+    await act(() => view.client.invalidateQueries({ queryKey: [...turnOneKey] }));
+    expect(await screen.findByText(/failed verification/)).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Download .pptx' })).toBeNull();
+    expect(screen.queryByRole('region', { name: /Saved presentation/ })).toBeNull();
+    expect(screen.queryByText(metadata.title)).toBeNull();
+    expect(screen.queryByText(metadata.sha256)).toBeNull();
+    expect(posts).toHaveLength(0);
+  });
+  it('B: 200 -> 404 replaces the deck with the honest absent state', async () => {
+    metadataStatus = 200; metadataPayload = metadata;
+    const view = mount();
+    expect(await screen.findByRole('region', { name: /Saved presentation/ })).toBeVisible();
+    metadataStatus = 404; metadataPayload = null;
+    await act(() => view.client.invalidateQueries({ queryKey: [...turnOneKey] }));
+    expect(await screen.findByText(/No saved presentation for this turn yet/)).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Download .pptx' })).toBeNull();
+    expect(screen.queryByText(metadata.title)).toBeNull();
+    expect(screen.queryByText(metadata.sha256)).toBeNull();
+  });
+  it('C: 200 -> 500 shows unknown-with-retry, then a 200 retry restores the deck', async () => {
+    metadataStatus = 200; metadataPayload = metadata;
+    const view = mount();
+    expect(await screen.findByRole('region', { name: /Saved presentation/ })).toBeVisible();
+    metadataStatus = 500; metadataPayload = null;
+    await act(() => view.client.invalidateQueries({ queryKey: [...turnOneKey] }));
+    expect(await screen.findByText(/status is unavailable right now/)).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Download .pptx' })).toBeNull();
+    expect(screen.queryByText(metadata.title)).toBeNull();
+    expect(screen.queryByText(/failed verification/)).toBeNull();
+    expect(screen.queryByText(/No saved presentation for this turn yet/)).toBeNull();
+    metadataStatus = 200; metadataPayload = metadata;
+    await user.click(screen.getByRole('button', { name: 'Retry status check' }));
+    expect(await screen.findByRole('region', { name: /Saved presentation/ })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Download .pptx' })).toBeVisible();
+    expect(screen.getByText(metadata.title)).toBeVisible();
+  });
+  it('D: a 409 while an operation is active stays transient, not corruption', async () => {
+    metadataStatus = 409;
+    const running: JobDTO = { ...job, operation: 'presentation', status: 'running' };
+    mount({ job: running, busy: true });
+    expect(await screen.findByText(/waits until the active operation finishes/)).toBeVisible();
+    expect(screen.queryByText(/failed verification/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Generate PowerPoint' })).toBeDisabled();
+  });
+  it('keeps query scope isolated per mode/thread/turn', async () => {
+    metadataStatus = 404; metadataPayload = null;
+    const first = mount();
+    await screen.findByText(/No saved presentation for this turn yet/);
+    expect(metadataFetches.at(-1)).toBe('/api/offline/conversations/chat-one/turns/turn-one/presentation/metadata');
+    first.unmount();
+    const secondTurn = { ...completedTurn, turn_id: 'turn-two', user_message: 'Another turn question entirely' };
+    const second = mount({ turn: secondTurn });
+    expect(second.getByLabelText(/Topic/)).toHaveValue('Another turn question entirely');
+    await waitFor(() => expect(metadataFetches.at(-1)).toBe('/api/offline/conversations/chat-one/turns/turn-two/presentation/metadata'));
+    expect(second.queryByText(metadata.title)).toBeNull();
+    second.unmount();
   });
 });

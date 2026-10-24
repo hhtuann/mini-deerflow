@@ -49,13 +49,22 @@ export default function PresentationWorkspace({ mode, thread, turn, job, busy }:
     },
   });
   const submitBlocked = busy || generating || mutation.isPending || !eligible || Object.keys(errors).length > 0;
-  // Distinguish the three honest outcomes. A 409 while the server is busy is a
-  // transient refusal (route shares the download lock), never corruption; and
-  // transport/5xx failures mean "unknown", not "absent".
-  const absent = metadata.isError && metadata.error instanceof ApiError && metadata.error.status === 404;
-  const corrupt = !busy && !generating && metadata.isError && !metadata.data
-    && metadata.error instanceof ApiError && metadata.error.status === 409;
-  const metadataUnavailable = metadata.isError && !absent && !corrupt;
+  // TanStack Query RETAINS the last successful data when a background refetch
+  // fails, so a cached `metadata.data` alone proves nothing about the CURRENT
+  // verification. Derive one trustworthy value from the current query state:
+  // any newer failed verification discards retained data, and error states
+  // take explicit rendering precedence over it. A 409 while the server is busy
+  // is a transient refusal (this route shares the download lock), never
+  // corruption; transport/5xx failures mean "unknown", not "absent".
+  const errorStatus = metadata.isError && metadata.error instanceof ApiError
+    ? metadata.error.status : null;
+  const verifiedMetadata = !metadata.isError && metadata.isSuccess ? metadata.data ?? null : null;
+  const absent = !verifiedMetadata && errorStatus === 404;
+  const corrupt = !verifiedMetadata && errorStatus === 409 && !busy && !generating;
+  const busyRefused = !verifiedMetadata && errorStatus === 409 && (busy || generating);
+  const unavailable = !verifiedMetadata && metadata.isError && errorStatus !== 404 && errorStatus !== 409;
+  const checking = !verifiedMetadata && !metadata.isError && metadata.isFetching;
+  const rechecking = !!verifiedMetadata && metadata.isFetching;
   return <section className="presentation" aria-label={`Presentation workspace for turn ${turn.turn_id}`}>
     <div className="presentation-heading">
       <span className="eyebrow">PRESENTATION WORKSPACE</span>
@@ -88,28 +97,32 @@ export default function PresentationWorkspace({ mode, thread, turn, job, busy }:
     {generationJob?.status === 'failed' && generationJob.error_message && (
       <div className="notice" role="alert"><strong>Generation failed.</strong> {generationJob.error_message} Saved work on this turn is unchanged; adjust the request or reuse the saved deck below.</div>
     )}
-    {metadata.data && <>
+    {verifiedMetadata && <>
       <section className="presentation-artifact" aria-label="Saved presentation">
         <div className="presentation-artifact-heading">
           <h4>Saved presentation</h4>
           <Status value="completed" />
           <a className="button primary" href={presentationDownloadUrl(mode, thread, turn.turn_id)} download><Download size={16} aria-hidden="true" /> Download .pptx</a>
         </div>
-        <Fields values={{ Title: metadata.data.title, Theme: metadata.data.theme, Slides: metadata.data.slide_count, Layouts: metadata.data.layouts.join(', '), Size: `${metadata.data.byte_size} bytes`, 'SHA-256': metadata.data.sha256 }} />
+        <Fields values={{ Title: verifiedMetadata.title, Theme: verifiedMetadata.theme, Slides: verifiedMetadata.slide_count, Layouts: verifiedMetadata.layouts.join(', '), Size: `${verifiedMetadata.byte_size} bytes`, 'SHA-256': verifiedMetadata.sha256 }} />
         <h5 className="outline-heading">Read-only slide outline <span className="caption">(verified persisted structure — not a rendered preview)</span></h5>
-        <ol className="presentation-outline">{metadata.data.outline.map((slide) => <li key={slide.slide_id}><span className="outline-index">{slide.index}</span><span className={`outline-layout layout-${slide.layout}`}>{slide.layout}</span><span className="outline-title">{slide.title}</span></li>)}</ol>
+        <ol className="presentation-outline">{verifiedMetadata.outline.map((slide) => <li key={slide.slide_id}><span className="outline-index">{slide.index}</span><span className={`outline-layout layout-${slide.layout}`}>{slide.layout}</span><span className="outline-title">{slide.title}</span></li>)}</ol>
         <p className="caption">Numbers inside charts, tables and metrics are labeled illustrative in the deck itself. Open the downloaded file in PowerPoint or LibreOffice to edit; in-app slide rendering is not provided.</p>
+        {rechecking && <p className="caption" role="status">Re-verifying the saved presentation…</p>}
       </section>
-      {metadataUnavailable && <p className="caption" role="status">Saved presentation status could not be re-verified right now; the details above are from the last successful check.</p>}
     </>}
-    {!metadata.data && corrupt && (
+    {!verifiedMetadata && corrupt && (
       <div className="notice" role="alert"><strong>Saved presentation failed verification.</strong> The stored file did not match its recorded integrity. Download is disabled; nothing was overwritten.</div>
     )}
-    {!metadata.data && absent && <Empty>No saved presentation for this turn yet{eligible ? '. Generate one above.' : ''}</Empty>}
-    {!metadata.data && metadataUnavailable && eligible && (
+    {!verifiedMetadata && absent && <Empty>No saved presentation for this turn yet{eligible ? '. Generate one above.' : ''}</Empty>}
+    {!verifiedMetadata && busyRefused && eligible && (
+      <Empty>Checking the saved presentation waits until the active operation finishes.</Empty>
+    )}
+    {!verifiedMetadata && unavailable && eligible && (
       <Empty>Saved presentation status is unavailable right now. {busy || generating ? 'It will refresh when the active operation finishes.' : <button type="button" onClick={() => void metadata.refetch()}>Retry status check</button>}</Empty>
     )}
-    {!metadata.data && !metadataUnavailable && (busy || generating) && eligible && (
+    {!verifiedMetadata && checking && eligible && <Empty>Checking the saved presentation…</Empty>}
+    {!verifiedMetadata && !checking && !busyRefused && (busy || generating) && eligible && (
       <Empty>Checking the saved presentation waits until the active operation finishes.</Empty>
     )}
   </section>;
