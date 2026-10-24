@@ -44,6 +44,11 @@ jobs:
       - name: Ruff formatting
         run: uv run --no-sync ruff format --check .
       - name: Complete Python regression (report skips)
+        # Fixture-only, invalid key: some API read-contract tests initialize
+        # live Settings lazily even though they never call a live provider.
+        # Never provide real credentials to pull-request CI.
+        env:
+          MINI_DEERFLOW_API_KEY: ci-fixture-only-not-a-real-key
         run: uv run --no-sync python -m pytest -q -rs
       - name: Deterministic evaluator
         run: uv run --no-sync python evals/run_evals.py --dataset evals/dataset.json

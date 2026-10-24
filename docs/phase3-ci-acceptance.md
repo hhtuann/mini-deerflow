@@ -46,6 +46,17 @@ uv run --no-sync python evals/run_evals.py --dataset evals/dataset.json
 
 Linux additionally runs the Phase 1, PPTX Core 2.1, Artifact 2.2 and Slide Agent 2.3 credential-free demos with fresh CI-owned directories. Windows symlink/OS-specific skips are expected *when supported by pytest conditions*, not preemptively excluded; all failures remain blocking.
 
+**Clean-runner API contract fixture.** The first real CI run found three API integration
+tests on both operating systems that call into live-mode *configuration loading*
+while inspecting stored conversations/Markdown, not while performing live network
+research. Their failure was `Settings.api_key: Field required` without a local
+`.env`. The regression-only pytest step now supplies
+`MINI_DEERFLOW_API_KEY=ci-fixture-only-not-a-real-key` as an obviously invalid,
+non-secret test fixture. It is **not** a provider credential and is not used for
+evaluator, demos or browser tests. Tests that assert absent-key validation
+explicitly remove it via `monkeypatch`. No real model is called in this suite;
+live quality remains exclusively Task 3.1. Never use a real key or put one in PR CI.
+
 ### Frontend job
 
 Node 22, `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Each command is a hard gate; `continue-on-error` is not used.
