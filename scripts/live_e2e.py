@@ -88,6 +88,22 @@ def _save(path: Path, result: dict[str, object]) -> int:
     return 0 if result["outcome"] == "passed" else 1
 
 
+def worker_command(case: str, timeout_seconds: int, result: Path) -> list[str]:
+    """Build exact child arguments; independently unit-tested without network."""
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--allow-paid-live",
+        "--worker",
+        "--case",
+        case,
+        "--timeout-seconds",
+        str(timeout_seconds),
+        "--worker-result",
+        str(result),
+    ]
+
+
 def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
     """Run the genuine model, API, PPTX and persistence inside a killable child."""
     result = safe_result(case, outcome="failed", stage="startup", reason_code="unknown")
@@ -318,15 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="mini-deerflow-live-controller-") as work:
         for case in selected:
             path = Path(work) / f"{case}.json"
-            command = [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--allow-paid-live",
-                "--worker",
-                "--case",
-                case,
-                "--timeout-seconds",
-            ]
+            command = worker_command(case, args.timeout_seconds, path)
             try:
                 child = subprocess.run(
                     command,
