@@ -1,0 +1,131 @@
+# Credential-free acceptance for pull requests and the merged main branch.
+# Live model/provider calls are intentionally excluded from automatic CI.
+name: Phase 3 Offline Acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase3-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python 3.12 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked Python dependencies
+        run: uv sync --locked --dev
+      - name: Validate lockfile offline
+        run: uv lock --check --offline
+      - name: Ruff lint
+        run: uv run --no-sync ruff check --no-cache .
+      - name: Ruff formatting
+        run: uv run --no-sync ruff format --check .
+      - name: Complete Python regression (report skips)
+        run: uv run --no-sync python -m pytest -q -rs
+      - name: Deterministic evaluator
+        run: uv run --no-sync python evals/run_evals.py --dataset evals/dataset.json
+      - name: Phase 1 offline demo
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --no-sync python -m mini_deerflow.demo.phase1_offline
+      - name: Phase 2.1 PPTX core demo
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --no-sync python -m mini_deerflow.demo.phase2_pptx_offline --output-dir .mini-deerflow/ci-phase2-core
+      - name: Phase 2.2 artifact demo
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --no-sync python -m mini_deerflow.demo.phase2_artifacts_offline --storage-root .mini-deerflow/ci-phase2-artifacts
+      - name: Phase 2.3 slide agent demo
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --no-sync python -m mini_deerflow.demo.phase2_slide_agent_offline --storage-root .mini-deerflow/ci-phase2-slide-agent
+
+  frontend:
+    name: React / typecheck / lint / unit / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: ESLint
+        run: npm run lint
+      - name: Vitest
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  browser:
+    name: Chromium / real offline FastAPI E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked Python dependencies
+        working-directory: .
+        run: uv sync --locked --dev
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Install Chromium and Linux dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Real offline API and browser integration
+        run: npm run test:e2e
+      - name: Upload failure traces and screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
