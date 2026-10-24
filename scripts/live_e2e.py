@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -269,14 +269,14 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings(_env_file=None)
         provider_host = urlsplit(str(settings.base_url)).hostname or "unknown"
         model_name = settings.model_name
-    except Exception:
+    except ValueError:
         print("BLOCKED: provider configuration invalid (details redacted).")
         return 2
 
     selected = list(CASES) if args.case == "both" else [args.case]
     report: dict[str, object] = {
         "schema_version": 1,
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "started_at_utc": datetime.now(UTC).isoformat(),
         "provider_host": provider_host,
         "model": model_name,
         "wall_clock_limit_seconds_per_case": args.timeout_seconds,
@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                     case, outcome="failed", stage="worker", reason_code="hard_timeout"
                 )
             report["cases"].append(case_result)
-    report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+    report["finished_at_utc"] = datetime.now(UTC).isoformat()
     report["status"] = (
         "PASS" if all(item["outcome"] == "passed" for item in report["cases"]) else "FAIL"
     )
