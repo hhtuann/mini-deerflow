@@ -53,6 +53,10 @@ def safe_result(
         "outcome": outcome,
         "stage": stage,
         "reason_code": reason_code,
+        "research_failure_family": None,
+        "last_failed_node": None,
+        "last_trace_error_category": None,
+        "last_trace_error_code": None,
         "research_seconds": None,
         "presentation_seconds": None,
         "evidence_count": None,
@@ -67,6 +71,95 @@ def safe_result(
         "manual_fact_check": "UNVERIFIED",
         "manual_office_visual": "UNVERIFIED",
     }
+
+
+_FAILURE_FAMILIES = {
+    "AuthenticationError": "provider_authentication",
+    "PermissionDeniedError": "provider_permission",
+    "RateLimitError": "provider_rate_limit",
+    "APIConnectionError": "provider_connection",
+    "APITimeoutError": "provider_timeout",
+    "BadRequestError": "provider_bad_request",
+    "NotFoundError": "provider_not_found",
+    "UnprocessableEntityError": "provider_invalid_request",
+    "InternalServerError": "provider_server_error",
+    "APIStatusError": "provider_http_error",
+    "OutputParserException": "structured_output",
+    "OutputParserError": "structured_output",
+    "ValidationError": "structured_validation",
+    "ContextBudgetExceededError": "context_budget",
+    "GraphRecursionError": "graph_recursion",
+    "TimeoutError": "timeout",
+    "ConnectionError": "connection",
+    "OperationalError": "storage",
+}
+
+
+def classify_failure(error: BaseException) -> str:
+    """Classify exception types only; never serialize error messages."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    for _ in range(6):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        family = _FAILURE_FAMILIES.get(type(current).__name__)
+        if family is not None:
+            return family
+        current = current.__cause__ or current.__context__
+    return "unclassified"
+
+
+def safe_failed_trace(job: dict) -> dict[str, str | None]:
+    """Only known typed safe DTO values; never echo arbitrary trace data."""
+    fields: dict[str, str | None] = {
+        "last_failed_node": None,
+        "last_trace_error_category": None,
+        "last_trace_error_code": None,
+    }
+    traces = job.get("traces")
+    if not isinstance(traces, list):
+        return fields
+    allowed_nodes = {
+        "planner",
+        "decide_action",
+        "execute_tool",
+        "complete_step",
+        "review",
+        "replan",
+        "synthesize",
+        "budget_exhausted",
+    }
+    allowed_categories = {
+        "safety", "provider", "transport", "context_budget",
+        "tool", "persistence", "runtime", "internal",
+    }
+    allowed_codes = {
+        "url_denied", "web_provider_failure", "web_transport_failure",
+        "tool_failure", "context_budget_exceeded", "checkpoint_failure",
+        "runtime_failure", "unexpected_failure",
+    }
+    for item in reversed(traces):
+        if not isinstance(item, dict):
+            continue
+        if item.get("outcome") not in {
+            "failed", "provider_failed", "transport_failed",
+        }:
+            continue
+        node = item.get("node")
+        category = item.get("error_category")
+        code = item.get("error_code")
+        fields["last_failed_node"] = (
+            node if isinstance(node, str) and node in allowed_nodes else None
+        )
+        fields["last_trace_error_category"] = (
+            category if isinstance(category, str) and category in allowed_categories else None
+        )
+        fields["last_trace_error_code"] = (
+            code if isinstance(code, str) and code in allowed_codes else None
+        )
+        return fields
+    return fields
 
 
 def _poll(client: object, job: dict, *, deadline: float) -> dict:
@@ -125,6 +218,16 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
         from mini_deerflow.pptx.validator import validate_pptx
         from mini_deerflow.runtime import RuntimeLimits
 
+        class DiagnosedLiveBackend(LiveDemoBackend):
+            failure_family: str | None = None
+
+            async def run(self, command, *, trace_sink=None):
+                try:
+                    return await super().run(command, trace_sink=trace_sink)
+                except Exception as error:  # noqa: BLE001 - classify type, never payload
+                    self.failure_family = classify_failure(error)
+                    raise
+
         settings = Settings(
             _env_file=None,
             request_timeout=30.0,
@@ -143,9 +246,10 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
         )
         with tempfile.TemporaryDirectory(prefix="mini-deerflow-live-e2e-") as storage:
             root = Path(storage)
-            service = DemoRuntimeService(
-                LiveDemoBackend(root / "live", settings=settings, limits=limits)
+            backend = DiagnosedLiveBackend(
+                root / "live", settings=settings, limits=limits
             )
+            service = DemoRuntimeService(backend)
             store = PptxArtifactStore(root / "live", mode="live")
             slide_agent = SlideAgentService(
                 service,
@@ -175,6 +279,8 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 research = _poll(client, submitted, deadline=deadline)
                 if research["status"] != "completed":
                     result["reason_code"] = "research_job_failed"
+                    result["research_failure_family"] = backend.failure_family
+                    result.update(safe_failed_trace(research))
                     return _save(result_path, result)
                 result["research_seconds"] = round(time.monotonic() - started, 2)
                 thread = submitted["thread_id"]

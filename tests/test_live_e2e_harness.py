@@ -151,3 +151,51 @@ def test_worker_command_is_complete_and_killable(tmp_path: Path):
         str(path),
     ]
     assert len(command) == 10
+
+
+def test_live_failure_classification_keeps_exception_text_private():
+    auth_error = type("AuthenticationError", (Exception,), {})("secret-token")
+    assert live_e2e.classify_failure(auth_error) == "provider_authentication"
+    inner = type("RateLimitError", (Exception,), {})("private provider response")
+    outer = RuntimeError("opaque error")
+    outer.__cause__ = inner
+    assert live_e2e.classify_failure(outer) == "provider_rate_limit"
+    assert live_e2e.classify_failure(RuntimeError("API key: private")) == "unclassified"
+
+
+def test_failed_trace_diagnostics_allowlist_only():
+    reported = live_e2e.safe_failed_trace(
+        {
+            "traces": [
+                {
+                    "outcome": "failed",
+                    "node": "planner",
+                    "error_category": "provider",
+                    "error_code": "runtime_failure",
+                },
+            ]
+        }
+    )
+    assert reported == {
+        "last_failed_node": "planner",
+        "last_trace_error_category": "provider",
+        "last_trace_error_code": "runtime_failure",
+    }
+    malicious = live_e2e.safe_failed_trace(
+        {
+            "traces": [
+                {
+                    "outcome": "failed",
+                    "node": "bearer secret",
+                    "error_category": "api_key=private",
+                    "error_code": "private provider response",
+                },
+            ]
+        }
+    )
+    assert malicious == {
+        "last_failed_node": None,
+        "last_trace_error_category": None,
+        "last_trace_error_code": None,
+    }
+    assert live_e2e.safe_failed_trace({"traces": []}) == malicious
