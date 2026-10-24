@@ -2,10 +2,15 @@
 
 > A bounded research-agent learning MVP, independently implemented to explore DeerFlow-style concepts: planning, typed tool execution, evidence, review and replanning, delegation, checkpoint/resume, safety, tracing, and deterministic evaluation.
 
-Mini DeerFlow is a local Python project with two entry points:
+Mini DeerFlow is a local Python research runtime with three user entry points:
 
 - a live-capable CLI using the configured GLM 5.3 OpenAI-compatible endpoint plus Wikipedia research tools;
-- a Streamlit interface with a live research mode and a deterministic offline walkthrough.
+- a React/TypeScript research workspace backed by a local FastAPI transport, with live and deterministic offline modes;
+- the retained Streamlit reference/fallback interface with the same shared runtime services.
+
+Start the React workspace with the [local setup below](#run-the-react-workspace).
+See [React UI migration](docs/react-ui-migration.md) for the architecture, exact
+HTTP contracts, parity matrix, browser procedure and final verification record.
 
 It is a local learning MVP—not a production platform, DeerFlow clone, or upstream-compatible implementation. Phase 0 mentor acceptance remains pending; Phase 1 adds explicit skills and bounded context assembly to the existing runtime.
 
@@ -23,6 +28,8 @@ It is a local learning MVP—not a production platform, DeerFlow clone, or upstr
 | Tool, workspace, and fetch safety boundaries | Complete |
 | Redacted execution tracing | Complete |
 | Deterministic Streamlit mentor demo | Complete |
+| React workspace + local FastAPI transport | PASS — automated local migration acceptance, 2026-10-24 |
+| Streamlit retirement | Deferred until manual mentor acceptance and a separate cleanup |
 | Phase 0 mentor acceptance | Pending |
 | Phase 1 context engineering and skills | Implemented; offline verification snapshot below |
 | Production deployment | Deferred |
@@ -85,10 +92,13 @@ New skill activations must satisfy both the 32,768-byte raw UTF-8 instruction li
 flowchart TB
     subgraph Presentation
         CLI[CLI]
-        UI[Streamlit demo]
+        UI[React workspace]
+        API[Local FastAPI transport]
+        Legacy[Streamlit fallback]
     end
     subgraph Application
-        Jobs[Single-worker job manager]
+        Jobs[Process-wide API job slot]
+        LegacyJobs[Streamlit session worker]
         Service[DemoRuntimeService]
         Conversation[SQLite conversation and turn ledger]
         Live[LiveDemoBackend]
@@ -113,7 +123,8 @@ flowchart TB
     end
 
     CLI --> Runtime
-    UI --> Jobs --> Service
+    UI --> API --> Jobs --> Service
+    Legacy --> LegacyJobs --> Service
     Service --> Offline --> Runtime
     Service --> Live --> Runtime
     Service --> Conversation
@@ -128,7 +139,12 @@ flowchart TB
 
 The canonical runtime graph is [`src/mini_deerflow/agent_workflow.py`](src/mini_deerflow/agent_workflow.py). [`src/mini_deerflow/workflow.py`](src/mini_deerflow/workflow.py) is a smaller scaffold used by focused workflow tests; it is not the final runtime graph.
 
-Dependency injection is explicit through constructors and factories. There is no REST API or service container in the current project.
+Dependency injection is explicit through constructors and factories. The local
+FastAPI HTTP API wraps `DemoRuntimeService` and its safe projections; there is no
+service container. The API uses one process-wide active job slot across modes,
+while Streamlit retains its per-session worker. SQLite owns durable history;
+the API's 32 retained job snapshots are process-local and disappear on restart.
+Explicit Resume recovers an unresolved persisted turn; startup does not replay it.
 
 ## Core Workflow
 
@@ -170,11 +186,13 @@ flowchart TD
 | Safety | Tool, session sandbox, fetch-target, and rendering boundaries | Filesystem isolation only, not an OS/container sandbox |
 | Observability | Typed ordered trace and safe projections | No raw payload or production telemetry backend |
 | User answer | Concise evidence-based Markdown with validated links | No raw execution counters, prompts, or report dump |
-| Artifact | Deterministic Markdown and optional confined write | No production artifact serving |
+| Artifact | Deterministic Markdown, confined write and scoped per-turn HTTP download | No production artifact serving or authenticated ownership |
+| Local HTTP workspace | React chat, history/resume, skills and execution inspector; automated local parity verified | Single process, localhost, no authentication; live-provider and manual acceptance unverified |
 
-## Streamlit modes
+## Live and offline modes
 
-The Streamlit app starts in its live research mode. It reads the GLM-compatible API key,
+The React workspace starts in **Offline walkthrough**; Streamlit starts in Live.
+The Python live backend reads the GLM-compatible API key,
 base URL, and model settings from the local environment or `.env`. GLM 5.3 handles planning,
 reasoning, review, and synthesis. Research is intentionally restricted to the public Wikipedia
 API through `wiki_search` and `wiki_lookup`; general `web_search`/`web_fetch` tools are not
@@ -186,7 +204,7 @@ Choose **Offline walkthrough** from the `Execution mode` selector to use the ori
 deterministic mentor scenario. It is network-free and stores its data under
 `.mini-deerflow/demo`.
 
-The sidebar's **Skill for next turn** defaults to **None** and resets after
+**Skill for next turn** (React composer / Streamlit sidebar) defaults to **None** and resets after
 submission. Each historical turn retains its active skill ID. The original
 offline walkthrough uses fixed Phase 0 answers; the separate Phase 1 offline
 demo exercises production skill/context request assembly with scripted seams.
@@ -226,7 +244,13 @@ flowchart LR
 
 This scenario demonstrates contracts and failure handling. It is not a benchmark of live research quality.
 
-## Streamlit UI
+## Retained Streamlit UI
+
+This section describes the reference/fallback renderer. React exposes per-turn
+details through **Inspect** with Graph, Plan, Tools & Delegation, Evidence,
+Review, Trace, Context and Artifacts tabs. See the
+[full capability matrix](docs/react-ui-migration.md#streamlit-capability-parity-matrix)
+for verification references and the remaining live/manual acceptance limits.
 
 The main surface is a persistent chat. `New chat` creates a conversation when the first
 message is submitted; later messages call `continue_thread` with the same public
@@ -306,7 +330,8 @@ frontend security claim.
 
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
-- API credentials for live CLI and Streamlit web mode; the offline walkthrough needs none
+- Node compatible with Vite 7 (20.19+ or 22.12+) and npm for the React workspace
+- API credentials for live CLI/UI mode; the offline walkthrough needs none
 
 ```bash
 git clone https://github.com/hhtuann/mini-deerflow.git
@@ -340,7 +365,43 @@ timeouts, temperature, and retry settings remain configurable through the
 `MINI_DEERFLOW_` environment variables.
 See [`.env.example`](.env.example). Never commit `.env`.
 
-## Run the Streamlit Demo
+These settings belong to the Python server only. No frontend environment variable
+is required; requests use relative `/api`. Never copy credentials into `VITE_*`,
+frontend source or browser storage.
+
+## Run the React Workspace
+
+From the repository root, after `uv sync`:
+
+```sh
+uv run python -m mini_deerflow.api
+```
+
+In a second terminal:
+
+```sh
+cd frontend
+npm ci
+npm run dev
+```
+
+Open <http://127.0.0.1:5173>. The API launcher binds `127.0.0.1:8000`;
+Vite strictly binds port 5173 and proxies `/api` to the Python server. Run one
+API process/worker. CORS permits only HTTP localhost/127.0.0.1 origins on port
+5173. This is a local non-authenticated learning interface, not a public service.
+Do not run the API and Streamlit concurrently against the same store.
+
+For a key-free journey, keep **Offline walkthrough**, choose an optional skill,
+submit a question, follow up, reload and inspect each turn. Offline answers are a
+fixed mentor scenario, not arbitrary research. Use **Inspect** to compare Workflow
+with Current run, inspect failed/successful branches, evidence, traces and the
+real Markdown artifact download. Live mode requires the server configuration above.
+
+See [migration setup and contracts](docs/react-ui-migration.md) and
+[`frontend/README.md`](frontend/README.md). `npm run build` produces static output;
+the current API does not serve it as an integrated production application.
+
+## Run the Streamlit Fallback
 
 ```bash
 uv run streamlit run src/mini_deerflow/demo/app.py \
@@ -478,38 +539,49 @@ read-only graph projection that consumes them.
 
 ## Testing and Evaluation
 
-Run from a provisioned repository checkout. Commands below reproduce the checks.
-Verified locally on Windows Python 3.12.14 using the installed environment,
-without installs:
+### Final React/API migration acceptance — 2026-10-24
 
-| Check | Reported result |
+**PASS — automated local migration acceptance**, relative to base `b5fa5ec`.
+Independent final review: **APPROVE**, with no important defects remaining.
+
+| Check | Final result |
 | --- | --- |
-| Full pytest | 778 passed, 6 skipped, 223 subtests in 26.22 seconds |
-| Skill snapshot-size correction suite | 13 cases, all passed |
-| Deterministic evaluator | 9 cases / 36 invariants passed |
-| Lint, format, lock, diff | Passed |
-| Phase 1 offline demo | 37 requests; maximum 6,961 / 7,000 dynamic characters; 8 compacted requests; 15 passing boolean checks |
+| Full Python regression (includes 38 API tests) | 816 passed, 6 skipped, 223 subtests; 47.05 seconds |
+| Deterministic evaluator | 9 cases / 36 invariants, all passed |
+| Phase 1 offline demo | All 14 top-level boolean checks true; unskilled baseline, deep-research interruption/resume, unskilled follow-up |
+| Ruff lint / format | PASS / PASS, 124 files already formatted |
+| Offline lock validation / diff whitespace | PASS, 95 packages / PASS |
+| Frontend `npm ci` | 393 packages audited, 0 vulnerabilities |
+| TypeScript / ESLint / Vitest / build | PASS / zero warnings / 20 tests in 4 files / PASS, 2,101 modules |
+| Real-API Chromium E2E | 2 passed in 21.4 seconds; cold storage followed by seeded interruption, no mocked backend |
 
-No live browser or live model validation was performed; Phase 0 mentor
-acceptance remains pending. Snapshot counts are not guarantees for future runs.
+The six Python skips are four symlink cases requiring unavailable Windows
+privileges, one Windows native-API case requiring Python 3.13+, and one
+POSIX-semantics case. Exact commands are recorded in the
+[final verification table](docs/react-ui-migration.md#final-verification-2026-10-24);
+frontend scenarios are detailed in [`frontend/VERIFICATION.md`](frontend/VERIFICATION.md).
 
-```powershell
-uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skill_snapshot_sizes.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
-uv run --offline --no-sync pytest -q -rs -p no:cacheprovider tests/test_skills.py tests/test_phase1_context.py tests/test_phase1_runtime.py tests/test_phase1_delegation.py --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
-uv run --offline --no-sync pytest -q -rs -p no:cacheprovider --basetemp "C:\Users\GIGABYTE\AppData\Local\Temp\opencode\p1t"
-uv run --offline --no-sync ruff check . --no-cache
-uv run --offline --no-sync ruff format --check . --no-cache
-uv lock --check --offline
-uv run --offline --no-sync python evals/run_evals.py --dataset evals/dataset.json
-```
+Real desktop chat, failed-child graph, nonempty Context and 375px phone captures
+were visually inspected. The Context capture shows payload **5,592 / 8,000 chars**
+with `research-brief`. All seven graph metrics and status/kind legends, trace
+multi-select subsets, the explicit Plan goal, safe GFM tables, full resumed
+history, active-turn navigation and terminal freshness reconciliation are covered.
 
-Run pytest commands sequentially: pytest recreates the specified basetemp.
-The evaluator reads `evals/dataset.json`, runs each declared pytest case in a
-subprocess, and prints a JSON report with case/invariant outcomes. It manages
-its own per-case directories under `.mini-deerflow/eval-tmp`; it does not accept
-a pytest `--basetemp` argument. It is deterministic contract evaluation, not a
-live LLM judge. Inspect actual failures/skips and exit statuses before claiming
-verification; Windows symlink tests depend on host privileges.
+Live external-provider execution, manual mentor acceptance, physical mobile
+software-keyboard behavior and comprehensive assistive-technology/contrast review
+remain unverified. Automated offline acceptance does not establish live-model
+quality or production readiness. Streamlit remains the reference/fallback.
+
+Provision Python dependencies with `uv sync` and frontend dependencies with
+`npm ci`; Python `--offline --no-sync` checks use the installed environment.
+Install Chromium with `npx playwright install chromium` before E2E. Ports 8000
+and 5173 must be free; E2E starts isolated API/Vite servers with temporary storage.
+Screenshots under `frontend/test-results/` are generated run evidence.
+
+Run pytest commands sequentially when sharing a basetemp: pytest recreates it.
+The evaluator runs the cases in `evals/dataset.json` in subprocesses and manages
+its own directories under `.mini-deerflow/eval-tmp`; it does not accept a pytest
+`--basetemp`. This is deterministic contract evaluation, not a live LLM judge.
 
 Coverage includes unit contracts, graph integration, persistence/resume, URL and workspace safety, context pressure, delegation, trace redaction, final acceptance, Streamlit `AppTest`, offline no-network behavior, and deterministic evaluator cases.
 
@@ -519,6 +591,7 @@ Coverage includes unit contracts, graph integration, persistence/resume, URL and
 mini-deerflow/
 ├── src/mini_deerflow/
 │   ├── cli.py                     # CLI entry point
+│   ├── api/                       # local FastAPI DTOs, jobs, request boundary
 │   ├── runtime.py                 # composition and runtime lifecycle
 │   ├── agent_workflow.py          # canonical LangGraph workflow
 │   ├── state.py, actions.py       # state and typed actions
@@ -529,7 +602,9 @@ mini-deerflow/
 │   ├── web_safety.py              # fetch-target validation
 │   ├── tracing.py, workspace.py   # observability and file boundary
 │   ├── tools/                     # contracts, registry, runner, tools
-│   └── demo/                      # Streamlit facade, jobs, projection, UI
+│   └── demo/                      # shared services/backends/projections; Streamlit fallback
+├── frontend/                      # React/TypeScript/Vite workspace and browser tests
+├── docs/react-ui-migration.md      # HTTP contracts, parity and acceptance record
 ├── tests/                         # unit, integration, system, AppTest
 ├── evals/                         # deterministic evaluator and dataset
 ├── pyproject.toml
@@ -541,15 +616,16 @@ mini-deerflow/
 
 | Layer | Technology and actual use |
 | --- | --- |
-| Language | Python 3.12+ and `asyncio` |
+| Language | Python 3.12+ / `asyncio`, TypeScript |
 | Agent orchestration | LangGraph 1.2.11+ |
 | Model integration | LangChain OpenAI-compatible client with GLM 5.3 by default |
 | Research source | Wikipedia MediaWiki API via `wiki_search` and `wiki_lookup` |
 | Contracts/config | Pydantic 2.13+, pydantic-settings 2.15+ |
 | Persistence | SQLite, aiosqlite 0.22+, LangGraph SQLite checkpointer 3.1+ |
-| Frontend | Streamlit 1.64+ |
-| Background execution | Single-worker `ThreadPoolExecutor` |
-| Tests | pytest 9.1+ and Streamlit `AppTest` |
+| Frontend | React 19, Vite 7, TanStack Query, React Flow/Dagre; Streamlit 1.64+ fallback |
+| Local HTTP | FastAPI + Uvicorn, explicit safe DTOs and scoped artifact delivery |
+| Background execution | One API-wide active job, single-worker `ThreadPoolExecutor`; retained Streamlit session worker |
+| Tests | pytest 9.1+, Streamlit `AppTest`, Vitest/Testing Library, Playwright Chromium |
 | Quality/package management | Ruff 0.16+ and uv |
 
 ## Important Engineering Decisions
@@ -565,14 +641,17 @@ mini-deerflow/
 | Depth-one delegation | Control amplification and capability | Limited specialization |
 | Deterministic fan-in | Stable ordering and failure semantics | Fixed aggregation policy |
 | Explicit UI projector | Keep raw runtime data behind an allowlist | Mapping maintenance |
-| One worker per session | Clear non-blocking demo state | No distributed throughput or cancellation |
+| One API-wide job slot | Bounded local execution, atomic busy rejection across modes | No distributed throughput or cancellation; job history is volatile |
 | Offline scenario | Reproducible mentor walkthrough | Does not validate live-provider quality |
 
 ## DeerFlow Relationship
 
 Mini DeerFlow is an independent learning implementation inspired by DeerFlow-style research-agent concepts: planning, plan-act-observe, tool-mediated execution, evidence-backed synthesis, review/replanning, bounded delegation, checkpoint/resume, tracing, and artifact generation.
 
-It deliberately simplifies the problem to one local workflow, SQLite persistence, depth-one homogeneous web branches, deterministic fixtures, and a single-worker Streamlit demo. It has no browser/shell execution, production scheduler, tenancy layer, or upstream conformance suite.
+It deliberately simplifies the problem to one local workflow, SQLite persistence,
+depth-one homogeneous web branches, deterministic fixtures, and a single-worker
+local HTTP workspace with retained Streamlit fallback. It has no agent browser/shell
+execution, production scheduler, tenancy layer, or upstream conformance suite.
 
 No claim is made about source compatibility, behavioral equivalence, feature parity, current upstream architecture, or production readiness.
 
@@ -582,10 +661,10 @@ No claim is made about source compatibility, behavioral equivalence, feature par
 | --- | --- |
 | Local SQLite | Managed persistence, migration, backup, retention, HA |
 | In-process worker | Durable queue, leases, and distributed workers |
-| One active job per session | Multi-user concurrency and quotas |
+| One active API job across modes/conversations | Multi-user concurrency and quotas |
 | No authentication/authorization | Identity and resource policy |
 | Per-thread local filesystem sandbox | Authenticated user/session ownership, quotas, retention, and access-controlled artifact storage |
-| Local live/offline Streamlit demo | Explicit live-backend and credential policy |
+| Local live/offline React/API workspace; Streamlit fallback | Authenticated hosting, explicit live-backend and credential policy |
 | Local typed trace | Centralized telemetry and retention controls |
 | Application validation | Stronger sandbox and network egress enforcement |
 | No cancellation | Cooperative cancellation and compensation |
@@ -604,7 +683,7 @@ This project exercises:
 - bounded delegation, partial failure, and fan-in;
 - SQLite persistence and resume semantics;
 - application-level security boundaries and redacted observability;
-- Streamlit frontend/runtime separation;
+- React/HTTP and retained Streamlit frontend/runtime separation;
 - deterministic failure-oriented tests and evaluation.
 
 ## Current Limitations
@@ -620,6 +699,8 @@ This project exercises:
 - Semantic context compression or vector memory is not implemented.
 - External side effects do not have an exactly-once guarantee.
 - Distributed execution, durable queues, cancellation, auth, and multi-tenancy are absent.
+- API job IDs/history are in-memory (32 snapshots); restart requires explicit recovery from durable conversation state.
+- Automated local React migration acceptance passed; live-provider, manual mentor, physical software-keyboard and full accessibility acceptance remain unverified.
 - Production artifact serving, access control, egress isolation, and telemetry are absent.
 - Separate OS-process restart behavior has not been directly exercised.
 - Complete SSRF/DNS-rebinding protection is not claimed.
