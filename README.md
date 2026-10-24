@@ -248,6 +248,13 @@ publication. See the [Slide Agent guide](docs/phase2-slide-agent.md) for the
 architecture, skills contract, HTTP API, credential-free demo and verification
 status. Final automated acceptance is pending.
 
+Task 2.4 (Issue #14) adds the React presentation workspace: a per-completed-turn
+dialog for generating, verifying and downloading evidence-grounded decks. See the
+[Presentation workspace guide](docs/phase2-presentation-workspace.md) for the
+user journey, truthfulness rules, accessibility evidence and final verification.
+Final automated local acceptance: **PASS**. Manual viewer verification remains
+unverified.
+
 ## Deterministic Mentor Walkthrough
 
 The offline walkthrough is **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.

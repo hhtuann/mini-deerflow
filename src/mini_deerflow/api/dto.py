@@ -54,6 +54,26 @@ class ResumeRequest(DTO):
     pass
 
 
+class PresentationSlideOutlineDTO(DTO):
+    index: int
+    slide_id: str
+    layout: str
+    title: str
+
+
+class PresentationMetadataDTO(DTO):
+    """Verified, read-only presentation facts derived from persisted storage."""
+
+    artifact_type: Literal["pptx"] = "pptx"
+    title: str
+    theme: Literal["light", "dark", "academic"]
+    slide_count: int
+    layouts: tuple[str, ...]
+    outline: tuple[PresentationSlideOutlineDTO, ...]
+    byte_size: int
+    sha256: str
+
+
 class HealthDTO(DTO):
     status: Literal["ok"] = "ok"
     modes: tuple[Mode, ...] = ("live", "offline")

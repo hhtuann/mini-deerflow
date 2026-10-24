@@ -58,7 +58,14 @@ export interface ChatTurn {
 }
 export interface ChatSession { conversation: ConversationSummary; turns: ChatTurn[] }
 export interface JobDTO {
-  job_id: string; mode: Mode; thread_id: string; turn_id: string | null; operation: 'run' | 'continue' | 'resume';
+  job_id: string; mode: Mode; thread_id: string; turn_id: string | null; operation: 'run' | 'continue' | 'resume' | 'presentation';
   status: 'queued' | 'running' | 'completed' | 'failed'; error_message: string | null;
   traces: TraceEvent[]; execution_graph: GraphProjection; view: RunView | null;
+}
+export type PresentationLanguage = 'vi' | 'en';
+export type PresentationTheme = 'light' | 'dark' | 'academic';
+export interface PresentationMetadata {
+  artifact_type: 'pptx'; title: string; theme: PresentationTheme; slide_count: number; layouts: string[];
+  outline: { index: number; slide_id: string; layout: string; title: string }[];
+  byte_size: number; sha256: string;
 }

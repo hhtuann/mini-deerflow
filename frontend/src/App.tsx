@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { onlineManager, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUp, FlaskConical, Menu, MessageSquare, PanelLeftClose, PanelRight, Plus, RefreshCw, Sprout } from 'lucide-react';
+import { ArrowUp, FlaskConical, Menu, MessageSquare, PanelLeftClose, PanelRight, Plus, Presentation as PresentationIcon, RefreshCw, Sprout } from 'lucide-react';
 import { activeJob, ApiError, conversationPath, request } from './api';
 import type { ConversationSummary, JobDTO, Mode, SkillsDTO } from './types';
 import { jobVersion, loadSessionSnapshot } from './session';
 import SafeMarkdown from './components/SafeMarkdown';
 import Inspector from './components/Inspector';
+import PresentationWorkspace from './components/Presentation';
 import { Drawer, Status } from './components/UI';
 
 const subscribeOnline = (notify: () => void) => onlineManager.subscribe(notify);
@@ -30,7 +31,8 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
   const client = useQueryClient();
   const online = useSyncExternalStore(subscribeOnline, isOnline);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [drawer, setDrawer] = useState<'navigation' | 'inspector' | null>(null);
+  const [drawer, setDrawer] = useState<'navigation' | 'inspector' | 'presentation' | null>(null);
+  const [presentationTurn, setPresentationTurn] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [skill, setSkill] = useState('');
@@ -40,7 +42,7 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const transcript = useRef<HTMLDivElement>(null);
-  useEffect(() => { setSelectedTurn(undefined); setDraft(''); setSkill(''); }, [thread]);
+  useEffect(() => { setSelectedTurn(undefined); setDraft(''); setSkill(''); setPresentationTurn(undefined); setDrawer(null); }, [thread]);
   const health = useQuery({ queryKey: ['health'], queryFn: () => request<{ status: 'ok'; modes: Mode[] }>('/health'), refetchInterval: 30_000 });
   const skills = useQuery({ queryKey: ['skills'], queryFn: async () => {
     const catalog = await request<SkillsDTO>('/skills');
@@ -75,6 +77,8 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
     ?? currentActiveJob?.turn_id ?? (lastJob && needsRefresh(lastJob) ? lastJob.turn_id : undefined) ?? turns.at(-1)?.turn_id ?? lastJob?.turn_id ?? undefined;
   const turn = turns.find((item) => item.turn_id === selectedTurnId);
   const selectedJob = [...currentJobs].reverse().find((job) => job.turn_id === selectedTurnId);
+  const presentationTurnView = turns.find((item) => item.turn_id === presentationTurn);
+  const presentationJob = presentationTurn ? [...currentJobs].reverse().find((job) => job.operation === 'presentation' && job.turn_id === presentationTurn) : undefined;
   const historyPending = !!selectedJob && needsRefresh(selectedJob);
   const historyState = historyPending ? session.isError && !session.isFetching ? 'unavailable' : 'refreshing' : 'current';
   const unresolved = turns.some((item) => item.status === 'running' || item.status === 'interrupted');
@@ -141,6 +145,7 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
           <div className="assistant-message"><div className="answer-heading"><span className="answer-avatar"><Sprout size={18} aria-hidden="true" /></span><strong>Mini DeerFlow</strong><Status value={item.status} /></div><p className="caption">Skill: <strong>{item.run?.active_skill_id ?? 'None'}</strong></p>
             {item.assistant_message ? <SafeMarkdown text={item.assistant_message} allowed={item.run?.accepted_citations ?? []} /> : <p>{item.safe_error ?? (item.status === 'interrupted' ? 'This turn was interrupted. Resume it below to continue.' : item.status === 'completed' ? 'Completed without a displayable answer.' : item.status === 'failed' ? 'This turn failed safely.' : 'Waiting for the server to finish this turn…')}</p>}
             <button className="text-button" onClick={() => { setSelectedTurn(item.turn_id); if (window.matchMedia('(min-width: 1280px)').matches) setInspectorOpen(true); else setDrawer('inspector'); }}><PanelRight size={16} aria-hidden="true" /> Inspect turn {item.sequence}</button>
+            {item.status === 'completed' && <button className="text-button" aria-haspopup="dialog" disabled={busy || !online} onClick={() => { setPresentationTurn(item.turn_id); setDrawer('presentation'); }}><PresentationIcon size={16} aria-hidden="true" /> Presentation for turn {item.sequence}</button>}
           </div>
         </article>)}
         {pendingMessage && <div className="user-message"><span className="eyebrow">SUBMITTED</span><p>{pendingMessage}</p></div>}
@@ -159,6 +164,7 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
       </div>
     </main>
     {inspectorOpen && <aside className="desktop-inspector">{inspector}</aside>}
-    {drawer && <Drawer title={drawer === 'navigation' ? 'Navigation' : 'Execution inspector'} close={() => setDrawer(null)}>{drawer === 'navigation' ? navigation : inspector}</Drawer>}
+    {drawer === 'presentation' && presentationTurnView && <Drawer title="Presentation workspace" close={() => setDrawer(null)}><PresentationWorkspace key={`${mode}:${thread}:${presentationTurn}`} mode={mode} thread={thread!} turn={presentationTurnView} job={presentationJob} busy={busy} /></Drawer>}
+    {drawer && drawer !== 'presentation' && <Drawer title={drawer === 'navigation' ? 'Navigation' : 'Execution inspector'} close={() => setDrawer(null)}>{drawer === 'navigation' ? navigation : inspector}</Drawer>}
   </div>;
 }

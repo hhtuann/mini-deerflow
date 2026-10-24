@@ -20,7 +20,9 @@ from mini_deerflow.api.dto import (
     JobDTO,
     MessageRequest,
     Mode,
+    PresentationMetadataDTO,
     PresentationRequestDTO,
+    PresentationSlideOutlineDTO,
     ResumeRequest,
     SessionDTO,
     SkillDTO,
@@ -47,6 +49,7 @@ from mini_deerflow.pptx.artifacts import (
     ArtifactNotFoundError,
     PptxArtifactStore,
 )
+from mini_deerflow.pptx.schemas import DeckSpec
 from mini_deerflow.pptx.slide_agent import (
     PresentationRequest,
     SlideAgentService,
@@ -349,6 +352,47 @@ def create_app(
             return result.view
 
         return jobs.submit(mode, "presentation", thread_id, turn_id, task)
+
+    @app.get(
+        "/api/{mode}/conversations/{thread_id}/turns/{turn_id}/presentation/metadata",
+        response_model=PresentationMetadataDTO,
+    )
+    async def presentation_metadata(
+        mode: Mode, thread_id: Identifier, turn_id: Identifier
+    ) -> PresentationMetadataDTO:
+        """Verified read-only artifact facts for restart-safe UI discovery.
+
+        Backed by the store's full retrieve() verification (metadata, digest
+        and presentation structure); availability is never inferred from
+        ephemeral job history. Safe scalar/outline fields only: no paths, no
+        raw spec, no arbitrary URLs.
+        """
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            try:
+                record, _ = await stores[mode].retrieve(thread_id, turn_id)
+            except ArtifactNotFoundError:
+                raise HTTPException(404, "Presentation was not found.") from None
+            except ArtifactError:
+                raise HTTPException(409, "Presentation is unavailable.") from None
+        spec = DeckSpec.model_validate_json(record.spec_json)
+        return PresentationMetadataDTO(
+            title=spec.title,
+            theme=spec.theme,
+            slide_count=len(spec.slides),
+            layouts=tuple(sorted({slide.content.kind for slide in spec.slides})),
+            outline=tuple(
+                PresentationSlideOutlineDTO(
+                    index=index + 1,
+                    slide_id=slide.id,
+                    layout=slide.content.kind,
+                    title=slide.title,
+                )
+                for index, slide in enumerate(spec.slides)
+            ),
+            byte_size=record.byte_size,
+            sha256=record.sha256,
+        )
 
     @app.get("/api/{mode}/conversations/{thread_id}/turns/{turn_id}/presentation")
     async def presentation(
