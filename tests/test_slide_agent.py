@@ -578,10 +578,14 @@ def test_invented_urls_anywhere_are_rejected(where):
 def test_out_of_range_evidence_keys_are_rejected():
     slides = base_slides()
     slides[1] = {**slides[1], "evidence_keys": [9]}
-    with pytest.raises(SlideAgentValidationError, match="not available to the slide planner"):
+    with pytest.raises(
+        SlideAgentValidationError, match="not available to the slide planner"
+    ):
         build_spec(slides)
     slides = base_slides(conclusion_keys=[9])
-    with pytest.raises(SlideAgentValidationError, match="not available to the slide planner"):
+    with pytest.raises(
+        SlideAgentValidationError, match="not available to the slide planner"
+    ):
         build_spec(slides)
 
 
