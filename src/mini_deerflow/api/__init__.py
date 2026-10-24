@@ -40,6 +40,12 @@ from mini_deerflow.demo.service import (
 )
 from mini_deerflow.demo.view_models import ChatSessionView
 from mini_deerflow.persistence import ThreadNotFoundError
+from mini_deerflow.pptx.artifacts import (
+    PPTX_MIME,
+    ArtifactError,
+    ArtifactNotFoundError,
+    PptxArtifactStore,
+)
 from mini_deerflow.skills import SkillsError, SkillsRegistry
 
 Identifier = Annotated[
@@ -69,6 +75,7 @@ def _skills() -> SkillsDTO:
 def create_app(
     storage_root: str | Path | None = None,
     services: Mapping[Mode, DemoRuntimeService] | None = None,
+    presentation_stores: Mapping[Mode, PptxArtifactStore] | None = None,
 ) -> FastAPI:
     """Create an isolated app; supplied services override either default mode.
 
@@ -91,6 +98,16 @@ def create_app(
             raise ValueError("Unsupported service mode.")
         runtime_services.update(services)
     jobs = ApiJobs()
+    stores = {
+        "offline": PptxArtifactStore(root, mode="offline"),
+        "live": PptxArtifactStore(live_root, mode="live"),
+    }
+    if presentation_stores is not None:
+        if set(presentation_stores) - {"offline", "live"} or any(
+            store.mode != mode for mode, store in presentation_stores.items()
+        ):
+            raise ValueError("Invalid presentation store modes.")
+        stores.update(presentation_stores)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -260,6 +277,29 @@ def create_app(
             headers={
                 "Content-Disposition": 'attachment; filename="report.md"',
                 "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/api/{mode}/conversations/{thread_id}/turns/{turn_id}/presentation")
+    async def presentation(
+        mode: Mode, thread_id: Identifier, turn_id: Identifier
+    ) -> Response:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            try:
+                record, data = await stores[mode].retrieve(thread_id, turn_id)
+            except ArtifactNotFoundError:
+                raise HTTPException(404, "Presentation was not found.") from None
+            except ArtifactError:
+                raise HTTPException(409, "Presentation is unavailable.") from None
+        return Response(
+            content=data,
+            media_type=PPTX_MIME,
+            headers={
+                "Content-Disposition": 'attachment; filename="presentation.pptx"',
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+                "ETag": f'"{record.sha256}"',
             },
         )
 

@@ -1,5 +1,8 @@
 import os
-from pathlib import Path
+import re
+import stat
+from pathlib import Path, PureWindowsPath
+from uuid import uuid4
 
 
 def _is_reserved_windows_component(part: str) -> bool:
@@ -201,6 +204,133 @@ class Workspace:
                     files.append(resolved_file.relative_to(self._root).as_posix())
 
         return tuple(sorted(files))
+
+    def _binary_path(self, relative_path: str | Path) -> Path:
+        """Binary artifacts reject links and ambiguous syntax even inside the root."""
+        raw = (
+            relative_path.as_posix()
+            if isinstance(relative_path, Path)
+            else relative_path
+        )
+        requested = Path(raw)
+        if (
+            requested.is_absolute()
+            or PureWindowsPath(raw).drive
+            or "\\" in raw
+            or not requested.parts
+            or any(
+                part == ".." or _is_reserved_windows_component(part)
+                for part in requested.parts
+            )
+        ):
+            raise WorkspacePathError("Invalid binary artifact path.")
+        current = self._root
+        for part in requested.parts:
+            current = current / part
+            if self._is_link_or_junction(current):
+                raise WorkspacePathError("Binary artifact links are not allowed.")
+        return self.resolve_path(requested)
+
+    def read_bytes(self, relative_path: str | Path) -> bytes:
+        """Read a bounded regular binary file, refusing link aliases and hardlinks."""
+        path = _filesystem_path(self._binary_path(relative_path))
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise WorkspacePathError(
+                    "Binary artifact must be an unaliased regular file."
+                )
+            if info.st_size > self._max_read_bytes:
+                raise WorkspaceLimitError("File exceeds the workspace read limit.")
+            content = file.read(self._max_read_bytes + 1)
+        if len(content) > self._max_read_bytes:
+            raise WorkspaceLimitError("File exceeds the workspace read limit.")
+        return content
+
+    def write_bytes_exclusive(self, relative_path: str | Path, content: bytes) -> int:
+        """Publish complete bytes atomically without replacing any existing file.
+
+        A same-directory temporary file is fsynced, then linked exclusively to
+        its final name. Filesystems must support same-volume hardlinks. This
+        reduces ordinary crash/race windows; it is not an OS sandbox against a
+        hostile process concurrently replacing parent directories.
+        """
+        if not isinstance(content, bytes):
+            raise TypeError("binary content must be bytes")
+        if len(content) > self._max_write_bytes:
+            raise WorkspaceLimitError("Content exceeds the workspace write limit.")
+        path = self._binary_path(relative_path)
+        _filesystem_path(path.parent).mkdir(parents=True, exist_ok=True)
+        path = self._binary_path(relative_path)
+        relative_temp = (
+            path.relative_to(self._root).parent / f".pending-{path.name}-{uuid4().hex}"
+        )
+        temporary = _filesystem_path(self._binary_path(relative_temp))
+        created = False
+        try:
+            with temporary.open("xb") as file:
+                created = True
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+            path = self._binary_path(relative_path)
+            os.link(temporary, _filesystem_path(path))
+        finally:
+            if created:
+                temporary.unlink(missing_ok=True)
+        return len(content)
+
+    def recover_bytes_publication(
+        self, relative_path: str | Path, expected: bytes
+    ) -> None:
+        """Adopt only identical complete bytes, cleaning this protocol's staging aliases.
+
+        Called for an uncommitted orphan, never to make an ordinary download
+        tolerate hardlinks. Every extra link must be a same-directory staging
+        name belonging to this exact final filename and inode. Unrelated or
+        unaccounted-for links fail closed without being removed.
+        """
+        if not isinstance(expected, bytes) or len(expected) > self._max_write_bytes:
+            raise WorkspaceLimitError("Invalid binary recovery content.")
+        path = _filesystem_path(self._binary_path(relative_path))
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        with os.fdopen(os.open(path, flags), "rb") as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > self._max_read_bytes:
+                raise WorkspacePathError("Invalid binary recovery file.")
+            if file.read(self._max_read_bytes + 1) != expected:
+                raise WorkspacePathError("Binary recovery bytes differ.")
+            aliases = []
+            pattern = re.compile(rf"\.pending-{re.escape(path.name)}-[0-9a-f]{{32}}")
+            for candidate in path.parent.iterdir():
+                if not pattern.fullmatch(candidate.name) or self._is_link_or_junction(
+                    candidate
+                ):
+                    continue
+                other = candidate.stat(follow_symlinks=False)
+                if stat.S_ISREG(other.st_mode) and (other.st_dev, other.st_ino) == (
+                    info.st_dev,
+                    info.st_ino,
+                ):
+                    aliases.append(candidate)
+            if info.st_nlink != 1 + len(aliases):
+                raise WorkspacePathError("Unrelated binary recovery hardlink.")
+        for alias in aliases:
+            alias.unlink()
+        if self.read_bytes(relative_path) != expected:
+            raise WorkspacePathError("Binary recovery verification failed.")
 
     def _ensure_inside_workspace(self, path: Path) -> None:
         if not self._is_inside_workspace(path):

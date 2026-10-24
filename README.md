@@ -235,6 +235,12 @@ The demo refuses to overwrite `phase2-offline.pptx`. Structural validation is
 not visual verification; actual viewer text fit remains unverified. Automated
 task 2.1 acceptance passed with final review APPROVE; see the guide for evidence.
 
+Task 2.2 (Issue #10) adds immutable turn-owned PPTX storage and scoped HTTP
+downloads. See the [PPTX artifact guide](docs/phase2-pptx-artifacts.md) for API
+usage, crash recovery, the credential-free two-mode demo and verification status.
+Final automated local acceptance: **PASS**; security review: **APPROVE**, with no
+open HIGH/MEDIUM findings. Manual viewer verification remains unverified.
+
 ## Deterministic Mentor Walkthrough
 
 The offline walkthrough is **deterministic**, **localhost-oriented**, and designed for a 5–7 minute mentor walkthrough. It uses the real runtime, workflow, SQLite checkpointer, evidence/citation logic, reviewer/replanner, delegation fan-in, tracing, workspace, and artifact boundary.
