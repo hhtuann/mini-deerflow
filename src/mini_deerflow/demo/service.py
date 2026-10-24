@@ -45,6 +45,21 @@ _MIN_GOAL_LENGTH = 10
 _SAFE_REFERENCE_PATTERN = re.compile(r"[^A-Za-z0-9._-]")
 
 
+def _is_slide_agent_conflict(error: BaseException) -> bool:
+    """Slide/artifact imports stay lazy so demo wiring cannot cycle."""
+
+    from mini_deerflow.pptx.slide_agent import SlideAgentConflictError
+
+    return isinstance(error, SlideAgentConflictError)
+
+
+def _is_slide_agent_error(error: BaseException) -> bool:
+    from mini_deerflow.pptx.artifacts import ArtifactError
+    from mini_deerflow.pptx.slide_agent import SlideAgentError
+
+    return isinstance(error, (SlideAgentError, ArtifactError))
+
+
 class DemoCommandValidationError(ValueError):
     """Raised when a UI command violates the narrow demo contract."""
 
@@ -269,6 +284,10 @@ def map_demo_error(error: BaseException, reference_id: str = "demo") -> str:
         return "Checkpoint operation failed."
     if isinstance(error, TimeoutError):
         return "Operation timed out."
+    if _is_slide_agent_conflict(error):
+        return "A different presentation already belongs to this turn."
+    if _is_slide_agent_error(error):
+        return "Presentation generation failed."
 
     safe_reference = _SAFE_REFERENCE_PATTERN.sub("-", reference_id)[:64] or "demo"
     return f"Demo operation failed. Reference: {safe_reference}."
