@@ -524,7 +524,11 @@ def test_scripted_eight_slide_vi_plan_full_pipeline():
             "instructions": "Nhấn mạnh bằng chứng.",
         },
         "evidence": [
-            {"canonical_url": item.canonical_url, "title": item.title}
+            {
+                "key": item.key,
+                "canonical_url": item.canonical_url,
+                "title": item.title,
+            }
             for item in evidence_pair()
         ],
     }
