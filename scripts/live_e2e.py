@@ -131,19 +131,32 @@ def safe_failed_trace(job: dict) -> dict[str, str | None]:
         "budget_exhausted",
     }
     allowed_categories = {
-        "safety", "provider", "transport", "context_budget",
-        "tool", "persistence", "runtime", "internal",
+        "safety",
+        "provider",
+        "transport",
+        "context_budget",
+        "tool",
+        "persistence",
+        "runtime",
+        "internal",
     }
     allowed_codes = {
-        "url_denied", "web_provider_failure", "web_transport_failure",
-        "tool_failure", "context_budget_exceeded", "checkpoint_failure",
-        "runtime_failure", "unexpected_failure",
+        "url_denied",
+        "web_provider_failure",
+        "web_transport_failure",
+        "tool_failure",
+        "context_budget_exceeded",
+        "checkpoint_failure",
+        "runtime_failure",
+        "unexpected_failure",
     }
     for item in reversed(traces):
         if not isinstance(item, dict):
             continue
         if item.get("outcome") not in {
-            "failed", "provider_failed", "transport_failed",
+            "failed",
+            "provider_failed",
+            "transport_failed",
         }:
             continue
         node = item.get("node")
@@ -153,7 +166,9 @@ def safe_failed_trace(job: dict) -> dict[str, str | None]:
             node if isinstance(node, str) and node in allowed_nodes else None
         )
         fields["last_trace_error_category"] = (
-            category if isinstance(category, str) and category in allowed_categories else None
+            category
+            if isinstance(category, str) and category in allowed_categories
+            else None
         )
         fields["last_trace_error_code"] = (
             code if isinstance(code, str) and code in allowed_codes else None
