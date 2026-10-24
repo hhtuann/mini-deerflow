@@ -135,7 +135,7 @@ def build_scripted_plan(payload: dict) -> DeckPlan:
                     t("bullet_evidence", 110),
                 ]
             }
-            base["evidence_keys"] = list(range(min(3, len(evidence))))
+            base["evidence_keys"] = [item["key"] for item in evidence[:3]]
         elif layout == "comparison":
             base["payload"] = {
                 "left": {
@@ -201,7 +201,7 @@ def build_scripted_plan(payload: dict) -> DeckPlan:
         elif layout == "conclusion":
             base["payload"] = {
                 "items": [t("conclusion_1", 105), t("conclusion_2", 105)],
-                "source_keys": list(range(min(3, len(evidence)))),
+                "source_keys": [item["key"] for item in evidence[:3]],
             }
         slides.append(base)
 

@@ -10,6 +10,7 @@ URLs are structurally impossible rather than merely discouraged.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -332,6 +333,7 @@ def plan_deck(
     context_budget: ContextBudget | None = None,
     structured_output_mode: StructuredOutputMode = "prompt_json",
     on_context_projection: Callable[[ProjectionMetadata], None] | None = None,
+    on_presented_evidence: Callable[[tuple[SlideEvidenceItem, ...]], None] | None = None,
 ) -> DeckPlan:
     """Produce a validated DeckPlan through the production model seam."""
 
@@ -343,6 +345,9 @@ def plan_deck(
     )
     if on_context_projection is not None and planning_context.context_projection:
         on_context_projection(planning_context.context_projection)
+    if on_presented_evidence is not None:
+        # These are the exact keys serialized for the model, after compaction.
+        on_presented_evidence(planning_context.evidence)
 
     structured_model = create_structured_output_runnable(
         model,
@@ -389,25 +394,60 @@ def _require_no_urls(plan: DeckPlan) -> None:
         )
 
 
+def _evidence_by_key(
+    evidence: tuple[SlideEvidenceItem, ...],
+) -> dict[int, SlideEvidenceItem]:
+    # The compactor may drop oldest records without renumbering the surviving
+    # keys. Indexing a compacted tuple by key can misattribute citations.
+    entries = {item.key: item for item in evidence}
+    if len(entries) != len(evidence):
+        raise SlideAgentValidationError("duplicate evidence key")
+    return entries
+
+
+def _source_display(
+    item: SlideEvidenceItem, language: PresentationLanguage
+) -> str:
+    """Display a long source unambiguously without inventing a truncated URL.
+
+    The canonical URL stays intact in the research turn's evidence and in the
+    planner payload. PPTX text has a 180-character limit; use its SHA-256 as an
+    exact lookup fingerprint when the whole URL cannot fit on the slide.
+    """
+    if len(item.canonical_url) <= 180:
+        return item.canonical_url
+    prefix = "Nguồn" if language == "vi" else "Source"
+    digest = hashlib.sha256(item.canonical_url.encode("utf-8")).hexdigest()
+    title = " ".join(item.title.split())[:70]
+    return f"{prefix} #{item.key + 1} SHA256:{digest} {title}".strip()
+
+
 def _resolve_sources(
     keys: tuple[int, ...],
     evidence: tuple[SlideEvidenceItem, ...],
     language: PresentationLanguage,
 ) -> tuple[str, ...]:
     if not evidence:
+        if keys:
+            raise SlideAgentValidationError(
+                "evidence key was not available to the slide planner"
+            )
         return (_UNCERTAINTY_SOURCE[language],)
+    by_key = _evidence_by_key(evidence)
     resolved: list[str] = []
     for key in keys:
-        if key >= len(evidence):
-            raise SlideAgentValidationError("evidence key is out of range")
-        resolved.append(evidence[key].canonical_url)
+        if key not in by_key:
+            raise SlideAgentValidationError(
+                "evidence key was not available to the slide planner"
+            )
+        resolved.append(_source_display(by_key[key], language))
     if not resolved:
         return (_UNCERTAINTY_SOURCE[language],)
     # Deduplicate while preserving plan order; sources are capped at three.
     ordered: list[str] = []
-    for url in resolved:
-        if url not in ordered:
-            ordered.append(url)
+    for source in resolved:
+        if source not in ordered:
+            ordered.append(source)
     return tuple(ordered[:3])
 
 
@@ -431,9 +471,12 @@ def _slide_content(
         raise SlideAgentValidationError(
             "planned payload does not match its layout"
         ) from error
+    allowed_keys = _evidence_by_key(evidence)
     for key in slide.evidence_keys:
-        if key >= len(evidence):
-            raise SlideAgentValidationError("evidence key is out of range")
+        if key not in allowed_keys:
+            raise SlideAgentValidationError(
+                "evidence key was not available to the slide planner"
+            )
     match slide.layout:
         case "title":
             assert isinstance(payload, PlannedTitlePayload)
@@ -595,22 +638,32 @@ class SlideAgentService:
         # field to the projection's own bounds so real long evidence can never
         # fail generation: clipping is deterministic and provenance-free.
         retained = turn.run.evidence[-MAX_EVIDENCE_ITEMS:]
+        # Do not truncate canonical URLs: that could invent a different
+        # citation. Omit URLs too long for the evidence contract instead.
         evidence = tuple(
             SlideEvidenceItem(
                 key=index,
-                canonical_url=item.canonical_url[:300],
+                canonical_url=item.canonical_url,
                 title=item.title[:120],
                 excerpt=item.excerpt[:400],
                 is_cited=item.is_cited,
             )
             for index, item in enumerate(retained)
+            if 0 < len(item.canonical_url) <= 300
         )
 
         metadata: ProjectionMetadata | None = None
+        presented_evidence: tuple[SlideEvidenceItem, ...] | None = None
 
         def observe(projection: ProjectionMetadata) -> None:
             nonlocal metadata
             metadata = projection
+
+        def observe_evidence(
+            projected: tuple[SlideEvidenceItem, ...],
+        ) -> None:
+            nonlocal presented_evidence
+            presented_evidence = projected
 
         def invoke_planner() -> tuple[DeckPlan, ProjectionMetadata | None]:
             model = self._planner_model_factory()
@@ -622,12 +675,15 @@ class SlideAgentService:
                 context_budget=self._context_budget,
                 structured_output_mode=self._structured_output_mode,
                 on_context_projection=observe,
+                on_presented_evidence=observe_evidence,
             )
             return plan, metadata
 
         try:
             plan, metadata = await asyncio.to_thread(invoke_planner)
-            spec = build_deck_spec(plan, request, evidence)
+            if presented_evidence is None:
+                raise SlideAgentValidationError("planner evidence projection missing")
+            spec = build_deck_spec(plan, request, presented_evidence)
             data = render_deck(spec)
             validate_pptx(data, spec, min_layouts=4)
             record = await self._store.publish(thread_id, turn_id, data, spec)

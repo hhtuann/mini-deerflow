@@ -25,7 +25,8 @@ DemoRuntimeService.load_conversation  (existing AgentRuntime ledger view)
         |  turn must be status="completed"
         |
 Sanitized evidence projection: EvidenceView -> SlideEvidenceItem
-        |  max 10 items; key=index; url<=300, title<=120, excerpt<=400 chars
+        |  newest 10, omitting unrepresentable URLs (>300 chars); keys stay stable
+        |  title<=120, excerpt<=400 chars
         |
 Pinned skill snapshot from ledger run_context_json (fail closed)
         |
@@ -82,10 +83,16 @@ model with `extra="forbid"`.
 Invented sourcing is structurally impossible rather than merely discouraged:
 
 1. **Citation only by integer key.** Slides reference evidence exclusively
-   through `evidence_keys` (and conclusion `source_keys`, ≤3) indexing the
-   allowlisted projection. `build_deck_spec` resolves keys to `canonical_url`
-   values from that projection — deduplicated in plan order, capped at three —
-   and rejects any out-of-range key.
+   through `evidence_keys` (and conclusion `source_keys`, ≤3) referencing the
+   **actual post-compaction planner evidence** by its stable `key` field.
+   Compaction may remove old entries without renumbering survivors. The
+   converter rejects any omitted/unknown key instead of consulting evidence
+   that was not included in the model-facing payload. For URLs ≤180
+   characters, conclusion sources retain the canonical URL exactly.
+   Longer URLs (181–300) appear as an explicitly labeled title/reference with
+   the SHA-256 digest of the **unchanged canonical URL**, allowing lookup in
+   the original turn evidence without creating a false truncated URL.
+   URLs longer than 300 are omitted, never silently truncated.
 2. **No URL-like plan text.** Any `http(s)://` or `www.` match in the deck
    title, a slide title, its `purpose`, or its serialized payload raises
    `SlideAgentValidationError` before rendering.
@@ -169,12 +176,17 @@ Semantics: generation is offered **only for completed turns** — otherwise
 thread/turn is **404**. The offline mode without an injected scripted planner
 returns **503** ("Presentation generation is unavailable in this mode."); the
 live default resolves model credentials lazily at generation time, so app
-creation stays offline-safe. An **identical request retry is idempotent**: the
-store returns the original immutable artifact and the same ETag. A **different
-request for the same turn** produces a job with `status: "failed"` and the safe
-message **"A different presentation already belongs to this turn."** Results
-survive restart through the ledger + artifact store; process-local job
-snapshots are **not replayed**, and the download can be re-fetched anytime.
+creation stays offline-safe. Publication is **immutable by validated DeckSpec**,
+not by HTTP request fingerprint. Retrying the same request with a planner that
+returns a semantically identical DeckSpec reuses the first verified artifact
+and its ETag. If a nondeterministic planner returns a different valid DeckSpec
+(even for the same HTTP request), the job safely fails with
+**"A different presentation already belongs to this turn."** The published
+file is not overwritten. For reliable recovery, clients should first
+`GET .../presentation` and download an existing verified artifact instead of
+rerunning the planner. New content requires a new completed research turn.
+Results survive restart through the ledger + artifact store; process-local job
+snapshots are **not replayed**.
 
 ## Credential-free offline demo
 
@@ -190,7 +202,8 @@ skill explicitly pinned (verified via `view.active_skill_id`). Generation then
 runs through the **SAME production `SlideAgentService`** with a scripted
 structured planner injected via `planner_model_factory` (native mode): the demo
 drives the API POST/poll/download cycle with FastAPI `TestClient`, submits the
-identical request twice (immutable idempotency), submits a conflicting request
+identical request twice (the scripted planner produces identical specifications),
+submits a conflicting request
 (`slide_count: 6`) and asserts the job fails with the safe conflict message,
 and compares downloaded bytes against the store. A **fresh child interpreter**
 re-downloads through a newly constructed app, revalidates the deck against the
@@ -224,8 +237,10 @@ Post-review hardening (from the independent security review; both findings
 fixed with regression coverage):
 
 - The evidence projection retains the **newest 10** records and clips
-  `url`≤300 / `title`≤120 / `excerpt`≤400 characters, so long real evidence
-  never fails generation.
+  original URLs ≤300 characters without rewriting them and omits longer URLs.
+  Titles and excerpts are bounded at 120/400 characters. Source references
+  longer than the PPTX Core's 180-character text bound are displayed as an
+  explicit title plus a SHA-256 fingerprint of the original URL.
 - The illustrative marker triggers on **any digit** in metric values and table
   cells — including quoted numbers, units and currency such as `"42"`,
   `"91%"`, `"1.2M"`, `"$3.5B"`.
@@ -247,6 +262,15 @@ measurements within one run (parent vs. child), not across runs.
 - Chart/table numbers are illustrative by policy and are never
   evidence-derived statistics; post-review, the marker triggers on any digit
   in metric values and table cells (quoted numbers/units/currency included).
+
+## Corrective review verification
+
+This revision adds regression cases for long cited URLs, source labels with
+full SHA-256 identity, stable evidence keys after context pressure (including
+omitted-key rejection), and immutable retry behavior when the model returns
+different plans for the same HTTP request. Test commands and results for the
+corrective revision must be recorded separately from the historical acceptance
+table below; **prior PASS numbers are not a rerun of this revision**.
 
 ## Final verification
 

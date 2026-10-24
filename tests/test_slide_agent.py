@@ -766,10 +766,16 @@ def test_conclusion_uncertainty_line_without_cited_evidence(language, uncertain)
     content = spec.slides[-1].content
     assert isinstance(content, ConclusionContent)
     assert content.sources == (uncertain,)
-    empty_slides = base_slides(language, conclusion_keys=[0])
+    empty_slides = base_slides(language, conclusion_keys=[])
     empty_slides[1] = {**empty_slides[1], "evidence_keys": []}
     empty = build_spec(empty_slides, language=language, evidence=())
     assert empty.slides[-1].content.sources == (uncertain,)
+    with pytest.raises(SlideAgentValidationError, match="not available"):
+        build_spec(
+            base_slides(language, conclusion_keys=[0]),
+            language=language,
+            evidence=(),
+        )
 
 
 @pytest.mark.parametrize("theme", ["light", "dark", "academic"])
@@ -1055,11 +1061,11 @@ def test_service_retains_newest_evidence_items(tmp_path):
         )
         await service.generate(THREAD, TURN, vi_request())
         entries = planner.evidence_entries[0]
-        assert len(entries) == MAX_EVIDENCE_ITEMS
-        assert [item["key"] for item in entries] == list(range(MAX_EVIDENCE_ITEMS))
-        expected_urls = [url_for(index)[:300] for index in range(2, total)]
+        assert len(entries) == MAX_EVIDENCE_ITEMS - 1
+        assert [item["key"] for item in entries] == list(range(MAX_EVIDENCE_ITEMS - 1))
+        # The >300-character URL must be omitted, never truncated to a false URL.
+        expected_urls = [url_for(index) for index in range(2, total - 1)]
         assert [item["canonical_url"] for item in entries] == expected_urls
-        assert len(entries[-1]["canonical_url"]) == 300
         assert planner.captures[0]["evidence_urls"] == expected_urls
 
     asyncio.run(scenario())
@@ -1299,3 +1305,122 @@ def test_map_demo_error_defaults_never_echo_details():
     message = map_demo_error(RuntimeError("sk-day15-must-not-leak C:\\secret"), "job-1")
     assert message == "Demo operation failed. Reference: job-1."
     assert "sk-day15-must-not-leak" not in message
+
+
+# Corrective review regressions: cited URL identity and post-compaction keys.
+
+
+def test_long_cited_url_uses_short_sha256_reference_without_fabricating_url():
+    long_url = "https://evidence.example/article?" + "a" * 215
+    assert 180 < len(long_url) <= 300
+    original = evidence_pair()[0]
+    evidence = (original.model_copy(update={"canonical_url": long_url}),)
+    spec = build_spec(base_slides(conclusion_keys=(0,)), evidence=evidence)
+    conclusion = spec.slides[-1].content
+    assert isinstance(conclusion, ConclusionContent)
+    source = conclusion.sources[0]
+    assert len(source) <= 180
+    assert source.startswith("Nguồn #1 SHA256:")
+    assert hashlib.sha256(long_url.encode("utf-8")).hexdigest() in source
+    assert long_url not in source  # do not present a false truncated URL
+    validate_pptx(render_deck(spec), spec, min_layouts=4)
+
+
+def test_compacted_planner_evidence_keys_remain_stable_and_omitted_keys_fail():
+    evidence = tuple(
+        SlideEvidenceItem(
+            key=index,
+            canonical_url=f"https://evidence.example/compacted/{index}",
+            title=f"Nguồn số {index}",
+            excerpt="E" * 400,
+            is_cited=True,
+        )
+        for index in range(10)
+    )
+    budget = ContextBudget(
+        max_total_chars=6_000, max_item_chars=3_000, max_excerpt_chars=1_000
+    )
+    presented = []
+    request = vi_request()
+    plan = plan_deck(
+        ScriptedSlidePlanner(),
+        request,
+        evidence,
+        active_skill=SkillsRegistry().activate(SKILL_ID),
+        context_budget=budget,
+        structured_output_mode="native",
+        on_presented_evidence=presented.append,
+    )
+    assert len(presented) == 1
+    allowed = presented[0]
+    assert 0 < len(allowed) < len(evidence)
+    remaining_keys = {item.key for item in allowed}
+    omitted_keys = {item.key for item in evidence} - remaining_keys
+    assert omitted_keys
+    # The scripted planner now references actual surviving keys, never
+    # positions in the shortened evidence list.
+    for slide in plan.slides:
+        assert set(slide.evidence_keys) <= remaining_keys
+    spec = build_deck_spec(plan, request, allowed)
+    validate_pptx(render_deck(spec), spec, min_layouts=4)
+
+    bad_key = min(omitted_keys)
+    bad_slide = plan.slides[-1].model_copy(
+        update={
+            "payload": {
+                "items": ["Nguồn này đã bị loại khỏi ngữ cảnh model."],
+                "source_keys": [bad_key],
+            }
+        }
+    )
+    bad_plan = plan.model_copy(update={"slides": (*plan.slides[:-1], bad_slide)})
+    with pytest.raises(
+        SlideAgentValidationError, match="not available to the slide planner"
+    ):
+        build_deck_spec(bad_plan, request, allowed)
+
+
+def test_model_variance_retry_preserves_existing_artifact_and_download(tmp_path):
+    class VaryingPlanner(ScriptedSlidePlanner):
+        def __init__(self):
+            super().__init__()
+            self.generated = 0
+
+        def _plan_from_messages(self, messages):
+            plan = super()._plan_from_messages(messages)
+            self.generated += 1
+            if self.generated > 1:
+                return plan.model_copy(
+                    update={"deck_title": plan.deck_title + " bản khác"}
+                )
+            return plan
+
+    async def scenario():
+        runtime = DemoRuntimeService(OfflineDemoBackend(tmp_path))
+        store = PptxArtifactStore(tmp_path, mode="offline")
+        planner = VaryingPlanner()
+        service = SlideAgentService(
+            runtime,
+            store,
+            planner_model_factory=lambda: planner,
+            structured_output_mode="native",
+        )
+        await runtime.run(RunDemoCommand(thread_id=THREAD, turn_id=TURN))
+        request = vi_request()
+        first = await service.generate(THREAD, TURN, request)
+        _, first_bytes = await store.retrieve(THREAD, TURN)
+        with pytest.raises(
+            SlideAgentConflictError, match="different presentation"
+        ):
+            await service.generate(THREAD, TURN, request)
+        assert planner.generated == 2
+        assert (await store.retrieve(THREAD, TURN))[1] == first_bytes
+        with TestClient(create_app(tmp_path)) as client:
+            downloaded = client.get(
+                f"/api/offline/conversations/{THREAD}/turns/{TURN}/presentation"
+            )
+        assert downloaded.status_code == 200
+        assert downloaded.content == first_bytes
+        assert downloaded.headers["etag"] == f'"{first.record.sha256}"'
+
+    asyncio.run(scenario())
