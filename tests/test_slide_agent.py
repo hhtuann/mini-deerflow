@@ -578,10 +578,10 @@ def test_invented_urls_anywhere_are_rejected(where):
 def test_out_of_range_evidence_keys_are_rejected():
     slides = base_slides()
     slides[1] = {**slides[1], "evidence_keys": [9]}
-    with pytest.raises(SlideAgentValidationError, match="out of range"):
+    with pytest.raises(SlideAgentValidationError, match="not available to the slide planner"):
         build_spec(slides)
     slides = base_slides(conclusion_keys=[9])
-    with pytest.raises(SlideAgentValidationError, match="out of range"):
+    with pytest.raises(SlideAgentValidationError, match="not available to the slide planner"):
         build_spec(slides)
 
 
@@ -1413,9 +1413,7 @@ def test_model_variance_retry_preserves_existing_artifact_and_download(tmp_path)
         request = vi_request()
         first = await service.generate(THREAD, TURN, request)
         _, first_bytes = await store.retrieve(THREAD, TURN)
-        with pytest.raises(
-            SlideAgentConflictError, match="different presentation"
-        ):
+        with pytest.raises(SlideAgentConflictError, match="different presentation"):
             await service.generate(THREAD, TURN, request)
         assert planner.generated == 2
         assert (await store.retrieve(THREAD, TURN))[1] == first_bytes
