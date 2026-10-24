@@ -135,6 +135,7 @@ def test_timeout_configuration_fails_before_provider_use(monkeypatch, capsys):
     assert live_e2e.main(["--allow-paid-live", "--timeout-seconds", "901"]) == 2
     assert "timeout must be" in capsys.readouterr().out
 
+
 def test_worker_command_is_complete_and_killable(tmp_path: Path):
     path = tmp_path / "child-report.json"
     command = live_e2e.worker_command("vi", 480, path)
