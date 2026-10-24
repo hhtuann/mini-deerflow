@@ -467,6 +467,27 @@ def _public_markdown_text(value: str) -> str:
     return sanitized
 
 
+def _bound_public_text(value: str, limit: int) -> str:
+    """Deterministically fit rendered public text into its schema bound.
+
+    The deterministic fallback renderer must never fail a completed turn:
+    model-authored finding summaries may legally reach 4,000 characters, but
+    public claims and limitations are capped at 1,000. Cut at the last
+    sentence boundary when possible, otherwise the last word; never empty.
+    Truncation only shortens already-sanitized text; it invents nothing.
+    """
+
+    if len(value) <= limit:
+        return value
+    window = value[:limit]
+    for separator in (". ", "! ", "? ", " "):
+        index = window.rfind(separator)
+        if index >= limit // 2:
+            end = index + 1 if separator != " " else index
+            return window[:end].rstrip() or window.rstrip()
+    return window.rstrip() or value[:1]
+
+
 def _answer_points(statement: str) -> list[str]:
     """Break a model-authored finding into scan-friendly, complete points.
 
@@ -657,7 +678,7 @@ def _claims_from_finding(
         for point in points:
             if _is_internal_execution_text(point):
                 continue
-            text = _public_markdown_text(point)
+            text = _bound_public_text(_public_markdown_text(point), 1_000)
             if text:
                 target.append(AnswerClaim(text=text, citations=citations))
 
@@ -737,11 +758,13 @@ def build_user_facing_answer(
             )
         )
 
-    limitations = [
-        _public_markdown_text(note)
-        for note in review_notes
-        if note.strip() and not _is_internal_execution_text(note)
-    ]
+    limitations = []
+    for note in review_notes:
+        if not note.strip() or _is_internal_execution_text(note):
+            continue
+        bounded = _bound_public_text(_public_markdown_text(note), 1_000)
+        if bounded:
+            limitations.append(bounded)
     limitations = list(dict.fromkeys(limitations))
     if (
         has_collection_failures
@@ -767,7 +790,7 @@ def build_user_facing_answer(
         evidence=evidence_claims[:12],
         discrepancies=discrepancies[:6],
         limitations=limitations[:6],
-        sources=sources,
+        sources=sources[:MAX_EVIDENCE_RECORDS],
     )
 
 
