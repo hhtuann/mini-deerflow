@@ -224,7 +224,7 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
             async def run(self, command, *, trace_sink=None):
                 try:
                     return await super().run(command, trace_sink=trace_sink)
-                except Exception as error:  # noqa: BLE001 - classify type, never payload
+                except Exception as error:
                     self.failure_family = classify_failure(error)
                     raise
 
