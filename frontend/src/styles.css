@@ -224,3 +224,28 @@ summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 12px; f
   .graph-canvas { height: 350px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+/* Presentation workspace (Task 2.4) — Corporate Trust tokens, no marketing chrome. */
+.presentation { padding: 16px 20px 24px; display: grid; gap: 14px; min-width: 0; }
+.presentation-heading h3 { margin: 4px 0; }
+.presentation-form { display: grid; gap: 6px; }
+.presentation-form label { font-size: 12px; font-weight: 600; color: var(--text); display: grid; gap: 4px; }
+.presentation-form textarea, .presentation-form input { width: 100%; max-width: 100%; }
+.presentation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.presentation-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+.presentation-artifact { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); padding: 14px 16px; display: grid; gap: 10px; min-width: 0; }
+.presentation-artifact-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.presentation-artifact-heading h4 { margin: 0; font-size: 14px; flex: 1 1 auto; }
+.presentation-artifact .fields { margin: 0; }
+.outline-heading { margin: 4px 0 0; font-size: 13px; }
+.presentation-outline { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 320px; overflow: auto; }
+.presentation-outline li { display: grid; grid-template-columns: 28px 96px minmax(0, 1fr); gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-input); background: var(--background); font-size: 12px; }
+.outline-index { font-variant-numeric: tabular-nums; color: var(--muted-text); }
+.outline-layout { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--primary); background: var(--primary-border-soft); border-radius: 999px; padding: 3px 8px; text-align: center; overflow-wrap: anywhere; }
+.outline-title { overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+  .presentation { padding: 12px 14px 20px; }
+  .presentation-grid { grid-template-columns: minmax(0, 1fr); }
+  .presentation-outline li { grid-template-columns: 24px minmax(0, 1fr); }
+  .presentation-outline .outline-title { grid-column: 1 / -1; }
+}
