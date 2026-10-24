@@ -139,6 +139,8 @@ Planning rules:
    in the slide text instead of inventing support.
 4. Reflect the topic and audience in every slide; keep the requested
    language everywhere including the deck title.
+   Use the explicit evidence item.key values, NOT their positions in the list:
+   earlier evidence items may have been omitted to fit the context budget.
 5. Produce EXACTLY presentation.slide_count slides with sensible layout
    variety: include at least title, bullets, and conclusion plus at least
    one of comparison/metric/steps/chart/table when count allows.
@@ -179,6 +181,9 @@ class SlideEvidenceItem(ContextBudgetModel):
     title: str = Field(default="", max_length=120)
     excerpt: str = Field(default="", max_length=400)
     is_cited: bool = False
+
+
+type PresentedEvidenceObserver = Callable[[tuple[SlideEvidenceItem, ...]], None]
 
 
 class PresentationBrief(ContextBudgetModel):
@@ -333,7 +338,7 @@ def plan_deck(
     context_budget: ContextBudget | None = None,
     structured_output_mode: StructuredOutputMode = "prompt_json",
     on_context_projection: Callable[[ProjectionMetadata], None] | None = None,
-    on_presented_evidence: Callable[[tuple[SlideEvidenceItem, ...]], None] | None = None,
+    on_presented_evidence: PresentedEvidenceObserver | None = None,
 ) -> DeckPlan:
     """Produce a validated DeckPlan through the production model seam."""
 
@@ -405,9 +410,7 @@ def _evidence_by_key(
     return entries
 
 
-def _source_display(
-    item: SlideEvidenceItem, language: PresentationLanguage
-) -> str:
+def _source_display(item: SlideEvidenceItem, language: PresentationLanguage) -> str:
     """Display a long source unambiguously without inventing a truncated URL.
 
     The canonical URL stays intact in the research turn's evidence and in the
@@ -634,9 +637,8 @@ class SlideAgentService:
 
         turn_record = await self._store.get_turn(thread_id, turn_id)
         active_skill = self._pinned_skill(turn_record.run_context_json)
-        # Retain the most recent records (compaction doctrine), then clip every
-        # field to the projection's own bounds so real long evidence can never
-        # fail generation: clipping is deterministic and provenance-free.
+        # Keep the newest evidence records; clip display-only fields. Never
+        # truncate a canonical URL into a potentially false source identity.
         retained = turn.run.evidence[-MAX_EVIDENCE_ITEMS:]
         # Do not truncate canonical URLs: that could invent a different
         # citation. Omit URLs too long for the evidence contract instead.
@@ -659,9 +661,7 @@ class SlideAgentService:
             nonlocal metadata
             metadata = projection
 
-        def observe_evidence(
-            projected: tuple[SlideEvidenceItem, ...],
-        ) -> None:
+        def observe_evidence(projected: tuple[SlideEvidenceItem, ...]) -> None:
             nonlocal presented_evidence
             presented_evidence = projected
 
