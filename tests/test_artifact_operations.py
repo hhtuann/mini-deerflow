@@ -141,9 +141,7 @@ def test_final_file_alone_always_protected_even_without_metadata(ledger):
 def test_symlink_staging_never_deleted_and_external_bytes_safe(ledger, tmp_path):
     other = tmp_path / "external.txt"
     other.write_bytes(b"DO-NOT-DELETE")
-    candidate = owned(ledger, "second") / (
-        f".pending-{'a' * 64}.pptx-{'d' * 32}"
-    )
+    candidate = owned(ledger, "second") / (f".pending-{'a' * 64}.pptx-{'d' * 32}")
     try:
         candidate.symlink_to(other)
     except (OSError, NotImplementedError):
@@ -190,7 +188,9 @@ def test_exact_committed_content_audited_but_never_deleted(ledger):
     assert record.sha256 == hashlib.sha256(data).hexdigest()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="offline safe unlink requires POSIX dirfd")
+@pytest.mark.skipif(
+    os.name != "posix", reason="offline safe unlink requires POSIX dirfd"
+)
 def test_apply_requires_both_operator_confirmations_and_preserves_other_files(ledger):
     pending = stage(ledger, "second")
     folder = owned(ledger, "second")
@@ -201,9 +201,7 @@ def test_apply_requires_both_operator_confirmations_and_preserves_other_files(le
     os.utime(young, ns=(RECENT, RECENT))
     with pytest.raises(ValueError, match="explicit offline"):
         inspect(ledger, apply=True, confirms_offline=True)
-    report = inspect(
-        ledger, apply=True, confirms_offline=True, backup_verified=True
-    )
+    report = inspect(ledger, apply=True, confirms_offline=True, backup_verified=True)
     assert report["status"] == "APPLIED"
     assert report["eligible_count"] == report["deleted_count"] == 1
     assert not pending.exists()
@@ -216,8 +214,10 @@ def test_stale_stage_swap_detected_before_unlink(ledger):
     pending = stage(ledger, "second")
     observation = pending.stat()
     fingerprint = (
-        observation.st_dev, observation.st_ino,
-        observation.st_size, observation.st_mtime_ns,
+        observation.st_dev,
+        observation.st_ino,
+        observation.st_size,
+        observation.st_mtime_ns,
     )
     parent = pending.parent.stat()
     parent_fingerprint = (parent.st_dev, parent.st_ino)
@@ -234,16 +234,12 @@ def test_corrupt_committed_artifact_blocks_even_safe_staging_cleanup(ledger):
     spec = demo_spec()
     data = render_deck(spec)
     record = asyncio.run(
-        PptxArtifactStore(ledger, mode="offline").publish(
-            THREAD, "first", data, spec
-        )
+        PptxArtifactStore(ledger, mode="offline").publish(THREAD, "first", data, spec)
     )
     pending = stage(ledger, "second")
     path = owned(ledger, "first") / f"{record.sha256}.pptx"
     path.write_bytes(b"tampered")
-    report = inspect(
-        ledger, apply=True, confirms_offline=True, backup_verified=True
-    )
+    report = inspect(ledger, apply=True, confirms_offline=True, backup_verified=True)
     assert report["status"] == "BLOCKED_COMMITTED_INTEGRITY"
     assert report["missing_or_corrupt_committed"] == 1
     assert report["deleted_count"] == 0

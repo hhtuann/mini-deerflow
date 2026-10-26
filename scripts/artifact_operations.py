@@ -78,17 +78,20 @@ def _read_committed(path: Path, root: Path, record: PptxArtifact) -> bool:
         len(data) == record.byte_size
         and hashlib.sha256(data).hexdigest() == record.sha256
         and len(record.spec_json.encode()) <= MAX_SPEC_BYTES
-        and hashlib.sha256(record.spec_json.encode()).hexdigest()
-        == record.spec_sha256
+        and hashlib.sha256(record.spec_json.encode()).hexdigest() == record.spec_sha256
     )
 
 
-def _open_ledger(root: Path, mode: str) -> tuple[list[tuple[str, str, str]], list[PptxArtifact]]:
+def _open_ledger(
+    root: Path, mode: str
+) -> tuple[list[tuple[str, str, str]], list[PptxArtifact]]:
     database = root / "checkpoints.sqlite"
     if not database.is_file() or _is_link(database):
         raise ValueError("ledger_unavailable")
     # SQLite URI mode=ro: no migrations, schema creation or accidental new DB.
-    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+    with closing(
+        sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    ) as connection:
         connection.row_factory = sqlite3.Row
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ValueError("ledger_integrity_failed")
@@ -163,16 +166,21 @@ def _stage_info(
         result["status"] = "ELIGIBLE_STALE_STAGING"
         # Never expose a token/path from outside an owned directory.
         result["_fingerprint"] = (
-            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
         )
         result["_parent_fingerprint"] = (
-            path.parent.stat().st_dev, path.parent.stat().st_ino
+            path.parent.stat().st_dev,
+            path.parent.stat().st_ino,
         )
     return result
 
 
 def _unlink_exact_staging(
-    path: Path, *,
+    path: Path,
+    *,
     fingerprint: tuple[int, int, int, int],
     parent_fingerprint: tuple[int, int],
 ) -> None:
@@ -201,9 +209,7 @@ def _unlink_exact_staging(
             ):
                 raise RuntimeError("staging_identity_changed")
             candidate = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
-            if (candidate.st_dev, candidate.st_ino) != (
-                info.st_dev, info.st_ino
-            ):
+            if (candidate.st_dev, candidate.st_ino) != (info.st_dev, info.st_ino):
                 raise RuntimeError("staging_name_changed")
             try:
                 os.stat(f"{match[1]}.pptx", dir_fd=directory, follow_symlinks=False)
@@ -251,8 +257,9 @@ def inspect(
         path = _owner_directory(root, mode, thread, turn)
         directories[path] = (status, (thread, turn) in record_map)
     expected_finals = {
-        _owner_directory(root, mode, record.thread_id, record.turn_id):
-        f"{record.sha256}.pptx"
+        _owner_directory(
+            root, mode, record.thread_id, record.turn_id
+        ): f"{record.sha256}.pptx"
         for record in records
     }
     integrity = Counter()
@@ -278,13 +285,16 @@ def inspect(
             if scanned_files > MAX_SCAN_FILES:
                 raise ValueError("scan_file_limit_exceeded")
             if STAGING.fullmatch(path.name):
-                candidates.append(_stage_info(
-                    path, root,
-                    turn_status=status,
-                    has_ledger_artifact=has_record,
-                    now_ns=current_ns,
-                    retention_days=retention_days,
-                ))
+                candidates.append(
+                    _stage_info(
+                        path,
+                        root,
+                        turn_status=status,
+                        has_ledger_artifact=has_record,
+                        now_ns=current_ns,
+                        retention_days=retention_days,
+                    )
+                )
             elif FINAL.fullmatch(path.name) and path.name != expected_finals.get(
                 folder
             ):
@@ -354,7 +364,9 @@ def main(argv: list[str] | None = None) -> int:
             backup_verified=args.confirm_backup_verified,
         )
     except (ValueError, OSError, sqlite3.Error):
-        print(json.dumps({"status": "BLOCKED", "reason": "untrusted_storage_or_policy"}))
+        print(
+            json.dumps({"status": "BLOCKED", "reason": "untrusted_storage_or_policy"})
+        )
         return 2
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] in {"DRY_RUN", "APPLIED"} else 1
