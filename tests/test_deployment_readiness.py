@@ -55,7 +55,7 @@ def test_security_gate_cli_is_read_only_and_redacted():
     ("host", "expected"),
     [
         ("127.0.0.1", True),
-        ("localhost", True),
+        ("localhost", False),
         ("0.0.0.0", False),
         ("::", False),
         ("192.0.2.10", False),
