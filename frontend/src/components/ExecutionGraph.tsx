@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { ReactFlow, Background, Controls, MarkerType, Position } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
 import '@xyflow/react/dist/style.css';
-import type { GraphNode, GraphProjection, GraphStatus, TraceEvent } from '../types';
+import type { GraphNode, GraphProjection, GraphStatus, RunView, TraceEvent } from '../types';
 import { Empty, Fields, Status } from './UI';
 
 const statuses: GraphStatus[] = ['pending', 'running', 'completed', 'failed', 'cancelled', 'skipped'];
@@ -12,7 +12,7 @@ const kinds: { kind: GraphNode['kind']; label: string }[] = [
   { kind: 'tool', label: 'Tool' }, { kind: 'fan_in', label: 'Fan-in' },
 ];
 
-export default function ExecutionGraph({ graph, traces = [], goal, isWorkflow = false }: { graph: GraphProjection; traces?: TraceEvent[]; goal?: string; isWorkflow?: boolean }) {
+export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = false }: { graph: GraphProjection; traces?: TraceEvent[]; run?: RunView | null; isWorkflow?: boolean }) {
   const [selected, setSelected] = useState('');
   const node = graph.nodes.find((item) => item.id === selected) ?? graph.nodes[0];
   // Exact run+node correlation: never attach an unrelated resume/child trace.
@@ -62,8 +62,8 @@ export default function ExecutionGraph({ graph, traces = [], goal, isWorkflow = 
         <h3>{node.label}</h3><Status value={node.status} />
         {isWorkflow ? <p className="caption">Workflow topology only. No real input, prompt, output or usage exists for a possible node. Switch to Current run.</p> : <>
           <h4>Input &amp; context</h4>
-          {node.kind === 'workflow_node' && node.label === 'Planner' && goal
-            ? <p className="run-goal"><strong>User goal (not LLM prompt):</strong> {goal}</p>
+          {node.kind === 'workflow_node' && node.label === 'Planner' && run?.goal
+            ? <p className="run-goal"><strong>User goal (not LLM prompt):</strong> {run?.goal}</p>
             : <p className="caption">Full node inputs are not captured by the safe execution trace.</p>}
           {context && <Fields values={{ 'Projected context chars': context.context_payload_chars,
             'Context budget chars': context.context_budget_chars, 'Retained context items': context.context_retained_items,
@@ -77,6 +77,18 @@ export default function ExecutionGraph({ graph, traces = [], goal, isWorkflow = 
             'Last trace outcome': latest?.outcome, 'Error category': latest?.error_category, 'Error code': latest?.error_code }} />
           <p>{node.safe_summary ?? 'Raw model/tool response not recorded. See the safe structured fields below for observable results.'}</p>
           {node.details.map((field, index) => <Fields key={index} values={{ [field.label]: field.value }} />)}
+          {node.kind === 'workflow_node' && node.label === 'Planner' && !!run?.plan.length && <details>
+            <summary>Structured plan result (turn-level, not raw model output)</summary>
+            <ol>{run.plan.map((step) => <li key={step.step_number}><strong>{step.title}</strong> — {step.objective} ({step.status})</li>)}</ol>
+          </details>}
+          {node.kind === 'workflow_node' && node.label === 'Review' && !!run?.reviews.length && <details>
+            <summary>Review outcomes (all reviews in this turn)</summary>
+            <ul>{run.reviews.map((review) => <li key={review.review_number}>Review {review.review_number}: {review.route} · {review.findings.length} finding(s)</li>)}</ul>
+          </details>}
+          {node.kind === 'workflow_node' && node.label === 'Synthesis' && !!run?.artifact.finding_summaries.length && <details>
+            <summary>Saved report findings (turn-level; not raw model completion)</summary>
+            <ul>{run.artifact.finding_summaries.slice(0, 5).map((finding, index) => <li key={index}>{finding}</li>)}</ul>
+          </details>}
           <h4>Token usage &amp; cost</h4>
           <Fields values={{ 'Actual prompt tokens': 'Not reported', 'Actual completion tokens': 'Not reported',
             'Actual total tokens': 'Not reported', 'Provider cost': 'Not reported' }} />
