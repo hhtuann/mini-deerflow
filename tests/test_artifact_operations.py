@@ -17,12 +17,24 @@ from mini_deerflow.conversation import SQLiteConversationRepository
 from mini_deerflow.demo.phase2_pptx_offline import demo_spec
 from mini_deerflow.pptx import render_deck
 from mini_deerflow.pptx.artifacts import PptxArtifactStore
+from mini_deerflow.workspace import _filesystem_path
 from scripts import artifact_operations as ops
 
 NOW = 2_000_000_000_000_000_000
 OLD = NOW - 50 * 86_400 * 1_000_000_000
 RECENT = NOW - 2 * 86_400 * 1_000_000_000
 THREAD = "ops-thread"
+
+
+def x(path: Path) -> Path:
+    """Windows long-path form for deep staging fixtures (test-only).
+
+    The hashed ownership layout legitimately exceeds MAX_PATH on hosts with
+    LongPathsEnabled=0; production code already uses extended paths. Wrapping
+    fixture filesystem calls keeps identical coverage without registry changes.
+    """
+
+    return _filesystem_path(path)
 
 
 async def initialize_artifact_mode(root: Path) -> None:
@@ -59,7 +71,7 @@ async def seed(root: Path, turn: str, *, complete: bool = True) -> None:
 
 def owned(root: Path, turn: str) -> Path:
     directory = ops._owner_directory(root, "offline", THREAD, turn)
-    directory.mkdir(parents=True, exist_ok=True)
+    x(directory).mkdir(parents=True, exist_ok=True)
     return directory
 
 
@@ -67,8 +79,8 @@ def stage(root: Path, turn: str, *, age_ns: int = OLD, fill=b"stale") -> Path:
     folder = owned(root, turn)
     filename = f".pending-{'a' * 64}.pptx-{'b' * 32}"
     path = folder / filename
-    path.write_bytes(fill)
-    os.utime(path, ns=(age_ns, age_ns))
+    x(path).write_bytes(fill)
+    os.utime(x(path), ns=(age_ns, age_ns))
     return path
 
 
@@ -86,7 +98,7 @@ def ledger(tmp_path):
 
 def test_dry_run_no_mutation_on_stale_file(ledger):
     pending = stage(ledger, "second")
-    before = pending.stat()
+    before = x(pending).stat()
     out = inspect(ledger)
     assert out["status"] == "DRY_RUN"
     assert out["operation"] == "DRY_RUN"
@@ -96,8 +108,8 @@ def test_dry_run_no_mutation_on_stale_file(ledger):
     assert out["deleted_count"] == 0
     assert out["staging"][0]["status"] == "ELIGIBLE_STALE_STAGING"
     assert out["staging"][0]["relative_path"].startswith("workspaces/sessions/v1-")
-    assert pending.read_bytes() == b"stale"
-    assert pending.stat().st_mtime_ns == before.st_mtime_ns
+    assert x(pending).read_bytes() == b"stale"
+    assert x(pending).stat().st_mtime_ns == before.st_mtime_ns
 
 
 def test_running_turn_never_marked_safe_for_cleanup(tmp_path):
@@ -107,7 +119,7 @@ def test_running_turn_never_marked_safe_for_cleanup(tmp_path):
     report = inspect(tmp_path)
     assert report["eligible_count"] == 0
     assert report["staging"][0]["status"] == "PROTECTED_RESUMABLE_TURN"
-    assert pending.exists()
+    assert x(pending).exists()
     # New repository instance preserves a running turn after restart: do NOT
     # infer the process-local job succeeded, or auto-replay the POST.
     saved = asyncio.run(
@@ -121,21 +133,21 @@ def test_running_turn_never_marked_safe_for_cleanup(tmp_path):
 def test_postlink_orphan_and_hardlinks_never_deleted(ledger):
     pending = stage(ledger, "second")
     final = pending.with_name(f"{'a' * 64}.pptx")
-    os.link(pending, final)
+    os.link(x(pending), x(final))
     report = inspect(ledger)
     assert report["eligible_count"] == 0
     assert report["staging"][0]["status"] == "PROTECTED_NONREGULAR_OR_LINKED"
-    assert final.read_bytes() == pending.read_bytes() == b"stale"
+    assert x(final).read_bytes() == x(pending).read_bytes() == b"stale"
     assert report["protected_orphan_final_count"] == 1
 
 
 def test_final_file_alone_always_protected_even_without_metadata(ledger):
     folder = owned(ledger, "second")
     orphan = folder / ("e" * 64 + ".pptx")
-    orphan.write_bytes(b"crash remnant; must never delete")
+    x(orphan).write_bytes(b"crash remnant; must never delete")
     report = inspect(ledger, apply=False)
     assert report["protected_orphan_final_count"] == 1
-    assert orphan.read_bytes().startswith(b"crash remnant")
+    assert x(orphan).read_bytes().startswith(b"crash remnant")
 
 
 def test_symlink_staging_never_deleted_and_external_bytes_safe(ledger, tmp_path):
@@ -171,7 +183,7 @@ def test_young_stage_is_protected_by_retention(ledger):
     report = inspect(ledger)
     assert report["eligible_count"] == 0
     assert report["staging"][0]["status"] == "PROTECTED_RETENTION"
-    assert pending.exists()
+    assert x(pending).exists()
 
 
 def test_exact_committed_content_audited_but_never_deleted(ledger):
@@ -184,7 +196,7 @@ def test_exact_committed_content_audited_but_never_deleted(ledger):
     assert report["missing_or_corrupt_committed"] == 0
     directory = owned(ledger, "first")
     published = directory / f"{record.sha256}.pptx"
-    assert published.read_bytes() == data
+    assert x(published).read_bytes() == data
     assert record.sha256 == hashlib.sha256(data).hexdigest()
 
 
@@ -249,13 +261,13 @@ def test_corrupt_committed_artifact_blocks_even_safe_staging_cleanup(ledger):
 def test_cleanup_does_not_probe_unowned_sandbox(ledger):
     stranger = ledger / "workspaces" / "sessions" / ("v1-" + "f" * 64)
     location = stranger / "presentations" / ("a" * 64)
-    location.mkdir(parents=True)
+    x(location).mkdir(parents=True)
     sentinel = location / f".pending-{'a' * 64}.pptx-{'b' * 32}"
-    sentinel.write_bytes(b"outside-ledger")
-    os.utime(sentinel, ns=(OLD, OLD))
+    x(sentinel).write_bytes(b"outside-ledger")
+    os.utime(x(sentinel), ns=(OLD, OLD))
     report = inspect(ledger)
     assert report["eligible_count"] == 0
-    assert sentinel.read_bytes() == b"outside-ledger"
+    assert x(sentinel).read_bytes() == b"outside-ledger"
 
 
 def test_successful_committed_artifact_never_deleted_if_staging_alias_exists(ledger):
@@ -267,11 +279,11 @@ def test_successful_committed_artifact_never_deleted_if_staging_alias_exists(led
     directory = owned(ledger, "first")
     existing = directory / f"{record.sha256}.pptx"
     pending = directory / f".pending-{record.sha256}.pptx-{'a' * 32}"
-    os.link(existing, pending)
+    os.link(x(existing), x(pending))
     result = inspect(ledger)
     assert result["missing_or_corrupt_committed"] == 1  # hardlink is refused
     assert result["status"] == "BLOCKED_COMMITTED_INTEGRITY"
-    assert pending.read_bytes() == existing.read_bytes()
+    assert x(pending).read_bytes() == x(existing).read_bytes()
 
 
 def test_artifact_ops_main_fails_closed_without_creating_db(tmp_path, capsys):

@@ -139,10 +139,14 @@ def _stage_info(
     if match is None:
         return result
     try:
-        if _is_link(path):
+        # Staging names push the path past MAX_PATH on LongPathsEnabled=0
+        # hosts; always stat through the extended-path form (idempotent),
+        # matching _read_committed/final-exists handling below.
+        safe_path = _filesystem_path(path)
+        if _is_link(safe_path):
             result["status"] = "PROTECTED_LINK"
             return result
-        info = path.stat(follow_symlinks=False)
+        info = safe_path.stat(follow_symlinks=False)
     except OSError:
         return result
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
