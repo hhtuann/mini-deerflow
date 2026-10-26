@@ -75,8 +75,6 @@ SlideLayoutKind = Literal[
 
 SLIDE_PLANNER_MAX_ATTEMPTS = 2
 SLIDE_PLAN_REPAIR_ATTEMPTS = 2
-DENSITY_TRIM_FLOORS = (40, 28, 20, 14, 8)
-DENSITY_TRIM_PASSES_PER_FLOOR = 6
 MAX_EVIDENCE_ITEMS = 10
 
 _ILLUSTRATIVE_MARKER = {"vi": "(số liệu minh họa)", "en": "(illustrative data)"}
@@ -378,7 +376,7 @@ def plan_deck(
             ("system", SLIDE_PLANNER_SYSTEM_PROMPT),
             ("human", render_llm_payload(planning_context)),
         ]
-        if repair_hint and attempt == 0:
+        if repair_hint:
             messages.append(
                 (
                     "human",
@@ -435,158 +433,6 @@ def _safe_validation_summary(error: ValidationError | OutputParserException) -> 
         )
         return summary[:2_000] or "schema mismatch"
     return "response was not valid JSON for the schema"
-
-
-def _trim_text(value: str, floor: int) -> str | None:
-    """Shorten one text item at a word boundary; None when untrimmable."""
-
-    target = max(floor, int(len(value) * 0.85))
-    if len(value) <= target:
-        return None
-    window = value[: target + 1]
-    cut = window.rfind(" ")
-    if cut < floor:
-        cut = target
-    trimmed = value[:cut].rstrip()
-    if trimmed and len(trimmed) < len(value):
-        return trimmed
-    return None
-
-
-def _trim_marked(value: str, floor: int) -> str | None:
-    """Trim text while preserving a trailing illustrative-data marker."""
-
-    marker = next(
-        (
-            suffix
-            for suffix in (
-                f" {_ILLUSTRATIVE_MARKER['vi']}",
-                f" {_ILLUSTRATIVE_MARKER['en']}",
-            )
-            if value.endswith(suffix)
-        ),
-        None,
-    )
-    body = value[: -len(marker)] if marker else value
-    trimmed = _trim_text(body, floor)
-    if trimmed is None:
-        return None
-    return f"{trimmed}{marker}" if marker else trimmed
-
-
-def _reduce_spec_density(spec: DeckSpec) -> DeckSpec | None:
-    """Deterministically shorten overlong slide text until the deck fits.
-
-    Render overflow with model-authored plans is common: schema bounds are
-    wider than the density preflight. Trimming shortens existing words only -
-    it never invents content or citations - and stops as soon as the deck
-    renders within its layout budget.
-    """
-
-    current = spec
-    for floor in DENSITY_TRIM_FLOORS:
-        for _ in range(DENSITY_TRIM_PASSES_PER_FLOOR):
-            trimmed_slides = []
-            changed = False
-            for slide in current.slides:
-                content = slide.content
-                title = slide.title
-                trimmed_title = _trim_text(title, max(12, floor // 2))
-                if trimmed_title is not None:
-                    changed = True
-                replacements: dict[str, object] = {}
-                for field in ("subtitle", "insight"):
-                    value = getattr(content, field, None)
-                    if isinstance(value, str):
-                        trimmed = (
-                            _trim_marked(value, floor)
-                            if field == "insight"
-                            else _trim_text(value, floor)
-                        )
-                        if trimmed is not None:
-                            replacements[field] = trimmed
-                            changed = True
-                items = getattr(content, "items", None)
-                if isinstance(items, tuple) and items:
-                    trimmed_items = tuple(
-                        _trim_text(value, floor) or value
-                        for value in items
-                        if isinstance(value, str)
-                    )
-                    if items != trimmed_items:
-                        replacements["items"] = trimmed_items
-                        changed = True
-                label = getattr(content, "label", None)
-                if isinstance(label, str):
-                    trimmed = _trim_text(label, max(12, floor // 2))
-                    if trimmed is not None:
-                        replacements["label"] = trimmed
-                        changed = True
-                for column in ("left", "right"):
-                    member = getattr(content, column, None)
-                    if member is None:
-                        continue
-                    column_updates: dict[str, object] = {}
-                    heading = getattr(member, "heading", None)
-                    if isinstance(heading, str):
-                        trimmed = _trim_text(heading, max(10, floor // 3))
-                        if trimmed is not None:
-                            column_updates["heading"] = trimmed
-                            changed = True
-                    column_items = getattr(member, "items", None)
-                    if isinstance(column_items, tuple) and column_items:
-                        trimmed_items = tuple(
-                            _trim_text(value, floor) or value
-                            for value in column_items
-                            if isinstance(value, str)
-                        )
-                        if column_items != trimmed_items:
-                            column_updates["items"] = trimmed_items
-                            changed = True
-                    if column_updates:
-                        replacements[column] = member.model_copy(update=column_updates)
-                table = getattr(content, "rows", None)
-                if isinstance(table, tuple) and table:
-                    trimmed_rows = []
-                    table_changed = False
-                    for row in table:
-                        trimmed_row = tuple(
-                            _trim_text(str(cell), max(8, floor // 2)) or cell
-                            if isinstance(cell, str)
-                            else cell
-                            for cell in row
-                        )
-                        if row != trimmed_row:
-                            table_changed = True
-                        trimmed_rows.append(trimmed_row)
-                    if table_changed:
-                        replacements["rows"] = tuple(trimmed_rows)
-                        changed = True
-                caption = getattr(content, "caption", None)
-                if isinstance(caption, str):
-                    trimmed = _trim_marked(caption, floor)
-                    if trimmed is not None:
-                        replacements["caption"] = trimmed
-                        changed = True
-                if replacements:
-                    content = content.model_copy(update=replacements)
-                trimmed_slides.append(
-                    slide.model_copy(
-                        update={
-                            "content": content,
-                            "title": trimmed_title or title,
-                        }
-                    )
-                )
-            if not changed:
-                break
-            current = spec.model_copy(update={"slides": tuple(trimmed_slides)})
-            try:
-                render_deck(current)
-                return current
-            except LayoutOverflowError:
-                continue
-    return None
 
 
 def _require_no_urls(plan: DeckPlan) -> None:
@@ -902,23 +748,27 @@ class SlideAgentService:
                     validate_pptx(data, spec, min_layouts=4)
                     return spec, data, metadata
                 except LayoutOverflowError:
-                    # Schema-legal but too dense: deterministically shorten
-                    # existing text (no new model call, no invented content)
-                    # before considering a hint-guided re-plan.
-                    reduced = _reduce_spec_density(spec)
-                    if reduced is not None:
-                        data = render_deck(reduced)
-                        validate_pptx(data, reduced, min_layouts=4)
-                        return reduced, data, metadata
+                    # Never prefix-clip claims or table cells: qualifiers,
+                    # negation, numeric units and attribution may be at the
+                    # end. Re-plan from the same evidence, then fail closed
+                    # if the bounded repair still cannot fit.
                     repair_hint = (
-                        "content density exceeds layout; shorten every "
-                        "title and text item well below their character "
-                        "limits"
+                        "content density exceeds layout; re-plan using fewer "
+                        "complete claims per slide or a less dense layout. "
+                        "Preserve numeric values and units, negations, source "
+                        "attribution, uncertainty and critical qualifiers. "
+                        "Do not clip prefixes or turn incomplete evidence "
+                        "into an unqualified assertion. If it cannot fit "
+                        "faithfully, report that limitation explicitly"
                     )
-                except SlideAgentValidationError as error:
-                    # Deterministic constraint violation: one bounded,
-                    # hint-guided re-plan (safe constant messages only).
-                    repair_hint = str(error)
+                except SlideAgentValidationError:
+                    # Fixed guidance, not reflected exception text.
+                    repair_hint = (
+                        "planned content violates the requested slide count, language, "
+                        "layout payload or evidence-key constraints; correct "
+                        "those constraints without inventing evidence or "
+                        "removing uncertainty, negations, units or attribution"
+                    )
             raise SlideAgentValidationError(
                 "planned deck violated structural constraints "
                 f"after {SLIDE_PLAN_REPAIR_ATTEMPTS} attempts"

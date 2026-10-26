@@ -138,6 +138,28 @@ def test_timeout_configuration_fails_before_provider_use(monkeypatch, capsys):
     assert "timeout must be" in capsys.readouterr().out
 
 
+def test_default_timeout_matches_documented_1200_seconds_without_running_live(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv(live_e2e.CONSENT_ENV, "YES")
+    monkeypatch.setenv(live_e2e.KEY_ENV, "candidate-configured-key")
+    calls = []
+
+    def worker_stub(command, **kwargs):
+        calls.append((command, kwargs))
+        # No result file: main must report failure, not a fabricated live pass.
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(live_e2e.subprocess, "run", worker_stub)
+    assert live_e2e.main(["--allow-paid-live", "--case", "vi"]) == 1
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert command[command.index("--timeout-seconds") + 1] == "1200"
+    assert options["timeout"] == 1215
+
+
 def test_worker_command_is_complete_and_killable(tmp_path: Path):
     path = tmp_path / "child-report.json"
     command = live_e2e.worker_command("vi", 480, path)
@@ -163,6 +185,28 @@ def test_live_failure_classification_keeps_exception_text_private():
     outer.__cause__ = inner
     assert live_e2e.classify_failure(outer) == "provider_rate_limit"
     assert live_e2e.classify_failure(RuntimeError("API key: private")) == "unclassified"
+
+
+def test_presentation_report_rejects_arbitrary_error_text(tmp_path):
+    secret = "secret-canary https://private.example/token C:\\private\\key"
+    # Short input is deliberately below the previous length-only threshold.
+    assert len(secret) < 240
+    for message in (secret, "bad plan", secret * 20, None, {"detail": secret}):
+        assert live_e2e.safe_presentation_error({"error_message": message}) is None
+    fixed = "Presentation planning failed validation."
+    assert live_e2e.safe_presentation_error({"error_message": fixed}) == fixed
+    result = live_e2e.safe_result(
+        "vi",
+        outcome="failed",
+        stage="presentation",
+        reason_code="presentation_job_failed",
+    )
+    result["presentation_safe_error"] = live_e2e.safe_presentation_error(
+        {"error_message": secret}
+    )
+    path = tmp_path / "safe-report.json"
+    assert live_e2e._save(path, result) == 1
+    assert secret not in path.read_text(encoding="utf-8")
 
 
 def test_failed_trace_diagnostics_allowlist_only():

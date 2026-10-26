@@ -217,6 +217,21 @@ def safe_failed_trace(job: dict) -> dict[str, str | None]:
     return fallback if fallback is not None else fields
 
 
+def safe_presentation_error(job: dict) -> str | None:
+    """Only fixed public messages may cross into the report, never job text."""
+
+    messages = {
+        "Presentation planning failed validation.": "Presentation planning failed validation.",
+        "Presentation generation failed.": "Presentation generation failed.",
+        "A different presentation already belongs to this turn.": (
+            "A different presentation already belongs to this turn."
+        ),
+        "Operation timed out.": "Operation timed out.",
+    }
+    message = job.get("error_message")
+    return messages.get(message) if isinstance(message, str) else None
+
+
 def poll_deadline(started: float, timeout_seconds: int) -> float:
     """Polling deadline that leaves teardown headroom inside the hard kill."""
 
@@ -412,11 +427,8 @@ def _child(case: str, result_path: Path, deadline_seconds: int) -> int:
                 if deck_job["status"] != "completed":
                     result["reason_code"] = "presentation_job_failed"
                     result["research_failure_family"] = slide_agent.failure_family
-                    message = deck_job.get("error_message")
-                    result["presentation_safe_error"] = (
-                        message
-                        if isinstance(message, str) and len(message) <= 240
-                        else None
+                    result["presentation_safe_error"] = safe_presentation_error(
+                        deck_job
                     )
                     return _save(result_path, result)
                 result["presentation_seconds"] = round(
@@ -478,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-paid-live", action="store_true")
     parser.add_argument("--case", choices=(*CASES, "both"), default="both")
-    parser.add_argument("--timeout-seconds", type=int, default=480)
+    parser.add_argument("--timeout-seconds", type=int, default=1200)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(

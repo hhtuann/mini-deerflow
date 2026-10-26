@@ -6,7 +6,7 @@ Issue [#18](https://github.com/hhtuann/mini-deerflow/issues/18) · Roadmap [#16]
 
 This task adds a **manual-only, double-opt-in** executable which exercises the actual live provider, production `LiveDemoBackend`, FastAPI, `SlideAgentService`, editable PPTX renderer and validator, and `PptxArtifactStore` — **without any scripted planner or mocked provider response**.
 
-**Important:** The implementation has NOT made a real provider call. Live quality and factual correctness are **UNVERIFIED** until the owner authorizes using local credentials and provider charges and executes both language cases. GitHub CI remains credential-free.
+**Status:** Earlier VI/EN live successes were implementer-reported for the prior implementation; they were **not independently replayed or audited** by the Coordinator. The safety correction below removes global clipping and changes density handling, so those results do not establish live acceptance of the corrected HEAD. No new paid calls were made for this correction. Live quality, claim/source accuracy and Office visual acceptance remain **UNVERIFIED**. GitHub CI remains credential-free.
 
 ## How to execute locally
 
@@ -16,14 +16,14 @@ This task adds a **manual-only, double-opt-in** executable which exercises the a
 
 ```sh
 export MINI_DEERFLOW_LIVE_E2E_CONSENT=YES
-uv run python scripts/live_e2e.py --allow-paid-live --case both --timeout-seconds 480 --output .mini-deerflow/live-e2e/report.json
+uv run --env-file .env python scripts/live_e2e.py --allow-paid-live --case both --timeout-seconds 1200 --output .mini-deerflow/live-e2e/report.json
 ```
 
-For PowerShell, set `$env:MINI_DEERFLOW_LIVE_E2E_CONSENT = 'YES'` after loading `$env:MINI_DEERFLOW_API_KEY` from a trusted local credential manager. Then run the same `uv run python...` command. A single `--case vi` or `--case en` is diagnostic only; full acceptance requires **both**.
+For PowerShell, set `$env:MINI_DEERFLOW_LIVE_E2E_CONSENT = 'YES'`. The same command securely loads the local `.env` into the child environment; alternatively load `$env:MINI_DEERFLOW_API_KEY` from a trusted local credential manager and omit `--env-file`. Default timeout is **1,200 seconds per case**, accepted bounds are **30–1,800 seconds**. A single `--case vi` or `--case en` is diagnostic only; full acceptance requires **both**.
 
 The report contains safe, allowlisted metrics only. Keep it local and uncommitted. By default `python scripts/live_e2e.py` exits with BLOCKED **before importing any provider-capable module**. The opt-in requires all three: flag, exact YES consent and a non-fixture key. The dummy CI key is rejected.
 
-**Real monetary cost warning:** This does call paid/network providers when enabled. Runtime bounds (8 research tool calls, 2 per step, 1 replan, recursion 60, 30-second model timeout, 10-second Wikipedia timeout, zero retries, and 30–900 second per-case wall limit) **are not** a hard limit on model requests/tokens, total dollars or remote billing. The controller can terminate the child process but cannot guarantee cancellation of already-sent provider requests. Obtain explicit account-level budget approval first.
+**Real monetary cost warning:** This does call paid/network providers when enabled. Runtime bounds (8 research tool calls, 2 per step, 1 research replan, recursion 60, 120-second research model request timeout, 240-second slide-planner request timeout, 10-second Wikipedia timeout, zero SDK retries, and 30–1,800 second per-case wall limit) **are not** a hard limit on model requests/tokens, total dollars or remote billing. Slide planning has at most two parse attempts per plan and two plan attempts; density failure may use the second plan attempt. The controller can terminate the child process but cannot guarantee cancellation of already-sent provider requests. Obtain explicit account-level budget approval first.
 
 ## Production pipeline and isolation
 
@@ -107,15 +107,17 @@ Recommended invocation for this provider (1200 s per case):
 uv run --env-file .env python scripts/live_e2e.py --allow-paid-live --case both --timeout-seconds 1200 --output .mini-deerflow/live-e2e/report.json
 ```
 
-### Root cause chain (all evidence-based)
+### Historical diagnosis and prior implementation
 
 1. Original both-case failure: research job failed with family `provider_timeout` — the harness child forced `request_timeout=30.0`; a trivial provider call answers in ~3s but the planner's first structured call exceeds 30s on glm-5.3 (reasoning + strict JSON). Fixed: `WORKER_REQUEST_TIMEOUT_SECONDS = 120.0`.
 2. Vanishing-worker bug: after the timeout fix, a deadline breach produced NO child result (parent reported hard_timeout/stage worker) because TestClient/ApiJobs teardown waits for an in-flight bounded request. Fixed: `poll_deadline()` with `WORKER_POLL_GRACE_SECONDS` (250) so polling stops early enough to write the result before the hard kill; wall-clock ceiling raised to 1800s (measured research alone ~682s at 900s ceiling).
 3. Deterministic fallback crash (production bug): `build_user_facing_answer` raised pydantic ValidationError when a multi-citation finding summary (legal up to 4,000 chars) exceeded `AnswerClaim.text` max 1,000 — turning recoverable synthesis failures into total turn failures at the synthesize node (live evidence: last_failed_node=synthesize, family structured_validation). Fixed: `_bound_public_text()` truncates at sentence/word boundaries; limitations and sources capped too. Regression: tests/test_evidence.py.
-4. Live presentation failures: slide planner output is schema-legal but exceeds the renderer density preflight (live plans commonly dense; captured plan verified: title/table/comparison/metric/steps/conclusion slides overflowed). Fixed in SlideAgentService: (a) bounded hint-guided parse retry (sanitized validation facts only), (b) one bounded hint-guided re-plan for deterministic conversion violations, (c) deterministic density reduction `_reduce_spec_density` (progressive word-boundary trimming of titles/subtitles/items/labels/comparison columns/table cells/captions; illustrative markers preserved; no invention; renderer/validator density contract unchanged) BEFORE any re-plan. Slide planner request timeout raised to 240s (`WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS`) — DeckPlan is the heaviest schema.
-5. Diagnostics: provider SDK exception types now classified in tracing (`model_provider_failure`), harness classifies research AND presentation failures by exception type only (never messages), node attribution prefers node-bearing failed traces, `map_demo_error` surfaces safe constant SlideAgentValidationError messages ("Presentation planning failed: <safe constant>"), teardown error after a recorded pass no longer relabels the case.
+4. Live presentation failures: schema-valid plans exceeded the renderer density preflight. The previous implementation added global prefix clipping; the Coordinator rejected it because shortening can remove qualifiers or negations and alter evidence meaning. **That clipping implementation is now removed entirely.** Slide-planner request timeout remains 240s (`WORKER_SLIDE_PLANNER_TIMEOUT_SECONDS`).
+5. Provider SDK exception types are classified in tracing (`model_provider_failure`); node attribution prefers node-bearing failed traces. The previous message pass-through was not a safe-constant boundary; the correction below replaces it with fixed prose and report-side allowlisting.
 
-### Live verification (real provider, glm-5.3 via api.z.ai, 2026-10-24 UTC)
+### Historical live evidence (implementer-reported, not independently audited)
+
+The following results were reported for the previous clipping-based implementation (glm-5.3 via api.z.ai, 2026-10-24 UTC). Local reports/PPTX files were not available to the GitHub reviewer. They are historical evidence only, **not live verification of this corrective HEAD**.
 
 - **vi: PASS** — research 502.89s (7 tool calls, 11 evidence, 7 accepted citations, membership valid), presentation 61.16s, 8 slides / 7 distinct layouts, PPTX 46,452 bytes sha256 `bef2555925d277e034fdab645977a537b0a7f580b611d19ee0bf29819fdc2399`, structure valid. Report: `.mini-deerflow/live-e2e/final6-vi.json`
 - **en: PASS** — research 735.66s (7 tool calls, 14 evidence, 4 accepted citations, membership valid), presentation 60.16s, 8 slides / 7 layouts, PPTX 39,511 bytes sha256 `f8d60c5d0fa8c8a80207c1a7a700d633a48c65027959e399513ab38ddee839dc`, structure valid. Report: `.mini-deerflow/live-e2e/final-en.json`
@@ -123,16 +125,24 @@ uv run --env-file .env python scripts/live_e2e.py --allow-paid-live --case both 
 - Manual fact-check and Office visual acceptance remain **UNVERIFIED** (report fields).
 - Earlier failed-run evidence retained under `.mini-deerflow/live-e2e/` (diag-vi.json, fix*.json, final*.json, diag2/diag3) — do not delete.
 
-### Offline verification (executed after final changes)
+### Historical offline verification (c84e2a6)
 
 - pytest: 1283 passed, 11 skipped (9 Windows symlink-privilege, 1 Python 3.13+ native API, 1 POSIX-only), 223 subtests
 - ruff check/format: PASS (143 files); `uv lock --check --offline`: PASS (99 packages)
 - evaluator: 9/9 cases, 36/36 invariants
-- New regressions: harness 16 tests (classification by type only, poll deadline margins, timeout ceiling 1800, slide-planner bound); evidence fallback bounds; slide-agent 104 tests (hint retry, conversion re-plan, density trim, bounded caps)
+- Prior regressions: harness 16 tests; evidence fallback bounds; slide-agent 104 tests. New corrective verification is recorded below.
+
+## Coordinator safety correction (review #6394298547)
+
+- **Error trust boundary:** `SlideAgentValidationError` maps by type to fixed prose: `Presentation planning failed validation.` Neither its text nor its cause is inspected or reflected in `JobDTO.error_message`. The live report separately allows only a small exact set of public constant messages; all arbitrary job text, even short strings, is omitted.
+- **Evidence-safe density handling:** the service never shortens accepted slide text to make it fit. It sends the same bounded evidence projection back through one permitted re-plan with explicit instructions to preserve numbers, units, negations, uncertainty, source attribution and critical qualifiers, using fewer complete claims or a less dense layout. This guidance survives a parse retry too. Every candidate must pass the unchanged schema, renderer, independent validator and artifact checks. If it still cannot fit, generation fails closed without publication or overwriting an earlier artifact.
+- **No automatic semantic guarantee:** re-planning is model-authored, not a proof of unchanged meaning. Structural validation/citation membership cannot establish semantic equivalence. Claim/source and content QA remain required. This correction performs no automatic clipping; it never publishes a prefix-truncated claim or table cell as a substitute for an overflowing candidate.
+- **Negative regressions:** secret/URL-bearing validation exceptions and even an exception whose `__str__` raises must produce fixed public prose; arbitrary report error text is rejected. Long claims ending with uncertainty/negation and long table cells must remain unchanged and fail closed when both plans overflow. Fitting qualified claims/cells are published verbatim; a valid re-plan is independently rendered and verified.
+- **Corrective local verification:** `uv sync --locked`, Ruff lint/format (143 files), and lock validation (99 packages) passed. Full `pytest`: **1,290 passed, 11 skipped, 223 subtests passed**; focused slide-agent/harness suites: **127 passed**. Evaluator: **9/9 cases, 36/36 invariants**. Frontend typecheck/lint/build passed, Vitest **38 passed**, real-backend Chromium Playwright **4 passed** (including 375×812 mobile). Skip reasons: nine unavailable Windows symlink-privilege cases, one native API requiring Python 3.13+, and one POSIX-only case. Independent corrective review: **APPROVE**; restoring the old clipping logic in memory made all three density regressions fail, confirming they detect the removed behavior. Exact-HEAD GitHub Actions results are linked in the PR follow-up comment. No new live-provider acceptance is claimed.
 
 ## Current limitations
 
-- Real model/provider success and human review: **BLOCKED pending owner-run opt-in**.
+- Corrected-HEAD live-provider acceptance: **not rerun**; earlier live results are implementer-reported historical evidence. Human claim/source and Office visual review remain **UNVERIFIED**.
 - No hard monetary ceiling, token or model-request tally.
 - HTTP integration via actual FastAPI `TestClient`, not browser/production deployment. Offline Playwright already covers browser interactions separately.
 - Single-user local runtime only; cannot claim deployment readiness or Office visual acceptance.
