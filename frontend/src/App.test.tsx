@@ -267,6 +267,7 @@ describe('research workspace', () => {
     expect(screen.getByRole('link', { name: 'Download Markdown' })).toHaveAttribute('href', '/api/offline/conversations/chat-one/turns/turn-one/artifact');
   });
   it('exposes a keyboard-adjustable desktop Inspector separator without losing chat', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
     window.history.replaceState(null, '', '/?mode=offline&thread=chat-one');
     const user = userEvent.setup(); mount();
     await user.click(await screen.findByRole('button', { name: 'Inspect turn 1' }));
