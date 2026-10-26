@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { ReactFlow, Background, Controls, MarkerType, Position } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
 import '@xyflow/react/dist/style.css';
-import type { GraphNode, GraphProjection, GraphStatus } from '../types';
+import type { GraphNode, GraphProjection, GraphStatus, TraceEvent } from '../types';
 import { Empty, Fields, Status } from './UI';
 
 const statuses: GraphStatus[] = ['pending', 'running', 'completed', 'failed', 'cancelled', 'skipped'];
@@ -12,9 +12,16 @@ const kinds: { kind: GraphNode['kind']; label: string }[] = [
   { kind: 'tool', label: 'Tool' }, { kind: 'fan_in', label: 'Fan-in' },
 ];
 
-export default function ExecutionGraph({ graph }: { graph: GraphProjection }) {
+export default function ExecutionGraph({ graph, traces = [], goal, isWorkflow = false }: { graph: GraphProjection; traces?: TraceEvent[]; goal?: string; isWorkflow?: boolean }) {
   const [selected, setSelected] = useState('');
   const node = graph.nodes.find((item) => item.id === selected) ?? graph.nodes[0];
+  // Exact run+node correlation: never attach an unrelated resume/child trace.
+  // Tool/branch payloads remain backend-redacted and are not reconstructed.
+  const events = !isWorkflow && node?.kind === 'workflow_node'
+    ? traces.filter((event) => event.node != null && node.id === `workflow:${event.run_id}:${event.node}`)
+    : [];
+  const context = [...events].reverse().find((event) => event.context_estimated_tokens != null || event.context_payload_chars != null);
+  const latest = events.at(-1);
   const { nodes, edges } = useMemo(() => {
     const layout = new dagre.graphlib.Graph().setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 65 }).setDefaultEdgeLabel(() => ({}));
     graph.nodes.forEach((item) => layout.setNode(item.id, { width: 180, height: 75 }));
@@ -51,9 +58,31 @@ export default function ExecutionGraph({ graph }: { graph: GraphProjection }) {
       </div>
       <p className="caption">Pan and zoom the canvas, or select a node below using your keyboard.</p>
       <label>Inspect node<select value={node?.id ?? ''} onChange={(event) => setSelected(event.target.value)}>{graph.nodes.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.status}</option>)}</select></label>
-      {node && <section className="detail-card" aria-label="Node details"><h3>{node.label}</h3><Status value={node.status} />{node.safe_summary && <p>{node.safe_summary}</p>}
-        <Fields values={{ Kind: node.kind, Parent: node.parent_id, Started: node.started_at, Completed: node.completed_at, 'Duration (ms)': node.duration_ms }} />
-        {node.details.map((field, index) => <Fields key={index} values={{ [field.label]: field.value }} />)}
+      {node && <section className="detail-card node-inspection" aria-label="Node details">
+        <h3>{node.label}</h3><Status value={node.status} />
+        {isWorkflow ? <p className="caption">Workflow topology only. No real input, prompt, output or usage exists for a possible node. Switch to Current run.</p> : <>
+          <h4>Input &amp; context</h4>
+          {node.kind === 'workflow_node' && node.label === 'Planner' && goal
+            ? <p className="run-goal"><strong>User goal (not LLM prompt):</strong> {goal}</p>
+            : <p className="caption">Full node inputs are not captured by the safe execution trace.</p>}
+          {context && <Fields values={{ 'Projected context chars': context.context_payload_chars,
+            'Context budget chars': context.context_budget_chars, 'Retained context items': context.context_retained_items,
+            'Truncated context items': context.context_truncated_items, 'Omitted context items': context.context_omitted_items,
+            'Skill': context.active_skill_id }} />}
+          <h4>Prompt</h4>
+          <p className="caption">Exact system/developer/model prompt: not captured. Raw prompts, secrets and private model reasoning are not exposed by this API.</p>
+          <h4>Execution &amp; outcome</h4>
+          <Fields values={{ Kind: node.kind, Parent: node.parent_id, Started: node.started_at,
+            Completed: node.completed_at, 'Duration (ms)': node.duration_ms,
+            'Last trace outcome': latest?.outcome, 'Error category': latest?.error_category, 'Error code': latest?.error_code }} />
+          <p>{node.safe_summary ?? 'Raw model/tool response not recorded. See the safe structured fields below for observable results.'}</p>
+          {node.details.map((field, index) => <Fields key={index} values={{ [field.label]: field.value }} />)}
+          <h4>Token usage &amp; cost</h4>
+          <Fields values={{ 'Actual prompt tokens': 'Not reported', 'Actual completion tokens': 'Not reported',
+            'Actual total tokens': 'Not reported', 'Provider cost': 'Not reported' }} />
+          {context?.context_estimated_tokens != null && <Fields values={{ 'Context estimate (chars / 4; NOT billed tokens)': context.context_estimated_tokens }} />}
+          <p className="caption">Only provider-reported usage could count as real tokens or cost. No estimates are presented as measurements.</p>
+        </>}
         <details><summary>Technical IDs</summary><Fields values={{ 'Node ID': node.id }} />{node.technical_details.map((field, index) => <Fields key={index} values={{ [field.label]: field.value }} />)}</details>
       </section>}
     </> : <Empty>No structured execution events are available yet.</Empty>}
