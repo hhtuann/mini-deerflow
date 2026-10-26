@@ -105,9 +105,11 @@ ENGLISH_CONTENT = (
             "Inspect and save an edited PPTX before approval",
         ],
         "sources": [
-            "Source: internal, illustrative Mini DeerFlow fixture — "
-            "sample evidence label for visual wrapping and legibility; "
-            "this is not a real research citation.",
+            (
+                "Source: internal, illustrative Mini DeerFlow fixture — "
+                "sample evidence label for visual wrapping and legibility; "
+                "this is not a real research citation."
+            ),
         ],
     }),
 )
@@ -135,9 +137,11 @@ def make_spec(language: str, theme: str) -> DeckSpec:
             "Tháng một", "Tháng hai", "Tháng ba"
         ]
         spec["slides"][7]["content"]["sources"] = [
-            "Nguồn: bộ dữ liệu minh họa Mini DeerFlow; nhãn nguồn dài "
-            "để kiểm tra xuống dòng, dấu tiếng Việt và khả năng đọc. "
-            "Không phải trích dẫn nghiên cứu thực tế."
+            (
+                "Nguồn: bộ dữ liệu minh họa Mini DeerFlow; nhãn nguồn dài "
+                "để kiểm tra xuống dòng, dấu tiếng Việt và khả năng đọc. "
+                "Không phải trích dẫn nghiên cứu thực tế."
+            )
         ]
     resolved = DeckSpec.model_validate(spec)
     if tuple(s.content.kind for s in resolved.slides) != LAYOUTS:
