@@ -64,7 +64,8 @@ def test_generation_only_is_explicitly_blocked_not_accepted(tmp_path: Path):
 def test_viewer_unavailable_is_blocked_and_never_faked(tmp_path, monkeypatch):
     monkeypatch.setattr(visual.shutil, "which", lambda command: None)
     monkeypatch.setattr(
-        visual.subprocess, "run",
+        visual.subprocess,
+        "run",
         lambda *args, **kwargs: pytest.fail("no viewer executable may be invoked"),
     )
     report = visual.run(tmp_path, render=True)
@@ -77,14 +78,22 @@ def test_viewer_unavailable_is_blocked_and_never_faked(tmp_path, monkeypatch):
 
 def test_png_evidence_rejects_bad_or_tiny_images(tmp_path: Path):
     path = tmp_path / "slide.png"
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 8
-                     + (1400).to_bytes(4, "big") + (788).to_bytes(4, "big"))
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + b"\0" * 8
+        + (1400).to_bytes(4, "big")
+        + (788).to_bytes(4, "big")
+    )
     assert visual.png_dimensions(path) == (1400, 788)
     path.write_bytes(b"not an actual png")
     with pytest.raises(ValueError, match="not a PNG"):
         visual.png_dimensions(path)
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 8
-                     + (100).to_bytes(4, "big") + (80).to_bytes(4, "big"))
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + b"\0" * 8
+        + (100).to_bytes(4, "big")
+        + (80).to_bytes(4, "big")
+    )
     with pytest.raises(ValueError, match="too small"):
         visual.png_dimensions(path)
 
@@ -103,7 +112,9 @@ def test_native_edit_roundtrip_preserves_text_and_chart_object():
     spec = visual.make_spec("en", "light")
     source = render_deck(spec)
     presentation = Presentation(BytesIO(source))
-    table = next(shape.table for shape in presentation.slides[6].shapes if shape.has_table)
+    table = next(
+        shape.table for shape in presentation.slides[6].shapes if shape.has_table
+    )
     table.cell(1, 0).text = "Edited and saved"
     output = BytesIO()
     presentation.save(output)

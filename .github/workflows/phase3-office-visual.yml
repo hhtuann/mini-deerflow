@@ -41,8 +41,6 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked Python dependencies
         run: uv sync --locked --dev
-      - name: Temporary exact Ruff formatter patch
-        run: uv run --no-sync ruff format --diff scripts/visual_acceptance.py tests/test_visual_acceptance.py || true
       - name: Install actual LibreOffice and preview tooling
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-impress poppler-utils fonts-liberation fonts-noto-core
       - name: Render actual DeckSpecs using LibreOffice

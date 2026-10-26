@@ -23,8 +23,14 @@ from mini_deerflow.pptx import DeckSpec, render_deck, validate_pptx
 LANGUAGES = ("vi", "en")
 THEMES = ("light", "dark", "academic")
 LAYOUTS = (
-    "title", "bullets", "comparison", "metric",
-    "steps", "chart", "table", "conclusion",
+    "title",
+    "bullets",
+    "comparison",
+    "metric",
+    "steps",
+    "chart",
+    "table",
+    "conclusion",
 )
 CHECKLIST = (
     "clipping",
@@ -40,78 +46,108 @@ CHECKLIST = (
     "powerpoint_viewer",
 )
 ENGLISH_CONTENT = (
-    ("Fixture research overview", {
-        "kind": "title",
-        "subtitle": "Mini DeerFlow — offline, editable PowerPoint objects",
-    }),
-    ("Scope and verification goals", {
-        "kind": "bullets",
-        "items": [
-            "All text, shapes, native charts and table cells remain editable",
-            "Screenshots test rendering, not factual accuracy or editing",
-            "This is illustrative fixture data, not real measurements",
-        ],
-    }),
-    ("Compare visual delivery", {
-        "kind": "comparison",
-        "left": {
-            "heading": "Static screenshot",
-            "items": ["Elements cannot be edited individually", "Source values remain opaque"],
+    (
+        "Fixture research overview",
+        {
+            "kind": "title",
+            "subtitle": "Mini DeerFlow — offline, editable PowerPoint objects",
         },
-        "right": {
-            "heading": "Native objects",
-            "items": ["Edit text directly in PowerPoint", "Charts retain embedded workbook data"],
+    ),
+    (
+        "Scope and verification goals",
+        {
+            "kind": "bullets",
+            "items": [
+                "All text, shapes, native charts and table cells remain editable",
+                "Screenshots test rendering, not factual accuracy or editing",
+                "This is illustrative fixture data, not real measurements",
+            ],
         },
-    }),
-    ("Illustrative slide count", {
-        "kind": "metric",
-        "value": "8",
-        "label": "Editable content slides",
-        "insight": "Fixture total only, not a runtime benchmark.",
-    }),
-    ("Rendering acceptance process", {
-        "kind": "steps",
-        "items": [
-            "Validate the DeckSpec contract",
-            "Render native editable objects",
-            "Open with a real office renderer",
-            "Review fonts, overlap and edits",
-        ],
-    }),
-    ("Chart — illustrative series", {
-        "kind": "chart",
-        "chart_type": "column",
-        "categories": ["January", "February", "March"],
-        "series": [
-            {"name": "Example A", "values": [12, 18, 24]},
-            {"name": "Example B", "values": [10, 16, 21]},
-        ],
-        "caption": "Source: fixture values, units: examples; not observed research.",
-    }),
-    ("Native table readability", {
-        "kind": "table",
-        "headers": ["Object", "Count", "Editable"],
-        "rows": [
-            ["Native chart", 1, "Workbook"],
-            ["Native table", 1, "Each cell"],
-            ["Sample slides", 8, "Yes"],
-        ],
-        "caption": "Source: offline fixture contract, not measured results.",
-    }),
-    ("Conclusions and sources", {
-        "kind": "conclusion",
-        "items": [
-            "Verify visuals in a real viewer, not just OOXML",
-            "Inspect and save an edited PPTX before approval",
-        ],
-        "sources": [
-            (
-                "Source: internal, illustrative Mini DeerFlow fixture — "
-                "sample evidence label for visual wrapping and legibility; "
-                "this is not a real research citation."
-            ),
-        ],
-    }),
+    ),
+    (
+        "Compare visual delivery",
+        {
+            "kind": "comparison",
+            "left": {
+                "heading": "Static screenshot",
+                "items": [
+                    "Elements cannot be edited individually",
+                    "Source values remain opaque",
+                ],
+            },
+            "right": {
+                "heading": "Native objects",
+                "items": [
+                    "Edit text directly in PowerPoint",
+                    "Charts retain embedded workbook data",
+                ],
+            },
+        },
+    ),
+    (
+        "Illustrative slide count",
+        {
+            "kind": "metric",
+            "value": "8",
+            "label": "Editable content slides",
+            "insight": "Fixture total only, not a runtime benchmark.",
+        },
+    ),
+    (
+        "Rendering acceptance process",
+        {
+            "kind": "steps",
+            "items": [
+                "Validate the DeckSpec contract",
+                "Render native editable objects",
+                "Open with a real office renderer",
+                "Review fonts, overlap and edits",
+            ],
+        },
+    ),
+    (
+        "Chart — illustrative series",
+        {
+            "kind": "chart",
+            "chart_type": "column",
+            "categories": ["January", "February", "March"],
+            "series": [
+                {"name": "Example A", "values": [12, 18, 24]},
+                {"name": "Example B", "values": [10, 16, 21]},
+            ],
+            "caption": "Source: fixture values, units: examples; not observed research.",
+        },
+    ),
+    (
+        "Native table readability",
+        {
+            "kind": "table",
+            "headers": ["Object", "Count", "Editable"],
+            "rows": [
+                ["Native chart", 1, "Workbook"],
+                ["Native table", 1, "Each cell"],
+                ["Sample slides", 8, "Yes"],
+            ],
+            "caption": "Source: offline fixture contract, not measured results.",
+        },
+    ),
+    (
+        "Conclusions and sources",
+        {
+            "kind": "conclusion",
+            "items": [
+                "Verify visuals in a real viewer, not just OOXML",
+                "Inspect and save an edited PPTX before approval",
+            ],
+            "sources": [
+                (
+                    "Source: internal, illustrative Mini DeerFlow fixture — "
+                    "sample evidence label for visual wrapping and legibility; "
+                    "this is not a real research citation."
+                ),
+            ],
+        },
+    ),
 )
 
 
@@ -134,7 +170,9 @@ def make_spec(language: str, theme: str) -> DeckSpec:
             "Kiểm tra đầy đủ dấu: ă â ê ô ơ ư đ — Ă Â Ê Ô Ơ Ư Đ"
         )
         spec["slides"][5]["content"]["categories"] = [
-            "Tháng một", "Tháng hai", "Tháng ba"
+            "Tháng một",
+            "Tháng hai",
+            "Tháng ba",
         ]
         spec["slides"][7]["content"]["sources"] = [
             (
@@ -153,9 +191,7 @@ def make_spec(language: str, theme: str) -> DeckSpec:
 
 def matrix() -> tuple[tuple[str, str, DeckSpec], ...]:
     return tuple(
-        (lang, theme, make_spec(lang, theme))
-        for lang in LANGUAGES
-        for theme in THEMES
+        (lang, theme, make_spec(lang, theme)) for lang in LANGUAGES for theme in THEMES
     )
 
 
@@ -172,8 +208,13 @@ def png_dimensions(path: Path) -> tuple[int, int]:
 
 def _command(args: list[str], *, timeout: int = 150) -> str:
     completed = subprocess.run(
-        args, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", check=False, timeout=timeout,
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=timeout,
     )
     if completed.returncode != 0:
         # External programs may echo local paths or secret-bearing environment.
@@ -206,7 +247,8 @@ def _write_manifest(destination: Path, report: dict[str, object]) -> None:
 
 
 def run(
-    destination: Path, *,
+    destination: Path,
+    *,
     render: bool = False,
     soffice: str = "soffice",
     pdfinfo: str = "pdfinfo",
@@ -237,22 +279,24 @@ def run(
         if not validation.valid:
             raise ValueError("native deck validation failed")
         (deck_dir / f"{name}.pptx").write_bytes(data)
-        report["matrix"].append({
-            "case": name,
-            "language": language,
-            "theme": theme,
-            "layouts": list(LAYOUTS),
-            "slide_count": 8,
-            "pptx": f"pptx/{name}.pptx",
-            "pptx_sha256": hashlib.sha256(data).hexdigest(),
-            "native_editability_structural": "PASS",
-            "viewer_render": "NOT_RUN",
-            "rendered_pages": 0,
-            "screenshots": [],
-            "font_report": None,
-            "pdf_text_extractable": None,
-            "manual_review": "UNVERIFIED",
-        })
+        report["matrix"].append(
+            {
+                "case": name,
+                "language": language,
+                "theme": theme,
+                "layouts": list(LAYOUTS),
+                "slide_count": 8,
+                "pptx": f"pptx/{name}.pptx",
+                "pptx_sha256": hashlib.sha256(data).hexdigest(),
+                "native_editability_structural": "PASS",
+                "viewer_render": "NOT_RUN",
+                "rendered_pages": 0,
+                "screenshots": [],
+                "font_report": None,
+                "pdf_text_extractable": None,
+                "manual_review": "UNVERIFIED",
+            }
+        )
     _write_manifest(destination, report)
     if not render:
         return report
@@ -272,12 +316,19 @@ def run(
         with tempfile.TemporaryDirectory(prefix="mini-deerflow-office-") as temporary:
             profile = (Path(temporary) / "lo-profile").resolve()
             paths = sorted(deck_dir.glob("*.pptx"))
-            _command([
-                soffice,
-                f"-env:UserInstallation={profile.as_uri()}",
-                "--headless", "--convert-to", "pdf",
-                "--outdir", str(pdf_dir), *map(str, paths),
-            ], timeout=240)
+            _command(
+                [
+                    soffice,
+                    f"-env:UserInstallation={profile.as_uri()}",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(pdf_dir),
+                    *map(str, paths),
+                ],
+                timeout=240,
+            )
         for entry in report["matrix"]:
             name = entry["case"]
             pdf = pdf_dir / f"{name}.pdf"
@@ -290,10 +341,21 @@ def run(
             font_name = f"fonts/{name}.txt"
             (font_dir / f"{name}.txt").write_text(font_text, encoding="utf-8")
             page_text = _command([pdftotext, "-layout", "-enc", "UTF-8", str(pdf), "-"])
-            _command([
-                pdftoppm, "-f", "1", "-l", "8",
-                "-scale-to", "1400", "-png", str(pdf), str(image_dir / name),
-            ], timeout=180)
+            _command(
+                [
+                    pdftoppm,
+                    "-f",
+                    "1",
+                    "-l",
+                    "8",
+                    "-scale-to",
+                    "1400",
+                    "-png",
+                    str(pdf),
+                    str(image_dir / name),
+                ],
+                timeout=180,
+            )
             images = sorted(
                 image_dir.glob(f"{name}-*.png"),
                 key=lambda p: int(p.stem.rsplit("-", 1)[1]),
@@ -304,15 +366,17 @@ def run(
                 png_dimensions(picture)
                 if picture.stat().st_size <= 1500:
                     raise ValueError("viewer screenshot has no useful data")
-            entry.update({
-                "viewer_render": "PASS",
-                "rendered_pages": count,
-                "screenshots": [f"screenshots/{p.name}" for p in images],
-                "font_report": font_name,
-                "pdf_text_extractable": _pdf_text_coverage(
-                    page_text, entry["language"]
-                ),
-            })
+            entry.update(
+                {
+                    "viewer_render": "PASS",
+                    "rendered_pages": count,
+                    "screenshots": [f"screenshots/{p.name}" for p in images],
+                    "font_report": font_name,
+                    "pdf_text_extractable": _pdf_text_coverage(
+                        page_text, entry["language"]
+                    ),
+                }
+            )
             _write_manifest(destination, report)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         report["overall_status"] = "FAILED_VIEWER_PIPELINE"
@@ -330,19 +394,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--soffice", default="soffice")
     args = parser.parse_args(argv)
-    report = run(
-        args.output_dir, render=args.render, soffice=args.soffice
+    report = run(args.output_dir, render=args.render, soffice=args.soffice)
+    print(
+        json.dumps(
+            {
+                "overall_status": report["overall_status"],
+                "cases": len(report["matrix"]),
+                "rendered": sum(x["rendered_pages"] for x in report["matrix"]),
+                "manifest": str(args.output_dir / "manifest.json"),
+                "manual_review": report["visual_reviewer_status"],
+            },
+            sort_keys=True,
+        )
     )
-    print(json.dumps({
-        "overall_status": report["overall_status"],
-        "cases": len(report["matrix"]),
-        "rendered": sum(x["rendered_pages"] for x in report["matrix"]),
-        "manifest": str(args.output_dir / "manifest.json"),
-        "manual_review": report["visual_reviewer_status"],
-    }, sort_keys=True))
-    return 0 if report["overall_status"] in {
-        "BLOCKED_VIEWER_NOT_RUN", "RENDERED_AWAITING_HUMAN_QA"
-    } else 2
+    return (
+        0
+        if report["overall_status"]
+        in {"BLOCKED_VIEWER_NOT_RUN", "RENDERED_AWAITING_HUMAN_QA"}
+        else 2
+    )
 
 
 if __name__ == "__main__":
