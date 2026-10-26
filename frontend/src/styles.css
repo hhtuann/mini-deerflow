@@ -169,6 +169,8 @@ summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 12px; f
 .graph-legend ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none; }
 .graph-legend [aria-label='Node kinds'] li { font-size: 10px; color: var(--muted-text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
 .source { font: 11px/1.7 ui-monospace, Consolas, monospace; background: var(--background); border: 1px solid var(--border); padding: 14px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 560px; overflow: auto; }
+.node-inspection h4 { font-size: 12px; margin: 20px 0 6px; color: var(--text); border-top: 1px solid var(--border-subtle); padding-top: 10px; }
+.node-inspection .run-goal { white-space: pre-wrap; overflow-wrap: anywhere; }
 .graph-canvas { height: 390px; border: 1px solid var(--border); background: var(--background); border-radius: var(--radius); overflow: hidden; }
 .graph-node { border-width: 2px !important; border-color: var(--neutral-line) !important; border-radius: 10px !important; width: 180px !important; min-height: 75px; font-family: inherit !important; }
 .graph-node small { display: block; font-size: 10px; margin-top: 5px; }
