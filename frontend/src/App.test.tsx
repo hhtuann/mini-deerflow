@@ -266,4 +266,20 @@ describe('research workspace', () => {
     expect(within(screen.getByTestId('artifact-source')).queryByRole('script')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Download Markdown' })).toHaveAttribute('href', '/api/offline/conversations/chat-one/turns/turn-one/artifact');
   });
+  it('exposes a keyboard-adjustable desktop Inspector separator without losing chat', async () => {
+    window.history.replaceState(null, '', '/?mode=offline&thread=chat-one');
+    const user = userEvent.setup(); mount();
+    await user.click(await screen.findByRole('button', { name: 'Inspect turn 1' }));
+    const handle = screen.getByRole('separator', { name: 'Resize execution inspector' });
+    expect(handle).toHaveAttribute('aria-valuenow', '400');
+    handle.focus();
+    await user.keyboard('{ArrowLeft}');
+    expect(handle).toHaveAttribute('aria-valuenow', '424');
+    await user.keyboard('{Home}');
+    expect(handle).toHaveAttribute('aria-valuenow', '340');
+    await user.keyboard('{End}');
+    expect(handle).toHaveAttribute('aria-valuenow', '650');
+    expect(screen.getByLabelText('Ask a follow-up')).toBeInTheDocument();
+  });
+
 });
