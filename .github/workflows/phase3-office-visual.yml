@@ -1,0 +1,76 @@
+# Genuine LibreOffice preview evidence. PDF/PNG output is NOT human approval.
+name: Phase 3 Office Visual Evidence
+
+on:
+  pull_request:
+    paths:
+      - "scripts/visual_acceptance.py"
+      - "tests/test_visual_acceptance.py"
+      - "src/mini_deerflow/pptx/**"
+      - "src/mini_deerflow/demo/phase2_pptx_offline.py"
+      - "docs/phase3-office-visual-acceptance.md"
+      - ".github/workflows/phase3-office-visual.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/visual_acceptance.py"
+      - "tests/test_visual_acceptance.py"
+      - "src/mini_deerflow/pptx/**"
+      - "src/mini_deerflow/demo/phase2_pptx_offline.py"
+      - ".github/workflows/phase3-office-visual.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  libreoffice-render:
+    name: LibreOffice / editable PPTX / 48 rendered screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked Python dependencies
+        run: uv sync --locked --dev
+      - name: Install actual LibreOffice and preview tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-impress poppler-utils fonts-liberation fonts-noto-core
+      - name: Render actual DeckSpecs using LibreOffice
+        run: uv run --no-sync python scripts/visual_acceptance.py --render --output-dir .mini-deerflow/office-visual-evidence
+      - name: Verify viewer evidence matrix and manifest
+        run: |
+          uv run --no-sync python -c '
+          import json
+          from pathlib import Path
+          p = Path(".mini-deerflow/office-visual-evidence/manifest.json")
+          report = json.loads(p.read_text(encoding="utf-8"))
+          assert report["overall_status"] == "RENDERED_AWAITING_HUMAN_QA"
+          assert len(report["matrix"]) == 6
+          assert sum(x["rendered_pages"] for x in report["matrix"]) == 48
+          assert all(x["viewer_render"] == "PASS" for x in report["matrix"])
+          assert all(len(x["screenshots"]) == 8 for x in report["matrix"])
+          assert report["manual_edit_resave_status"] == "UNVERIFIED"
+          assert report["visual_reviewer_status"] == "UNVERIFIED"
+          for case in report["matrix"]:
+              assert all(
+                  (p.parent / item).is_file()
+                  for item in [case["pptx"], case["font_report"], *case["screenshots"]]
+              )
+          print("48 genuine LibreOffice pages rendered; manual QA remains UNVERIFIED")
+          '
+      - name: Upload real viewer previews and editable source decks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-visual-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: .mini-deerflow/office-visual-evidence/
