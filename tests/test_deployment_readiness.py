@@ -78,6 +78,57 @@ def test_api_entrypoint_only_allows_explicit_loopback(host: str, expected: bool)
         assert readiness.api_loopback_binding(root) is expected
 
 
+@pytest.mark.parametrize(
+    "override",
+    ["true", "'::'", "process.env.VITE_HOST ?? true"],
+)
+def test_vite_duplicate_host_override_fails_gate(tmp_path: Path, override: str):
+    # A second JS property wins at runtime; a presence-only regex must NOT
+    # report loopback READY when a duplicate changes the effective host.
+    source = (ROOT / "frontend/vite.config.ts").read_text(encoding="utf-8")
+    target = tmp_path / "frontend/vite.config.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        source.replace(
+            "host: '127.0.0.1',",
+            f"host: '127.0.0.1', host: {override},",
+        ),
+        encoding="utf-8",
+    )
+    assert not readiness.vite_loopback_binding(tmp_path)
+
+
+def test_shadowed_or_augmented_security_constants_fail_gate(tmp_path: Path):
+    source = (ROOT / "src/mini_deerflow/api/security.py").read_text(encoding="utf-8")
+    target = tmp_path / "src/mini_deerflow/api/security.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source + "\nMAX_REQUEST_BYTES = 1_000_000\n", encoding="utf-8")
+    assert not readiness.request_body_limit(tmp_path)
+    target.write_text(source + "\nALLOWED_ORIGINS = ('*',)\n", encoding="utf-8")
+    assert not readiness.api_explicit_browser_origins(tmp_path)
+    target.write_text(source + "\nALLOWED_ORIGINS += ('*',)\n", encoding="utf-8")
+    assert not readiness.api_explicit_browser_origins(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "secret_reference",
+    [
+        "import.meta.env.VITE_OPENAI_KEY",
+        "import.meta.env['VITE_PROVIDER_TOKEN']",
+        "process.env.OPENAI_API_KEY",
+    ],
+)
+def test_additional_frontend_provider_secret_patterns_fail_gate(
+    tmp_path: Path, secret_reference: str
+):
+    source = tmp_path / "frontend/src"
+    source.mkdir(parents=True)
+    (source / "App.tsx").write_text(
+        f"export const leaked = {secret_reference};\n", encoding="utf-8"
+    )
+    assert not readiness.no_frontend_provider_credentials(tmp_path)
+
+
 def test_missing_or_wildcard_trusted_hosts_fail_gate(tmp_path: Path):
     import_text = (ROOT / "src/mini_deerflow/api/__init__.py").read_text(
         encoding="utf-8"
