@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import ExecutionGraph from './ExecutionGraph';
-import { graph, trace } from '../test/fixtures';
+import { graph, run, trace } from '../test/fixtures';
 
 vi.mock('@xyflow/react', () => ({
   ReactFlow: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -29,12 +29,13 @@ it('correlates a selected workflow node with only its own redacted context metri
     details: [{ label: 'Executions', value: '1' }], safe_summary: null };
   const unrelated = { ...graph.nodes[1], id: 'workflow:other:planner', kind: 'workflow_node' as const };
   render(<ExecutionGraph graph={{ ...graph, nodes: [realNode, unrelated], edges: [] }}
-    goal="Compare public sources" traces={[
+    run={{ ...run, goal: "Compare public sources" }} traces={[
       { ...trace, run_id: 'run-1', node: 'planner', context_estimated_tokens: 117, context_payload_chars: 470, error_category: null },
       { ...trace, run_id: 'other', node: 'planner', context_estimated_tokens: 999999, context_payload_chars: 999999, error_category: null },
     ]} />);
   expect(screen.getByRole('region', { name: 'Node details' })).toHaveTextContent('User goal (not LLM prompt): Compare public sources');
   expect(screen.getByRole('region', { name: 'Node details' })).toHaveTextContent('117');
+  expect(screen.getByRole('region', { name: 'Node details' })).toHaveTextContent('Structured plan result (turn-level, not raw model output)');
   expect(screen.getByRole('region', { name: 'Node details' })).not.toHaveTextContent('999999');
   expect(screen.getByRole('region', { name: 'Node details' })).toHaveTextContent('Not reported');
   await userEvent.selectOptions(screen.getByLabelText('Inspect node'), 'workflow:other:planner');
