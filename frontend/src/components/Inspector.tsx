@@ -53,7 +53,7 @@ export default function Inspector({ run: persistedRun, job, mode, thread, turn, 
       {tab === 'Graph' && <>
         <label>Graph view<select value={graphMode} onChange={(event) => setGraphMode(event.target.value as typeof graphMode)}><option>Current run</option><option>Workflow</option></select></label>
         <p className="caption">{graphMode === 'Workflow' ? 'Possible topology only — these routes are not evidence of execution.' : 'Observed execution, reconstructed from server events. Failed children retain their own status.'}</p>
-        {graphMode === 'Workflow' && workflow.isError ? <div role="alert">Workflow unavailable. <button onClick={() => void workflow.refetch()}>Retry workflow</button></div> : graphMode === 'Workflow' && !workflow.data ? <Empty>Loading workflow…</Empty> : <Suspense fallback={<Empty>Loading graph…</Empty>}><ExecutionGraph key={graphMode} graph={graphMode === 'Workflow' ? workflow.data ?? blankGraph : graph} traces={graphMode === 'Workflow' ? [] : traces} goal={run?.goal} isWorkflow={graphMode === 'Workflow'} /></Suspense>}
+        {graphMode === 'Workflow' && workflow.isError ? <div role="alert">Workflow unavailable. <button onClick={() => void workflow.refetch()}>Retry workflow</button></div> : graphMode === 'Workflow' && !workflow.data ? <Empty>Loading workflow…</Empty> : <Suspense fallback={<Empty>Loading graph…</Empty>}><ExecutionGraph key={graphMode} graph={graphMode === 'Workflow' ? workflow.data ?? blankGraph : graph} traces={graphMode === 'Workflow' ? [] : traces} run={graphMode === 'Workflow' ? null : run} isWorkflow={graphMode === 'Workflow'} /></Suspense>}
       </>}
       {tab === 'Trace' && <Trace traces={traces} />}
       {tab === 'Context' && <>
