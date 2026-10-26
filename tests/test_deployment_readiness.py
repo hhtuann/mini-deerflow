@@ -37,7 +37,7 @@ def test_current_repo_passes_static_local_boundary_without_public_readiness():
 def test_security_gate_cli_is_read_only_and_redacted():
     result = subprocess.run(
         [sys.executable, "scripts/deployment_readiness.py", "--repo-root", str(ROOT)],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=ROOT, capture_output=True,
         check=False, timeout=20, text=True,
     )
     assert result.returncode == 0
