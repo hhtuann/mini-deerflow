@@ -28,8 +28,10 @@ CHECK_NAMES = (
 
 def _read(root: Path, relative: str) -> str:
     path = root / relative
-    if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(
-        root.resolve()
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or not path.resolve().is_relative_to(root.resolve())
     ):
         raise ValueError("audit_source_missing_or_linked")
     return path.read_text(encoding="utf-8")
@@ -45,7 +47,9 @@ def _literal_assign(tree: ast.Module, symbol: str) -> object:
             names = (
                 [target.id for target in item.targets if isinstance(target, ast.Name)]
                 if isinstance(item, ast.Assign)
-                else [item.target.id] if isinstance(item.target, ast.Name) else []
+                else [item.target.id]
+                if isinstance(item.target, ast.Name)
+                else []
             )
             if symbol in names:
                 return ast.literal_eval(item.value)
@@ -55,7 +59,8 @@ def _literal_assign(tree: ast.Module, symbol: str) -> object:
 def api_loopback_binding(root: Path) -> bool:
     tree = _python_tree(root, "src/mini_deerflow/api/__main__.py")
     calls = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and isinstance(node.func.value, ast.Name)
@@ -80,8 +85,9 @@ def vite_loopback_binding(root: Path) -> bool:
     source = _read(root, "frontend/vite.config.ts")
     # Conservative check of the current intentionally simple literal Vite config.
     # Unknown/refactored syntax must be independently reviewed, not auto-approved.
-    server = re.search(r"\bserver\s*:\s*\{(?P<settings>.*?)\btest\s*:",
-                       source, flags=re.DOTALL)
+    server = re.search(
+        r"\bserver\s*:\s*\{(?P<settings>.*?)\btest\s*:", source, flags=re.DOTALL
+    )
     if server is None:
         return False
     config = server.group("settings")
@@ -99,7 +105,8 @@ def vite_loopback_binding(root: Path) -> bool:
 def api_trusted_hosts(root: Path) -> bool:
     tree = _python_tree(root, "src/mini_deerflow/api/__init__.py")
     calls = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "add_middleware"
@@ -148,15 +155,16 @@ def locked_dependencies(root: Path) -> bool:
 
 def ignored_local_secrets(root: Path) -> bool:
     rules = _read(root, ".gitignore").splitlines()
-    return all(
-        item in rules for item in (".env", ".env.local", ".mini-deerflow/")
-    )
+    return all(item in rules for item in (".env", ".env.local", ".mini-deerflow/"))
 
 
 def _tracked_files(root: Path) -> list[str]:
     result = subprocess.run(
         ["git", "ls-files", "--cached", "--full-name", "-z"],
-        cwd=root, capture_output=True, check=False, timeout=15,
+        cwd=root,
+        capture_output=True,
+        check=False,
+        timeout=15,
     )
     if result.returncode != 0:
         raise ValueError("git_index_unavailable")
@@ -193,7 +201,8 @@ def no_frontend_provider_credentials(root: Path) -> bool:
         if re.search(
             r"\bMINI_DEERFLOW_API_KEY\b|"
             r"import\.meta\.env\.VITE_\w*(?:SECRET|TOKEN|API_KEY|PRIVATE_KEY)",
-            source, flags=re.IGNORECASE,
+            source,
+            flags=re.IGNORECASE,
         ):
             return False
     return True
@@ -207,7 +216,13 @@ def audit(root: Path) -> dict[str, object]:
     for name in CHECK_NAMES:
         try:
             checks[name] = "PASS" if globals()[name](root) else "FAIL"
-        except (OSError, ValueError, TypeError, UnicodeError, subprocess.TimeoutExpired):
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            UnicodeError,
+            subprocess.TimeoutExpired,
+        ):
             checks[name] = "BLOCKED"
     local_static = all(value == "PASS" for value in checks.values())
     return {
@@ -235,7 +250,9 @@ def audit(root: Path) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--repo-root", type=Path, default=Path(__file__).resolve().parents[1]
+    )
     args = parser.parse_args(argv)
     try:
         report = audit(args.repo_root)

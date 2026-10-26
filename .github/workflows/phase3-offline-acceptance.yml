@@ -41,8 +41,6 @@ jobs:
         run: uv lock --check --offline
       - name: Ruff lint
         run: uv run --no-sync ruff check --no-cache .
-      - name: Temporary security Ruff formatter diff
-        run: uv run --no-sync ruff format --diff scripts/deployment_readiness.py tests/test_deployment_readiness.py || true
       - name: Ruff formatting
         run: uv run --no-sync ruff format --check .
       - name: Complete Python regression (report skips)
