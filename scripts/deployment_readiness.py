@@ -42,6 +42,7 @@ def _python_tree(root: Path, path: str) -> ast.Module:
 
 
 def _literal_assign(tree: ast.Module, symbol: str) -> object:
+    assignments: list[ast.expr] = []
     for item in tree.body:
         if isinstance(item, (ast.Assign, ast.AnnAssign)):
             names = (
@@ -52,8 +53,18 @@ def _literal_assign(tree: ast.Module, symbol: str) -> object:
                 else []
             )
             if symbol in names:
-                return ast.literal_eval(item.value)
-    raise ValueError("required_configuration_missing")
+                assignments.append(item.value)
+        elif (
+            isinstance(item, ast.AugAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == symbol
+        ):
+            raise ValueError("reassigned_configuration")
+    # Taking only the first literal assignment is unsafe: a later assignment
+    # can silently override the effective origin or request-size boundary.
+    if len(assignments) != 1:
+        raise ValueError("required_configuration_missing_or_reassigned")
+    return ast.literal_eval(assignments[0])
 
 
 def api_loopback_binding(root: Path) -> bool:
@@ -83,22 +94,22 @@ def api_loopback_binding(root: Path) -> bool:
 
 def vite_loopback_binding(root: Path) -> bool:
     source = _read(root, "frontend/vite.config.ts")
-    # Conservative check of the current intentionally simple literal Vite config.
-    # Unknown/refactored syntax must be independently reviewed, not auto-approved.
+    # Fail closed on any changed/unknown server structure. Matching only the
+    # presence of a safe host is unsafe: JavaScript uses the LAST duplicate
+    # property, so { host: '127.0.0.1', host: true } is actually a public bind.
+    if len(re.findall(r"\bserver\s*:", source)) != 1:
+        return False
     server = re.search(
-        r"\bserver\s*:\s*\{(?P<settings>.*?)\btest\s*:", source, flags=re.DOTALL
+        r"\bserver\s*:\s*(?P<settings>\{.*?\})\s*,\s*test\s*:",
+        source,
+        flags=re.DOTALL,
     )
     if server is None:
         return False
-    config = server.group("settings")
-    return (
-        re.search(r"\bhost\s*:\s*['\"]127\.0\.0\.1['\"]", config) is not None
-        and re.search(r"\bport\s*:\s*5173\b", config) is not None
-        and re.search(r"\bstrictPort\s*:\s*true\b", config) is not None
-        and re.search(r"\btarget\s*:\s*['\"]http://localhost:8000['\"]", config)
-        is not None
-        and "0.0.0.0" not in config
-        and "https://0.0.0.0" not in config
+    normalized = re.sub(r"\s+", "", server.group("settings"))
+    return normalized == (
+        "{host:'127.0.0.1',port:5173,strictPort:true,"
+        "proxy:{'/api':{target:'http://localhost:8000',changeOrigin:true}}}"
     )
 
 
@@ -199,8 +210,10 @@ def no_frontend_provider_credentials(root: Path) -> bool:
             return False
         source = file.read_text(encoding="utf-8")
         if re.search(
-            r"\bMINI_DEERFLOW_API_KEY\b|"
-            r"import\.meta\.env\.VITE_\w*(?:SECRET|TOKEN|API_KEY|PRIVATE_KEY)",
+            r"\b(?:MINI_DEERFLOW_API_KEY|OPENAI_API_KEY|"
+            r"ANTHROPIC_API_KEY|AZURE_OPENAI_API_KEY)\b|"
+            r"import\.meta\.env(?:\.VITE_\w*(?:SECRET|TOKEN|KEY|PASSWORD|CREDENTIALS?)"
+            r"|\[\s*['\"]VITE_\w*(?:SECRET|TOKEN|KEY|PASSWORD|CREDENTIALS?)['\"]\s*\])",
             source,
             flags=re.IGNORECASE,
         ):
