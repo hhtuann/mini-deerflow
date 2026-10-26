@@ -285,9 +285,10 @@ def inspect(
                     now_ns=current_ns,
                     retention_days=retention_days,
                 ))
-            elif FINAL.fullmatch(path.name):
-                if path.name != expected_finals.get(folder):
-                    unknown_finals += 1
+            elif FINAL.fullmatch(path.name) and path.name != expected_finals.get(
+                folder
+            ):
+                unknown_finals += 1
     results: dict[str, object] = {
         "schema_version": 1,
         "mode": mode,
