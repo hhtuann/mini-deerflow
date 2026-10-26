@@ -9,6 +9,8 @@ from mini_deerflow.evidence import (
     StepFinding,
     UserFacingAnswer,
     _answer_points,
+    _bound_public_text,
+    build_user_facing_answer,
     canonicalize_url,
     extract_evidence_records,
     merge_evidence_records,
@@ -689,3 +691,69 @@ def test_report_without_reviews_states_absence() -> None:
     assert "- No review verdicts were recorded." in report
     assert "- Review cycles: 0" in report
     assert "- Replan cycles: 0" in report
+
+
+def _record(url: str) -> EvidenceRecord:
+    return EvidenceRecord(
+        url=url,
+        source_tool="wiki_search",
+        title=f"Source {url}",
+        excerpt="Bounded excerpt.",
+        provenance=EvidenceProvenance(
+            tool_name="wiki_search",
+            step_number=1,
+            step_tool_call_number=1,
+            total_tool_call_number=1,
+            observation_index=1,
+        ),
+    )
+
+
+def test_fallback_renderer_bounds_multi_citation_claims_instead_of_failing():
+    """Root-cause regression (live E2E): deterministic fallback crashed.
+
+    A finding whose summary legally reaches 4,000 characters and cites
+    multiple sources used to become a single >1,000-character AnswerClaim,
+    raising ValidationError inside the safe-fallback path and failing the
+    whole completed turn at the synthesize node.
+    """
+    long_sentences = " ".join(
+        f"Năng lượng mặt trời giảm chi phí vận hành ở giai đoạn {index}."
+        for index in range(90)
+    )[:4_000]
+    finding = StepFinding(
+        step_number=1,
+        summary=long_sentences,
+        citations=[
+            "https://vi.wikipedia.org/wiki/Nang_luong_matt_troi",
+            "https://vi.wikipedia.org/wiki/Dien_nang_luong_tai_tao",
+        ],
+    )
+    answer = build_user_facing_answer(
+        findings=[finding],
+        evidence=[
+            _record("https://vi.wikipedia.org/wiki/Nang_luong_matt_troi"),
+            _record("https://vi.wikipedia.org/wiki/Dien_nang_luong_tai_tao"),
+        ],
+        review_notes=["Giới hạn: thiếu bằng chứng về chi phí." + " chi tiết" * 150],
+        has_collection_failures=True,
+    )
+    assert isinstance(answer, UserFacingAnswer)
+    for claim in [*answer.summary, *answer.evidence, *answer.discrepancies]:
+        assert 1 <= len(claim.text) <= 1_000
+        assert len(claim.citations) <= 20
+    for limitation in answer.limitations:
+        assert 1 <= len(limitation) <= 1_000
+    assert len(answer.sources) <= 50
+    assert answer.summary
+    assert answer.summary[0].text.endswith(".")
+
+
+def test_bound_public_text_prefers_sentence_boundaries():
+    text = "First sentence. " * 200
+    bounded = _bound_public_text(text, 1_000)
+    assert len(bounded) <= 1_000
+    assert bounded.endswith(".")
+    unbreakable = "x" * 2_000
+    assert _bound_public_text(unbreakable, 1_000) == "x" * 1_000
+    assert _bound_public_text("short", 1_000) == "short"

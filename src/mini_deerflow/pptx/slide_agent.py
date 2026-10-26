@@ -74,6 +74,7 @@ SlideLayoutKind = Literal[
 ]
 
 SLIDE_PLANNER_MAX_ATTEMPTS = 2
+SLIDE_PLAN_REPAIR_ATTEMPTS = 2
 MAX_EVIDENCE_ITEMS = 10
 
 _ILLUSTRATIVE_MARKER = {"vi": "(số liệu minh họa)", "en": "(illustrative data)"}
@@ -339,8 +340,15 @@ def plan_deck(
     structured_output_mode: StructuredOutputMode = "prompt_json",
     on_context_projection: Callable[[ProjectionMetadata], None] | None = None,
     on_presented_evidence: PresentedEvidenceObserver | None = None,
+    repair_hint: str | None = None,
 ) -> DeckPlan:
-    """Produce a validated DeckPlan through the production model seam."""
+    """Produce a validated DeckPlan through the production model seam.
+
+    ``repair_hint`` carries one safe, constant conversion error from a prior
+    plan so a bounded service-level re-plan can correct deterministic
+    constraint violations (count/language/payload rules) without widening
+    the schema or trusting model-authored retries.
+    """
 
     planning_context = build_slide_planning_context(
         request,
@@ -360,14 +368,42 @@ def plan_deck(
         method="json_mode",
         mode=structured_output_mode,
     )
-    messages = [
-        ("system", SLIDE_PLANNER_SYSTEM_PROMPT),
-        ("human", render_llm_payload(planning_context)),
-    ]
 
     last_error: ValidationError | OutputParserException | None = None
     result: DeckPlan | None = None
-    for _ in range(SLIDE_PLANNER_MAX_ATTEMPTS):
+    for attempt in range(SLIDE_PLANNER_MAX_ATTEMPTS):
+        messages = [
+            ("system", SLIDE_PLANNER_SYSTEM_PROMPT),
+            ("human", render_llm_payload(planning_context)),
+        ]
+        if repair_hint:
+            messages.append(
+                (
+                    "human",
+                    (
+                        "A previous plan attempt was rejected: "
+                        f"{repair_hint}. Follow the requested slide_count and "
+                        "language exactly, keep every field within its bound, "
+                        "match each payload to its layout, and reference only "
+                        "the provided evidence keys."
+                    ),
+                )
+            )
+        if attempt > 0 and last_error is not None:
+            # Bounded corrective feedback, mirroring the action selector's
+            # retry contract: the retry sees only safe validation facts
+            # (field locations and message codes), never raw model output.
+            messages.append(
+                (
+                    "human",
+                    (
+                        "Your previous response failed validation against the "
+                        "DeckPlan schema. Failures: "
+                        f"{_safe_validation_summary(last_error)}. Return the "
+                        "corrected JSON object only."
+                    ),
+                )
+            )
         try:
             candidate = structured_model.invoke(messages)
             if not isinstance(candidate, DeckPlan):
@@ -384,6 +420,19 @@ def plan_deck(
             f"after {SLIDE_PLANNER_MAX_ATTEMPTS} attempts"
         ) from last_error
     return result
+
+
+def _safe_validation_summary(error: ValidationError | OutputParserException) -> str:
+    """Field locations and message codes only; inputs/URLs are excluded."""
+
+    if isinstance(error, ValidationError):
+        details = error.errors(include_url=False, include_input=False)
+        summary = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in details[:8]
+        )
+        return summary[:2_000] or "schema mismatch"
+    return "response was not valid JSON for the schema"
 
 
 def _require_no_urls(plan: DeckPlan) -> None:
@@ -665,27 +714,68 @@ class SlideAgentService:
             nonlocal presented_evidence
             presented_evidence = projected
 
-        def invoke_planner() -> tuple[DeckPlan, ProjectionMetadata | None]:
+        def invoke_planner() -> tuple[DeckSpec, bytes, ProjectionMetadata | None]:
+            """Plan -> convert -> render -> validate with one bounded repair.
+
+            A plan that parses and converts can still exceed the renderer's
+            density preflight (model-natural text lengths within schema
+            bounds). Any deterministic post-plan rejection - conversion,
+            layout overflow or structural validation - triggers exactly one
+            hint-guided re-plan using our safe constant messages. The
+            renderer/validator density contract itself stays untouched.
+            """
             model = self._planner_model_factory()
-            plan = plan_deck(
-                model,
-                request,
-                evidence,
-                active_skill=active_skill,
-                context_budget=self._context_budget,
-                structured_output_mode=self._structured_output_mode,
-                on_context_projection=observe,
-                on_presented_evidence=observe_evidence,
+            repair_hint: str | None = None
+            for _ in range(SLIDE_PLAN_REPAIR_ATTEMPTS):
+                plan = plan_deck(
+                    model,
+                    request,
+                    evidence,
+                    active_skill=active_skill,
+                    context_budget=self._context_budget,
+                    structured_output_mode=self._structured_output_mode,
+                    on_context_projection=observe,
+                    on_presented_evidence=observe_evidence,
+                    repair_hint=repair_hint,
+                )
+                if presented_evidence is None:
+                    raise SlideAgentValidationError(
+                        "planner evidence projection missing"
+                    )
+                try:
+                    spec = build_deck_spec(plan, request, presented_evidence)
+                    data = render_deck(spec)
+                    validate_pptx(data, spec, min_layouts=4)
+                    return spec, data, metadata
+                except LayoutOverflowError:
+                    # Never prefix-clip claims or table cells: qualifiers,
+                    # negation, numeric units and attribution may be at the
+                    # end. Re-plan from the same evidence, then fail closed
+                    # if the bounded repair still cannot fit.
+                    repair_hint = (
+                        "content density exceeds layout; re-plan using fewer "
+                        "complete claims per slide or a less dense layout. "
+                        "Preserve numeric values and units, negations, source "
+                        "attribution, uncertainty and critical qualifiers. "
+                        "Do not clip prefixes or turn incomplete evidence "
+                        "into an unqualified assertion. If it cannot fit "
+                        "faithfully, report that limitation explicitly"
+                    )
+                except SlideAgentValidationError:
+                    # Fixed guidance, not reflected exception text.
+                    repair_hint = (
+                        "planned content violates the requested slide count, language, "
+                        "layout payload or evidence-key constraints; correct "
+                        "those constraints without inventing evidence or "
+                        "removing uncertainty, negations, units or attribution"
+                    )
+            raise SlideAgentValidationError(
+                "planned deck violated structural constraints "
+                f"after {SLIDE_PLAN_REPAIR_ATTEMPTS} attempts"
             )
-            return plan, metadata
 
         try:
-            plan, metadata = await asyncio.to_thread(invoke_planner)
-            if presented_evidence is None:
-                raise SlideAgentValidationError("planner evidence projection missing")
-            spec = build_deck_spec(plan, request, presented_evidence)
-            data = render_deck(spec)
-            validate_pptx(data, spec, min_layouts=4)
+            spec, data, metadata = await asyncio.to_thread(invoke_planner)
             record = await self._store.publish(thread_id, turn_id, data, spec)
         except SlideAgentError:
             raise

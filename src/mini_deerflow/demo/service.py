@@ -53,6 +53,16 @@ def _is_slide_agent_conflict(error: BaseException) -> bool:
     return isinstance(error, SlideAgentConflictError)
 
 
+def _slide_validation_message(error: BaseException) -> str | None:
+    """Classify by type only; exception text is never client-visible."""
+
+    from mini_deerflow.pptx.slide_agent import SlideAgentValidationError
+
+    if not isinstance(error, SlideAgentValidationError):
+        return None
+    return "Presentation planning failed validation."
+
+
 def _is_slide_agent_error(error: BaseException) -> bool:
     from mini_deerflow.pptx.artifacts import ArtifactError
     from mini_deerflow.pptx.slide_agent import SlideAgentError
@@ -286,6 +296,9 @@ def map_demo_error(error: BaseException, reference_id: str = "demo") -> str:
         return "Operation timed out."
     if _is_slide_agent_conflict(error):
         return "A different presentation already belongs to this turn."
+    validation_message = _slide_validation_message(error)
+    if validation_message is not None:
+        return validation_message
     if _is_slide_agent_error(error):
         return "Presentation generation failed."
 

@@ -42,7 +42,12 @@ from mini_deerflow.demo.service import (
 from mini_deerflow.demo.view_models import ChatSessionView, DemoRunView, EvidenceView
 from mini_deerflow.persistence import ThreadNotFoundError
 from mini_deerflow.pptx import DeckSpec, render_deck, validate_pptx
-from mini_deerflow.pptx.artifacts import PPTX_MIME, ArtifactError, PptxArtifactStore
+from mini_deerflow.pptx.artifacts import (
+    PPTX_MIME,
+    ArtifactError,
+    ArtifactNotFoundError,
+    PptxArtifactStore,
+)
 from mini_deerflow.pptx.schemas import (
     ChartContent,
     ConclusionContent,
@@ -281,6 +286,7 @@ class PromptJsonSlidePlanner:
     def __init__(self, *, wrap=None, fence=False, extra_field=False, fail_first=0):
         self.calls = 0
         self.messages = None
+        self.first_messages = None
         self._wrap = wrap
         self._fence = fence
         self._extra_field = extra_field
@@ -288,6 +294,8 @@ class PromptJsonSlidePlanner:
 
     def invoke(self, messages):
         self.calls += 1
+        if self.first_messages is None:
+            self.first_messages = messages
         self.messages = messages
         if self.calls <= self._fail_first:
             raise ValidationError.from_exception_data(
@@ -470,6 +478,32 @@ def test_plan_deck_retries_once_after_validation_error():
         DeckPlan,
     )
     assert model.calls == 2
+
+
+def test_plan_deck_retry_carries_sanitized_corrective_feedback():
+    """Root-cause regression: blind retries waste the bounded second attempt.
+
+    A live provider occasionally returns a schema-invalid DeckPlan; the retry
+    must tell the model WHICH fields failed using safe validation facts only
+    (locations/messages), never raw model output or input values.
+    """
+    model = PromptJsonSlidePlanner(fail_first=1)
+    assert isinstance(
+        plan_deck(model, vi_request(), evidence_pair()),
+        DeckPlan,
+    )
+    assert model.calls == 2
+    first_messages = model.first_messages
+    assert len(first_messages) == 2
+    retry_messages = model.messages
+    assert len(retry_messages) == 3
+    hint = retry_messages[2]
+    assert hint[0] == "human"
+    assert "failed validation" in hint[1]
+    assert "slides" in hint[1]  # loc of the injected failure
+    # No raw model output or provider payloads ride along in the hint.
+    assert "{" not in hint[1]
+    assert "api" not in hint[1].lower()
 
 
 def test_plan_deck_exhausted_retries_fail_closed():
@@ -987,6 +1021,320 @@ def test_service_conflict_idempotency_and_restart_persistence(tmp_path):
     asyncio.run(scenario())
 
 
+class ConversionRepairPlanner(ScriptedSlidePlanner):
+    """First plan violates slide_count; the repair attempt must fix it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint_seen: str | None = None
+        self.plan_attempts = 0
+
+    def _plan_from_messages(self, messages):
+        self.plan_attempts += 1
+        hint = next(
+            (
+                message[1]
+                for message in messages[2:]
+                if "previous plan attempt was rejected" in message[1]
+            ),
+            None,
+        )
+        if hint is not None:
+            self.hint_seen = hint
+        plan = super()._plan_from_messages(messages)
+        if self.plan_attempts == 1 and hint is None:
+            # Deterministic constraint violation (count mismatch) on the
+            # first conversion, mirroring the live observed failure class.
+            slides = list(plan.slides[:-1])
+            return DeckPlan.model_validate(
+                {
+                    "deck_title": plan.deck_title,
+                    "language": plan.language,
+                    "slides": slides,
+                }
+            )
+        return plan
+
+
+class DensityOverflowThenFixPlanner(ScriptedSlidePlanner):
+    """First plan is schema-legal but too dense; repair must shorten it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint_seen: str | None = None
+        self.plans: list[DeckPlan] = []
+
+    def _plan_from_messages(self, messages):
+        hint = next(
+            (
+                message[1]
+                for message in messages[2:]
+                if "previous plan attempt was rejected" in message[1]
+            ),
+            None,
+        )
+        if hint is not None:
+            self.hint_seen = hint
+        payload = json.loads(messages[1][1])
+        plan = build_scripted_plan(payload)
+        if hint is None:
+            dense_bullets = DeckPlan.model_validate(
+                {
+                    "deck_title": plan.deck_title,
+                    "language": plan.language,
+                    "slides": [
+                        plan.slides[0],
+                        {
+                            "layout": "bullets",
+                            "title": plan.slides[1].title,
+                            "purpose": "dense",
+                            "evidence_keys": [],
+                            "payload": {
+                                "items": [
+                                    ("Năng lượng mặt trời " * 10)[:178]
+                                    for _ in range(6)
+                                ]
+                            },
+                        },
+                        *plan.slides[2:],
+                    ],
+                }
+            )
+            self.plans.append(dense_bullets)
+            return dense_bullets
+        self.plans.append(plan)
+        return plan
+
+
+def test_service_repairs_render_density_overflow_with_bounded_replan(tmp_path):
+    """Root-cause regression (live E2E): schema-legal but dense plans died.
+
+    A live model produced plans whose text lengths are inside schema bounds
+    yet exceed the renderer's density preflight; the job failed terminally.
+    The service retries once with explicit evidence-preserving density guidance while
+    the renderer/validator density contract stays untouched.
+    """
+
+    async def scenario():
+        runtime, _, _, store = slide_services(tmp_path)
+        await runtime.run(
+            RunDemoCommand(thread_id=THREAD, turn_id=TURN, skill_id=SKILL_ID)
+        )
+        planner = DensityOverflowThenFixPlanner()
+        service = SlideAgentService(
+            runtime,
+            store,
+            planner_model_factory=lambda: planner,
+            structured_output_mode="native",
+        )
+        result = await service.generate(THREAD, TURN, vi_request())
+        assert planner.hint_seen is not None
+        assert "content density exceeds layout" in planner.hint_seen
+        assert "Preserve numeric values and units, negations" in planner.hint_seen
+        assert "uncertainty and critical qualifiers" in planner.hint_seen
+        assert len(planner.plans) == 2
+        # The rejected plan is intact; fitting slides must not be globally clipped.
+        assert planner.plans[0].slides[1].payload["items"] == [
+            ("Năng lượng mặt trời " * 10)[:178] for _ in range(6)
+        ]
+        assert result.spec.slides[0].title == planner.plans[1].slides[0].title
+        assert result.spec.slides[2].title == planner.plans[1].slides[2].title
+        assert len(result.spec.slides) == 8
+        record, data = await store.retrieve(THREAD, TURN)
+        assert record.sha256 == hashlib.sha256(data).hexdigest()
+        validate_pptx(data, result.spec, min_layouts=4)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("layout", ["bullets", "table"])
+def test_density_failure_never_prefix_clips_qualified_claims_or_cells(tmp_path, layout):
+    """Overflow must fail closed, not silently drop a trailing caveat/negation."""
+    qualifier = "; this does not prove a gain of 25 kWh and evidence remains uncertain."
+    claim = "Observed yield " + "may vary " * 10 + qualifier
+    cell = "No gain of 25 kWh; evidence remains uncertain."
+    assert 100 < len(claim) <= 180
+    assert len(cell) <= 48
+
+    class PersistentlyDensePlanner(ScriptedSlidePlanner):
+        def __init__(self):
+            super().__init__()
+            self.plans = []
+            self.snapshots = []
+            self.hints = []
+
+        def _plan_from_messages(self, messages):
+            self.hints.append([message[1] for message in messages[2:]])
+            plan = build_scripted_plan(json.loads(messages[1][1]))
+            data = plan.model_dump(mode="json")
+            content = (
+                {"items": [claim] * 6}
+                if layout == "bullets"
+                else {
+                    "headers": ["Source", "Finding", "Unit", "Limit", "Scope"],
+                    "rows": [[cell] * 5 for _ in range(5)],
+                    "caption": "Fixture only; no measured improvement.",
+                }
+            )
+            data["slides"][1] = {
+                "layout": layout,
+                "title": "Qualified fixture evidence",
+                "purpose": "Keep complete qualifications and units.",
+                "evidence_keys": [0],
+                "payload": content,
+            }
+            plan = DeckPlan.model_validate(data)
+            self.plans.append(plan)
+            self.snapshots.append(plan.model_dump_json())
+            return plan
+
+    async def scenario():
+        runtime, _, _, store = slide_services(tmp_path)
+        await runtime.run(
+            RunDemoCommand(thread_id=THREAD, turn_id=TURN, skill_id=SKILL_ID)
+        )
+        planner = PersistentlyDensePlanner()
+        service = SlideAgentService(
+            runtime,
+            store,
+            planner_model_factory=lambda: planner,
+            structured_output_mode="native",
+        )
+        with pytest.raises(SlideAgentValidationError, match="after 2 attempts"):
+            await service.generate(THREAD, TURN, vi_request())
+        assert len(planner.plans) == 2
+        assert "Preserve numeric values and units, negations" in planner.hints[1][0]
+        assert "uncertainty and critical qualifiers" in planner.hints[1][0]
+        for plan, snapshot in zip(planner.plans, planner.snapshots, strict=True):
+            assert plan.model_dump_json() == snapshot
+            payload = plan.slides[1].payload
+            if layout == "bullets":
+                assert all(text.endswith(qualifier) for text in payload["items"])
+            else:
+                assert all(text == cell for row in payload["rows"] for text in row)
+        with pytest.raises(ArtifactNotFoundError):
+            await store.retrieve(THREAD, TURN)
+        with sqlite3.connect(store.database_path) as connection:
+            assert (
+                connection.execute("SELECT COUNT(*) FROM pptx_artifacts").fetchone()[0]
+                == 0
+            )
+
+    asyncio.run(scenario())
+
+
+def test_fitting_evidence_qualifiers_and_table_cells_are_published_verbatim(tmp_path):
+    claim = "Yield is 25 kWh; evidence remains uncertain."
+    cell = "No gain of 25 kWh; evidence remains uncertain."
+
+    class QualifiedPlanner(ScriptedSlidePlanner):
+        def _plan_from_messages(self, messages):
+            plan = build_scripted_plan(json.loads(messages[1][1]))
+            data = plan.model_dump(mode="json")
+            data["slides"][1]["payload"]["items"] = [claim]
+            table = next(
+                slide for slide in data["slides"] if slide["layout"] == "table"
+            )
+            table["payload"]["rows"][0][2] = cell
+            return DeckPlan.model_validate(data)
+
+    async def scenario():
+        runtime, _, _, store = slide_services(tmp_path)
+        await runtime.run(
+            RunDemoCommand(thread_id=THREAD, turn_id=TURN, skill_id=SKILL_ID)
+        )
+        service = SlideAgentService(
+            runtime,
+            store,
+            planner_model_factory=QualifiedPlanner,
+            structured_output_mode="native",
+        )
+        result = await service.generate(THREAD, TURN, vi_request())
+        assert result.spec.slides[1].content.items == (claim,)
+        table = next(
+            slide.content
+            for slide in result.spec.slides
+            if slide.content.kind == "table"
+        )
+        assert table.rows[0][2] == cell
+        record, data = await store.retrieve(THREAD, TURN)
+        assert cell in record.spec_json
+        validate_pptx(data, result.spec, min_layouts=4)
+
+    asyncio.run(scenario())
+
+
+def test_service_repairs_conversion_failure_with_bounded_hint_guided_replan(
+    tmp_path,
+):
+    """Root-cause regression: live conversion failures were terminal.
+
+    A live plan that violates deterministic constraints (slide count) used to
+    fail the whole presentation job. The service now performs exactly one
+    hint-guided re-plan; the hint carries only our safe constant message.
+    """
+
+    async def scenario():
+        runtime, _, _, store = slide_services(tmp_path)
+        await runtime.run(
+            RunDemoCommand(thread_id=THREAD, turn_id=TURN, skill_id=SKILL_ID)
+        )
+        planner = ConversionRepairPlanner()
+        service = SlideAgentService(
+            runtime,
+            store,
+            planner_model_factory=lambda: planner,
+            structured_output_mode="native",
+        )
+        result = await service.generate(THREAD, TURN, vi_request())
+        assert planner.plan_attempts == 2
+        assert planner.hint_seen is not None
+        assert "slide count" in planner.hint_seen
+        assert len(result.spec.slides) == 8
+        record, data = await store.retrieve(THREAD, TURN)
+        assert record.sha256 == hashlib.sha256(data).hexdigest()
+        validate_pptx(data, result.spec, min_layouts=4)
+
+    asyncio.run(scenario())
+
+
+def test_service_conversion_repair_is_bounded(tmp_path):
+    """Persistent conversion violations fail closed after the repair cap."""
+
+    class AlwaysWrongCountPlanner(ConversionRepairPlanner):
+        def _plan_from_messages(self, messages):
+            self.plan_attempts += 1
+            plan = ScriptedSlidePlanner._plan_from_messages(self, messages)
+            slides = list(plan.slides[:-1])
+            return DeckPlan.model_validate(
+                {
+                    "deck_title": plan.deck_title,
+                    "language": plan.language,
+                    "slides": slides,
+                }
+            )
+
+    async def scenario():
+        runtime, _, _, store = slide_services(tmp_path)
+        await runtime.run(
+            RunDemoCommand(thread_id=THREAD, turn_id=TURN, skill_id=SKILL_ID)
+        )
+        planner = AlwaysWrongCountPlanner()
+        service = SlideAgentService(
+            runtime,
+            store,
+            planner_model_factory=lambda: planner,
+            structured_output_mode="native",
+        )
+        with pytest.raises(SlideAgentValidationError, match="structural constraints"):
+            await service.generate(THREAD, TURN, vi_request())
+        assert planner.plan_attempts == 2
+        # Fail-closed: nothing was published for the violating plan.
+        assert not list(tmp_path.rglob("*.pptx"))
+
+    asyncio.run(scenario())
+
+
 def test_service_clips_oversized_evidence_and_generation_succeeds(tmp_path):
     """Real long evidence fields are clipped, never fatal to generation."""
 
@@ -1295,7 +1643,14 @@ def test_job_dto_operation_literal_accepts_presentation():
             "A different presentation already belongs to this turn.",
         ),
         (SlideAgentError("private C:\\host\\path"), "Presentation generation failed."),
-        (SlideAgentValidationError("bad plan"), "Presentation generation failed."),
+        (
+            SlideAgentValidationError("plan slide count does not match the request"),
+            "Presentation planning failed validation.",
+        ),
+        (
+            SlideAgentValidationError("bad plan"),
+            "Presentation planning failed validation.",
+        ),
         (
             ArtifactError("disk C:\\host\\path failed"),
             "Presentation generation failed.",
@@ -1307,6 +1662,44 @@ def test_job_dto_operation_literal_accepts_presentation():
 )
 def test_map_demo_error_slide_branches_are_safe(error, expected):
     assert map_demo_error(error) == expected
+
+
+def test_validation_error_never_reflects_secret_url_or_exception_string():
+    secret = "secret-canary https://private.example/token C:\\private\\key"
+    assert map_demo_error(SlideAgentValidationError(secret)) == (
+        "Presentation planning failed validation."
+    )
+
+    class UnprintableValidationError(SlideAgentValidationError):
+        def __str__(self):
+            raise AssertionError("Exception text must never be inspected")
+
+    assert map_demo_error(UnprintableValidationError(secret)) == (
+        "Presentation planning failed validation."
+    )
+
+
+def test_job_dto_contains_only_fixed_validation_error_prose():
+    from mini_deerflow.api.jobs import ApiJobs
+
+    secret = "secret-canary https://private.example/token C:\\private\\key"
+
+    def fail(_sink):
+        raise SlideAgentValidationError(secret)
+
+    jobs = ApiJobs()
+    try:
+        submitted = jobs.submit("offline", "presentation", THREAD, TURN, fail)
+        deadline = time.monotonic() + 5
+        result = jobs.get("offline", submitted.job_id)
+        while result.status in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.01)
+            result = jobs.get("offline", submitted.job_id)
+        assert result.status == "failed"
+        assert result.error_message == "Presentation planning failed validation."
+        assert secret not in result.model_dump_json()
+    finally:
+        jobs.shutdown()
 
 
 def test_map_demo_error_defaults_never_echo_details():
