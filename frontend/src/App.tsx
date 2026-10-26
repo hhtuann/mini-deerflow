@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { onlineManager, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowUp, FlaskConical, Menu, MessageSquare, PanelLeftClose, PanelRight, Plus, Presentation as PresentationIcon, RefreshCw, Sprout } from 'lucide-react';
 import { activeJob, ApiError, conversationPath, request } from './api';
@@ -6,6 +6,7 @@ import type { ConversationSummary, JobDTO, Mode, SkillsDTO } from './types';
 import { jobVersion, loadSessionSnapshot } from './session';
 import SafeMarkdown from './components/SafeMarkdown';
 import Inspector from './components/Inspector';
+import { clampInspectorWidth, inspectorMaxWidth, INSPECTOR_DEFAULT_WIDTH, INSPECTOR_MIN_WIDTH } from './inspectorSizing';
 import PresentationWorkspace from './components/Presentation';
 import { Drawer, Status } from './components/UI';
 
@@ -34,6 +35,39 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
   const [drawer, setDrawer] = useState<'navigation' | 'inspector' | 'presentation' | null>(null);
   const [presentationTurn, setPresentationTurn] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorWidth, setInspectorWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
+  const resizeStart = useRef<{ x: number; width: number } | null>(null);
+  useEffect(() => {
+    const clampOnResize = () => setInspectorWidth((value) => clampInspectorWidth(value, window.innerWidth, sidebarOpen));
+    window.addEventListener('resize', clampOnResize);
+    clampOnResize();
+    return () => window.removeEventListener('resize', clampOnResize);
+  }, [sidebarOpen]);
+  function inspectorPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    resizeStart.current = { x: event.clientX, width: inspectorWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+  function inspectorPointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!resizeStart.current) return;
+    setInspectorWidth(clampInspectorWidth(
+      resizeStart.current.width + resizeStart.current.x - event.clientX,
+      window.innerWidth, sidebarOpen,
+    ));
+  }
+  function inspectorPointerEnd(event: PointerEvent<HTMLDivElement>) {
+    resizeStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+  function inspectorResizeKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const target = event.key === 'Home' ? INSPECTOR_MIN_WIDTH
+      : event.key === 'End' ? inspectorMaxWidth(window.innerWidth, sidebarOpen)
+      : inspectorWidth + (event.key === 'ArrowLeft' ? 24 : -24);
+    setInspectorWidth(clampInspectorWidth(target, window.innerWidth, sidebarOpen));
+  }
   const [draft, setDraft] = useState('');
   const [skill, setSkill] = useState('');
   const [selectedTurn, setSelectedTurn] = useState<string>();
@@ -129,7 +163,7 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
     <div className="nav-footer"><FlaskConical size={16} aria-hidden="true" /><span>Local learning workspace<br />Phase 0 / 1 · bounded execution</span></div>
   </nav>;
   const inspector = <><label className="turn-picker">Inspect turn<select value={selectedTurnId ?? ''} onChange={(event) => setSelectedTurn(event.target.value)} disabled={!turnOptions.length}>{turnOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}{!turnOptions.length && <option value="">No turn selected</option>}</select></label><Inspector key={`${thread ?? 'new'}:${selectedTurnId ?? 'none'}`} run={turn?.run ?? null} job={selectedJob} mode={mode} thread={thread} turn={selectedTurnId} historyState={historyState} onRetryHistory={() => void refetchSession()} /></>;
-  return <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} ${inspectorOpen ? 'inspector-open' : ''}`}>
+  return <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} ${inspectorOpen ? 'inspector-open' : ''}`} style={{ '--inspector-width': `${inspectorWidth}px` } as CSSProperties}>
     <a className="skip-link" href="#composer">Skip to message</a>
     {sidebarOpen && <aside className="desktop-sidebar">{navigation}</aside>}
     <main className="workspace">
@@ -163,7 +197,15 @@ function Workspace({ mode, thread, navigate }: { mode: Mode; thread?: string; na
         <p id="composer-help" className="composer-help">10–1,000 characters · Enter to send, Shift+Enter for a new line. Skill resets after send.</p>
       </div>
     </main>
-    {inspectorOpen && <aside className="desktop-inspector">{inspector}</aside>}
+    {inspectorOpen && <aside className="desktop-inspector">
+      <div className="inspector-resize-handle" role="separator" aria-label="Resize execution inspector" aria-orientation="vertical"
+        aria-valuemin={INSPECTOR_MIN_WIDTH} aria-valuemax={inspectorMaxWidth(window.innerWidth, sidebarOpen)} aria-valuenow={inspectorWidth}
+        aria-valuetext={inspectorWidth + ' pixels wide'} tabIndex={0}
+        onPointerDown={inspectorPointerDown} onPointerMove={inspectorPointerMove}
+        onPointerUp={inspectorPointerEnd} onPointerCancel={inspectorPointerEnd}
+        onKeyDown={inspectorResizeKey} title="Drag left/right to resize; arrow keys also work" />
+      {inspector}
+    </aside>}
     {drawer === 'presentation' && presentationTurnView && <Drawer title="Presentation workspace" close={() => setDrawer(null)}><PresentationWorkspace key={`${mode}:${thread}:${presentationTurn}`} mode={mode} thread={thread!} turn={presentationTurnView} job={presentationJob} busy={busy} /></Drawer>}
     {drawer && drawer !== 'presentation' && <Drawer title={drawer === 'navigation' ? 'Navigation' : 'Execution inspector'} close={() => setDrawer(null)}>{drawer === 'navigation' ? navigation : inspector}</Drawer>}
   </div>;
