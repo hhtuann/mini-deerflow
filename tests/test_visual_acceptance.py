@@ -100,7 +100,7 @@ def test_png_evidence_rejects_bad_or_tiny_images(tmp_path: Path):
 
 def test_page_count_fail_closed_and_pdf_text_is_only_a_hint():
     assert visual._pages("Title: Example\nPages:      8\nAuthor: fixture") == 8
-    with pytest.raises(ValueError, match="page count unknown"):
+    with pytest.raises(ValueError, match="viewer_pdf_page_count_unknown"):
         visual._pages("empty")
     assert visual._pdf_text_coverage("Mini DeerFlow; editable; Source", "en")
     assert not visual._pdf_text_coverage("Mini DeerFlow only", "en")
