@@ -31,6 +31,9 @@ export interface TraceEvent {
   error_category: string | null; error_code: string | null; turn_id: string | null;
   context_payload_chars: number | null; context_budget_chars: number | null; context_retained_items: number | null;
   active_skill_id: string | null; skill_instructions_omitted: boolean | null; context_policy_version: string | null;
+  model_schema: string | null; model_name: string | null; model_attempt: number | null; model_duration_ms: number | null;
+  model_input_tokens: number | null; model_output_tokens: number | null; model_total_tokens: number | null;
+  model_cached_tokens: number | null; usage_reported: boolean | null;
 }
 export interface Evidence {
   canonical_url: string; source_tool: string; title: string; excerpt: string; is_cited: boolean;

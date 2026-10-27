@@ -16,6 +16,11 @@ from typing import Annotated, Any, Literal, Protocol, TextIO, cast, runtime_chec
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from mini_deerflow.context_budget import ContextBudgetExceededError
+from mini_deerflow.model_usage import (
+    ModelUsageScope,
+    close_scope,
+    open_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,7 @@ class TraceKind(str, Enum):
     BRANCH = "branch"
     FAN_IN = "fan_in"
     EVIDENCE = "evidence"
+    MODEL = "model"
 
 
 class TracePhase(str, Enum):
@@ -144,6 +150,7 @@ class ExecutionEventType(str, Enum):
     REPLAN_COMPLETED = "replan_completed"
     CITATION_VALIDATED = "citation_validated"
     ARTIFACT_COMPLETED = "artifact_completed"
+    MODEL_INVOCATION = "model_invocation"
 
 
 class ExecutionStatus(str, Enum):
@@ -159,6 +166,38 @@ class ExecutionStatus(str, Enum):
 EventMetadataValue = str | int | float | bool | None
 MAX_EVENT_METADATA_ITEMS = 24
 MAX_EVENT_METADATA_TEXT_CHARS = 240
+
+# Bounded provider/model identity for measured usage events. Names are plain
+# identifiers/versions; any control character or oversized value is rejected.
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,63}$")
+MAX_MODEL_USAGE_TOKENS = 10_000_000_000
+
+
+class ModelInvocationInfo(BaseModel):
+    """Closed per-invocation usage record; SDK-reported values only.
+
+    Token fields are ``None`` when the provider did not report usage — never
+    zero, never estimated from characters. ``usage_reported`` distinguishes an
+    explicit provider zero-total report from an absent one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_name: str | None = Field(
+        default=None, pattern=r"^_?[A-Za-z][A-Za-z0-9_]{0,63}$"
+    )
+    model: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,63}$"
+    )
+    attempt: int = Field(ge=1, le=100)
+    duration_ms: int | None = Field(default=None, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
+    output_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
+    total_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
+    cached_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
+    usage_reported: bool = False
+
+
 _SAFE_METADATA_KEYS = frozenset(
     {
         "from_node",
@@ -275,6 +314,7 @@ class ExecutionEvent(BaseModel):
     context_policy_version: Literal["phase1-v1"] | None = None
     error_category: TraceErrorCategory | None = None
     error_code: TraceErrorCode | None = None
+    model_invocation: ModelInvocationInfo | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -529,6 +569,7 @@ class ExecutionTracer:
             return
         active.counter.value += 1
         fields.setdefault("turn_id", active.turn_id)
+        fields.setdefault("operation", active.operation)
         if active.node_id is not None:
             fields.setdefault("node_id", active.node_id)
         if active.delegation_id is not None:
@@ -577,12 +618,14 @@ class ExecutionTracer:
                 node=node,
                 **cast(Any, counters),
             )
+            scope, usage_token = open_scope()
             try:
                 result = handler(state)
                 if inspect.isawaitable(result):
                     result = await result
             except BaseException as error:
                 category, code, outcome = _classify_exception(error)
+                self._emit_model_invocations(node, scope)
                 self.emit_event(
                     ExecutionEventType.NODE_FAILED,
                     outcome=outcome,
@@ -593,6 +636,9 @@ class ExecutionTracer:
                     **cast(Any, counters),
                 )
                 raise
+            finally:
+                close_scope(usage_token)
+            self._emit_model_invocations(node, scope)
             self.emit_event(
                 ExecutionEventType.NODE_COMPLETED,
                 node=node,
@@ -602,6 +648,36 @@ class ExecutionTracer:
             return result
 
         return cast(Callable[[Any], object], traced)
+
+    def _emit_model_invocations(self, node: str, scope: ModelUsageScope) -> None:
+        """Drain per-invocation usage as correlated MODEL_INVOCATION events.
+
+        Each observation becomes exactly one event, keyed to the currently
+        active run/turn/delegation/branch context; attempts are numbered
+        per node execution so retries never merge or misattribute usage.
+        """
+        for attempt, observation in enumerate(scope.observations, start=1):
+            usage = observation.usage or {}
+            self.emit_event(
+                ExecutionEventType.MODEL_INVOCATION,
+                outcome=(
+                    TraceOutcome.PROVIDER_FAILED
+                    if observation.failed
+                    else TraceOutcome.SUCCEEDED
+                ),
+                node=node,
+                model_invocation=ModelInvocationInfo(
+                    schema_name=observation.schema_name,
+                    model=observation.model_name,
+                    attempt=attempt,
+                    duration_ms=observation.duration_ms,
+                    input_tokens=usage.get("input_tokens"),
+                    output_tokens=usage.get("output_tokens"),
+                    total_tokens=usage.get("total_tokens"),
+                    cached_tokens=usage.get("cached_tokens"),
+                    usage_reported=observation.usage is not None,
+                ),
+            )
 
     def wrap_route(
         self,
@@ -773,6 +849,7 @@ def _event_type_from_parts(
         TraceKind.REPLAN: ExecutionEventType.REPLAN_COMPLETED,
         TraceKind.CITATION: ExecutionEventType.CITATION_VALIDATED,
         TraceKind.ARTIFACT: ExecutionEventType.ARTIFACT_COMPLETED,
+        TraceKind.MODEL: ExecutionEventType.MODEL_INVOCATION,
     }[kind]
 
 
@@ -836,6 +913,11 @@ def _legacy_shape_for_event(
     return {
         ExecutionEventType.EVIDENCE_PRODUCED: (
             TraceKind.EVIDENCE,
+            TracePhase.OUTCOME,
+            TraceOutcome.SUCCEEDED,
+        ),
+        ExecutionEventType.MODEL_INVOCATION: (
+            TraceKind.MODEL,
             TracePhase.OUTCOME,
             TraceOutcome.SUCCEEDED,
         ),
