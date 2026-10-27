@@ -36,6 +36,48 @@ test('real offline research: skill, follow-up, persistence, safe inspector and p
   await expect(page.getByRole('article', { name: 'Turn 2', exact: true }).getByText('None', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Inspect turn 1', exact: true }).click();
   await expect(page.getByLabel('Inspect turn')).toHaveValue(firstJob.turn_id!);
+  // Genuine pointer + keyboard interactions against the running React/FastAPI app.
+  // This checks CSS grid sizing; unit-only width calculations cannot prove the UI.
+  const resizeHandle = page.getByRole('separator', { name: 'Resize execution inspector' });
+  const inspectorPane = page.locator('.desktop-inspector');
+  await expect(resizeHandle).toHaveAttribute('aria-valuenow', '400');
+  for (const viewport of [1280, 1366, 1440, 1920]) {
+    await page.setViewportSize({ width: viewport, height: 900 });
+    await expect(inspectorPane).toBeVisible();
+    const maxWidth = viewport - 250 - 380;
+    await resizeHandle.focus();
+    await page.keyboard.press('End');
+    await expect(resizeHandle).toHaveAttribute('aria-valuenow', String(maxWidth));
+    expect(Math.abs((await inspectorPane.boundingBox())!.width - maxWidth)).toBeLessThanOrEqual(1);
+    const handleBox = await resizeHandle.boundingBox();
+    expect(handleBox).toBeTruthy();
+    const startX = handleBox!.x + handleBox!.width / 2;
+    const startY = Math.max(50, handleBox!.y + 90);
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX + 120, startY, { steps: 8 });
+    await page.mouse.up();
+    await expect(resizeHandle).toHaveAttribute('aria-valuenow', String(maxWidth - 120));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`inspector-resized-${viewport}.png`), fullPage: true });
+    await resizeHandle.focus();
+    await page.keyboard.press('Home');
+    await expect(resizeHandle).toHaveAttribute('aria-valuenow', '340');
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await resizeHandle.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(resizeHandle).toHaveAttribute('aria-valuenow', '364');
+  await page.keyboard.press('ArrowRight');
+  await expect(resizeHandle).toHaveAttribute('aria-valuenow', '340');
+  // Collapsing conversation navigation allows Inspector to grow further.
+  await page.getByRole('button', { name: 'Collapse sidebar' }).click();
+  await resizeHandle.focus();
+  await page.keyboard.press('End');
+  await expect(resizeHandle).toHaveAttribute('aria-valuenow', String(1440 - 380));
+  await page.getByRole('button', { name: 'Expand sidebar' }).click();
+  await expect(resizeHandle).toHaveAttribute('aria-valuenow', String(1440 - 250 - 380));
+  await page.keyboard.press('Home');
   const data = await (await request.get(path)).json() as ChatSession;
   const run = data.turns[0].run!;
   for (const [label, value] of [['Nodes', run.execution_graph.metrics.nodes], ['Running', run.execution_graph.metrics.running], ['Completed', run.execution_graph.metrics.completed], ['Failed', run.execution_graph.metrics.failed], ['Tool calls', run.execution_graph.metrics.tool_calls], ['Sub-agents', run.execution_graph.metrics.sub_agents], ['Evidence', run.execution_graph.metrics.evidence]] as const) {
