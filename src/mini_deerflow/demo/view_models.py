@@ -183,6 +183,15 @@ class TraceEventView:
     active_skill_id: str | None = None
     skill_instructions_omitted: bool | None = None
     context_policy_version: str | None = None
+    model_schema: str | None = None
+    model_name: str | None = None
+    model_attempt: int | None = None
+    model_duration_ms: int | None = None
+    model_input_tokens: int | None = None
+    model_output_tokens: int | None = None
+    model_total_tokens: int | None = None
+    model_cached_tokens: int | None = None
+    usage_reported: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +376,39 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
                 getattr(event, "context_policy_version", None), 64, omit_urls=True
             )
             or None
+        ),
+        model_schema=_plain_text(
+            getattr(getattr(event, "model_invocation", None), "schema_name", None),
+            64,
+            omit_urls=True,
+        )
+        or None,
+        model_name=_plain_text(
+            getattr(getattr(event, "model_invocation", None), "model", None),
+            64,
+            omit_urls=True,
+        )
+        or None,
+        model_attempt=getattr(
+            getattr(event, "model_invocation", None), "attempt", None
+        ),
+        model_duration_ms=getattr(
+            getattr(event, "model_invocation", None), "duration_ms", None
+        ),
+        model_input_tokens=getattr(
+            getattr(event, "model_invocation", None), "input_tokens", None
+        ),
+        model_output_tokens=getattr(
+            getattr(event, "model_invocation", None), "output_tokens", None
+        ),
+        model_total_tokens=getattr(
+            getattr(event, "model_invocation", None), "total_tokens", None
+        ),
+        model_cached_tokens=getattr(
+            getattr(event, "model_invocation", None), "cached_tokens", None
+        ),
+        usage_reported=getattr(
+            getattr(event, "model_invocation", None), "usage_reported", None
         ),
     )
 

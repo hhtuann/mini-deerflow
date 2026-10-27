@@ -15,6 +15,9 @@ export const trace: TraceEvent = {
   reserved_tool_calls: 2, used_tool_calls: 2, charged_tool_calls: 2, context_omitted_items: 1, context_truncated_items: 2, context_estimated_tokens: 100,
   error_category: null, error_code: null, turn_id: 'turn-one', context_payload_chars: 400, context_budget_chars: 1000, context_retained_items: 3,
   active_skill_id: 'research-brief', skill_instructions_omitted: true, context_policy_version: 'policy-v1',
+  model_schema: null, model_name: null, model_attempt: null, model_duration_ms: null,
+  model_input_tokens: null, model_output_tokens: null, model_total_tokens: null,
+  model_cached_tokens: null, usage_reported: null,
 };
 export const run: RunView = {
   thread_id: 'chat-one', turn_id: 'turn-one', operation: 'run', workflow_status: 'completed', goal: 'Research a useful topic',
