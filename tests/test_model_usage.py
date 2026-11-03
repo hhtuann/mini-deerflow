@@ -829,9 +829,7 @@ def test_prompt_json_metadata_getters_never_replace_success(
     scope, token = open_scope()
     try:
         result = (
-            asyncio.run(runnable.ainvoke([]))
-            if asynchronous
-            else runnable.invoke([])
+            asyncio.run(runnable.ainvoke([])) if asynchronous else runnable.invoke([])
         )
     finally:
         close_scope(token)
@@ -888,9 +886,7 @@ def test_native_metadata_getter_never_replaces_parsed_success(
     scope, token = open_scope()
     try:
         result = (
-            asyncio.run(runnable.ainvoke([]))
-            if asynchronous
-            else runnable.invoke([])
+            asyncio.run(runnable.ainvoke([])) if asynchronous else runnable.invoke([])
         )
     finally:
         close_scope(token)
