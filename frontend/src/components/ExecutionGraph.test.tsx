@@ -59,7 +59,7 @@ it('renders provider-reported usage per matching node invocation, null as Not re
   expect(details).toHaveTextContent('80');
   expect(details).toHaveTextContent('200');
   expect(details).toHaveTextContent('glm-5.3');
-  expect(details).toHaveTextContent('attempt 2 of 1');
+  expect(details).toHaveTextContent('Execution — · attempt 2 · invocation —');
   expect(details).toHaveTextContent('Not reported');  // cached_tokens null
   expect(details).not.toHaveTextContent('999');       // other node's usage never leaks
 });
@@ -73,6 +73,24 @@ it('shows honest Not reported rows when provider usage is absent for the node', 
   expect(details).toHaveTextContent('Not reported');
   expect(details).not.toHaveTextContent('Provider input tokens');
   expect(details).not.toHaveTextContent('0 tokens');
+});
+
+it('renders partial usage, cache writes and execution identity honestly', () => {
+  const realNode = { ...graph.nodes[0], id: 'workflow:run-1:planner', kind: 'workflow_node' as const, label: 'Planner',
+    details: [], safe_summary: null };
+  const partial = { ...trace, kind: 'model', node: 'planner', model_schema: 'Plan', model_name: null,
+    model_execution: 2, model_attempt: 1, model_invocation: 3, model_duration_ms: 12,
+    model_input_tokens: null, model_output_tokens: 5, model_total_tokens: null,
+    model_cached_tokens: 0, model_cache_creation_tokens: 8, model_usage_truncated: false,
+    model_omitted_invocations: 0, usage_reported: true };
+  render(<ExecutionGraph graph={{ ...graph, nodes: [realNode], edges: [] }} run={run} traces={[partial]} />);
+  const details = screen.getByRole('region', { name: 'Node details' });
+  expect(details).toHaveTextContent('Execution 2 · attempt 1 · invocation 3');
+  expect(details).toHaveTextContent('Provider input tokensNot reported');
+  expect(details).toHaveTextContent('Provider output tokens5');
+  expect(details).toHaveTextContent('Provider total tokensNot reported');
+  expect(details).toHaveTextContent('Cache-read tokens0');
+  expect(details).toHaveTextContent('Cache-creation tokens8');
 });
 
 it('never promotes Workflow topology into an executed prompt or billing report', () => {

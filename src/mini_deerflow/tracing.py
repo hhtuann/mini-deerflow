@@ -190,12 +190,19 @@ class ModelInvocationInfo(BaseModel):
         default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,63}$"
     )
     attempt: int = Field(ge=1, le=100)
+    node_execution: int = Field(default=1, ge=1)
+    invocation: int = Field(default=1, ge=1)
     duration_ms: int | None = Field(default=None, ge=0)
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
     total_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
     cached_tokens: int | None = Field(default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS)
+    cache_creation_tokens: int | None = Field(
+        default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS
+    )
     usage_reported: bool = False
+    usage_truncated: bool = False
+    omitted_invocations: int = Field(default=0, ge=0)
 
 
 _SAFE_METADATA_KEYS = frozenset(
@@ -407,6 +414,8 @@ class _ActiveTrace:
     branch_id: str | None = None
     node_id: str | None = None
     counter: _SequenceCounter = field(default_factory=_SequenceCounter)
+    node_executions: dict[str, int] = field(default_factory=dict)
+    model_invocations: dict[str, int] = field(default_factory=dict)
 
 
 _active_trace: ContextVar[_ActiveTrace | None] = ContextVar(
@@ -522,6 +531,8 @@ class ExecutionTracer:
             branch_id=branch_id,
             node_id="delegated_researcher",
             counter=parent.counter,
+            node_executions={},
+            model_invocations={},
         )
         token = _active_trace.set(child)
         try:
@@ -613,6 +624,11 @@ class ExecutionTracer:
         async def traced(state: Any) -> object:
             started_at = self._clock()
             counters = _safe_state_counters(state)
+            active = _active_trace.get()
+            node_execution = 1
+            if active is not None:
+                node_execution = active.node_executions.get(node, 0) + 1
+                active.node_executions[node] = node_execution
             self.emit_event(
                 ExecutionEventType.NODE_STARTED,
                 node=node,
@@ -625,7 +641,7 @@ class ExecutionTracer:
                     result = await result
             except BaseException as error:
                 category, code, outcome = _classify_exception(error)
-                self._emit_model_invocations(node, scope)
+                self._emit_model_invocations(node, node_execution, scope)
                 self.emit_event(
                     ExecutionEventType.NODE_FAILED,
                     outcome=outcome,
@@ -638,7 +654,7 @@ class ExecutionTracer:
                 raise
             finally:
                 close_scope(usage_token)
-            self._emit_model_invocations(node, scope)
+            self._emit_model_invocations(node, node_execution, scope)
             self.emit_event(
                 ExecutionEventType.NODE_COMPLETED,
                 node=node,
@@ -649,34 +665,59 @@ class ExecutionTracer:
 
         return cast(Callable[[Any], object], traced)
 
-    def _emit_model_invocations(self, node: str, scope: ModelUsageScope) -> None:
-        """Drain per-invocation usage as correlated MODEL_INVOCATION events.
+    def _emit_model_invocations(
+        self, node: str, node_execution: int, scope: ModelUsageScope
+    ) -> None:
+        """Emit bounded usage without ever affecting the observed node outcome."""
 
-        Each observation becomes exactly one event, keyed to the currently
-        active run/turn/delegation/branch context; attempts are numbered
-        per node execution so retries never merge or misattribute usage.
-        """
+        active = _active_trace.get()
+        next_invocation = (
+            active.model_invocations.get(node, 0) if active is not None else 0
+        )
         for attempt, observation in enumerate(scope.observations, start=1):
+            next_invocation += 1
             usage = observation.usage or {}
-            self.emit_event(
-                ExecutionEventType.MODEL_INVOCATION,
-                outcome=(
-                    TraceOutcome.PROVIDER_FAILED
-                    if observation.failed
-                    else TraceOutcome.SUCCEEDED
-                ),
-                node=node,
-                model_invocation=ModelInvocationInfo(
-                    schema_name=observation.schema_name,
-                    model=observation.model_name,
-                    attempt=attempt,
-                    duration_ms=observation.duration_ms,
-                    input_tokens=usage.get("input_tokens"),
-                    output_tokens=usage.get("output_tokens"),
-                    total_tokens=usage.get("total_tokens"),
-                    cached_tokens=usage.get("cached_tokens"),
-                    usage_reported=observation.usage is not None,
-                ),
+            try:
+                self.emit_event(
+                    ExecutionEventType.MODEL_INVOCATION,
+                    outcome=(
+                        TraceOutcome.PROVIDER_FAILED
+                        if observation.failed
+                        else TraceOutcome.SUCCEEDED
+                    ),
+                    node=node,
+                    model_invocation=ModelInvocationInfo(
+                        schema_name=observation.schema_name,
+                        model=observation.model_name,
+                        attempt=attempt,
+                        node_execution=node_execution,
+                        invocation=next_invocation,
+                        duration_ms=observation.duration_ms,
+                        input_tokens=usage.get("input_tokens"),
+                        output_tokens=usage.get("output_tokens"),
+                        total_tokens=usage.get("total_tokens"),
+                        cached_tokens=usage.get("cached_tokens"),
+                        cache_creation_tokens=usage.get("cache_creation_tokens"),
+                        usage_reported=observation.usage is not None,
+                        usage_truncated=(
+                            scope.omitted_observations > 0
+                            and attempt == len(scope.observations)
+                        ),
+                        omitted_invocations=(
+                            scope.omitted_observations
+                            if attempt == len(scope.observations)
+                            else 0
+                        ),
+                    ),
+                )
+            except Exception as error:  # noqa: BLE001 - telemetry is fail-open
+                logger.warning(
+                    "Model usage telemetry failed (%s); agent execution continues",
+                    type(error).__name__,
+                )
+        if active is not None:
+            active.model_invocations[node] = (
+                next_invocation + scope.omitted_observations
             )
 
     def wrap_route(

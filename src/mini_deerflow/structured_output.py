@@ -12,7 +12,7 @@ from pydantic import BaseModel, TypeAdapter
 from mini_deerflow.model_usage import (
     ModelUsageObservation,
     UsageRecordingModel,
-    _clean_name,
+    _clean_schema_name,
     _clean_usage,
     current_scope,
     model_name_of,
@@ -74,21 +74,13 @@ class NativeStructuredRawRunnable[SchemaT: BaseModel]:
         scope = current_scope()
         if scope is None:
             return
-        raw = (
-            None
-            if failed
-            else (result or {}).get("raw")
-            if isinstance(result, dict)
-            else None
-        )
-        scope.observations.append(
+        raw = (result or {}).get("raw") if isinstance(result, dict) else None
+        scope.record(
             ModelUsageObservation(
-                schema_name=_clean_name(self._schema_name, 64),
+                schema_name=_clean_schema_name(self._schema_name),
                 model_name=self._model_name,
                 duration_ms=max(0, round((perf_counter() - started) * 1000)),
-                usage=None
-                if failed
-                else _clean_usage(getattr(raw, "usage_metadata", None)),
+                usage=_clean_usage(getattr(raw, "usage_metadata", None)),
                 failed=failed,
             )
         )

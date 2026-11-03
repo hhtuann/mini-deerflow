@@ -93,16 +93,18 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
           </details>}
           <h4>Token usage &amp; cost</h4>
           {usage ? <>
-            <p className="caption">Provider-reported usage for the latest model invocation of this node (attempt {usage.model_attempt} of {invocations.length}).</p>
-            <Fields values={{ Model: usage.model_name, 'Prompt schema': usage.model_schema,
-              'Provider input tokens': usage.usage_reported ? usage.model_input_tokens : 'Not reported',
-              'Provider output tokens': usage.usage_reported ? usage.model_output_tokens : 'Not reported',
-              'Provider total tokens': usage.usage_reported ? usage.model_total_tokens : 'Not reported',
-              'Cached tokens': usage.usage_reported ? (usage.model_cached_tokens ?? 'Not reported') : 'Not reported',
+            <p className="caption">Provider-reported usage for the latest model invocation of this node (Execution {usage.model_execution ?? '—'} · attempt {usage.model_attempt ?? '—'} · invocation {usage.model_invocation ?? '—'}).</p>
+            <Fields values={{ Model: usage.model_name ?? 'Not reported', 'Prompt schema': usage.model_schema ?? 'Not reported',
+              'Provider input tokens': usage.usage_reported ? (usage.model_input_tokens ?? 'Not reported') : 'Not reported',
+              'Provider output tokens': usage.usage_reported ? (usage.model_output_tokens ?? 'Not reported') : 'Not reported',
+              'Provider total tokens': usage.usage_reported ? (usage.model_total_tokens ?? 'Not reported') : 'Not reported',
+              'Cache-read tokens': usage.usage_reported ? (usage.model_cached_tokens ?? 'Not reported') : 'Not reported',
+              'Cache-creation tokens': usage.usage_reported ? (usage.model_cache_creation_tokens ?? 'Not reported') : 'Not reported',
               'Invocation latency (ms)': usage.model_duration_ms,
               'Provider cost': 'Not reported' }} />
+            {usage.model_usage_truncated && <p className="notice">Telemetry bounded: {usage.model_omitted_invocations ?? 0} additional invocation(s) omitted.</p>}
             {invocations.length > 1 && <details><summary>All model invocations ({invocations.length})</summary>
-              <ul>{invocations.map((item, index) => <li key={index}>Attempt {item.model_attempt}: {item.usage_reported ? `${item.model_input_tokens ?? '—'} in / ${item.model_output_tokens ?? '—'} out / ${item.model_total_tokens ?? '—'} total` : 'usage not reported'} · {item.model_duration_ms ?? '—'} ms</li>)}</ul>
+              <ul>{invocations.map((item, index) => <li key={index}>Execution {item.model_execution ?? '—'} · attempt {item.model_attempt ?? '—'} · invocation {item.model_invocation ?? '—'}: {item.usage_reported ? `${item.model_input_tokens ?? 'Not reported'} in / ${item.model_output_tokens ?? 'Not reported'} out / ${item.model_total_tokens ?? 'Not reported'} total` : 'usage not reported'} · {item.model_duration_ms ?? '—'} ms</li>)}</ul>
             </details>}
           </> : <Fields values={{ 'Actual prompt tokens': 'Not reported', 'Actual completion tokens': 'Not reported',
             'Actual total tokens': 'Not reported', 'Provider cost': 'Not reported' }} />}

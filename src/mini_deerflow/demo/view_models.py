@@ -186,11 +186,16 @@ class TraceEventView:
     model_schema: str | None = None
     model_name: str | None = None
     model_attempt: int | None = None
+    model_execution: int | None = None
+    model_invocation: int | None = None
     model_duration_ms: int | None = None
     model_input_tokens: int | None = None
     model_output_tokens: int | None = None
     model_total_tokens: int | None = None
     model_cached_tokens: int | None = None
+    model_cache_creation_tokens: int | None = None
+    model_usage_truncated: bool | None = None
+    model_omitted_invocations: int | None = None
     usage_reported: bool | None = None
 
 
@@ -392,6 +397,12 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
         model_attempt=getattr(
             getattr(event, "model_invocation", None), "attempt", None
         ),
+        model_execution=getattr(
+            getattr(event, "model_invocation", None), "node_execution", None
+        ),
+        model_invocation=getattr(
+            getattr(event, "model_invocation", None), "invocation", None
+        ),
         model_duration_ms=getattr(
             getattr(event, "model_invocation", None), "duration_ms", None
         ),
@@ -406,6 +417,15 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
         ),
         model_cached_tokens=getattr(
             getattr(event, "model_invocation", None), "cached_tokens", None
+        ),
+        model_cache_creation_tokens=getattr(
+            getattr(event, "model_invocation", None), "cache_creation_tokens", None
+        ),
+        model_usage_truncated=getattr(
+            getattr(event, "model_invocation", None), "usage_truncated", None
+        ),
+        model_omitted_invocations=getattr(
+            getattr(event, "model_invocation", None), "omitted_invocations", None
         ),
         usage_reported=getattr(
             getattr(event, "model_invocation", None), "usage_reported", None

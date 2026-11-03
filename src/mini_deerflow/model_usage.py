@@ -19,9 +19,10 @@ from typing import Any
 MAX_TOKENS_VALUE = 10_000_000_000
 MAX_MODEL_NAME_CHARS = 64
 MAX_SCHEMA_NAME_CHARS = 64
+MAX_OBSERVATIONS_PER_SCOPE = 100
 
 # Usage keys accepted from ``AIMessage.usage_metadata`` (SDK-reported only).
-_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens", "cached_tokens")
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
 
 
 def _clean_int(value: object) -> int | None:
@@ -34,10 +35,20 @@ def _clean_int(value: object) -> int | None:
     return value
 
 
-def _clean_usage(usage: object) -> dict[str, int] | None:
+def _clean_usage(usage: object) -> dict[str, int | None] | None:
     if not isinstance(usage, dict):
         return None
-    cleaned = {key: _clean_int(usage.get(key)) for key in _USAGE_KEYS}
+    cleaned: dict[str, int | None] = {
+        key: _clean_int(usage.get(key)) for key in _USAGE_KEYS
+    }
+    details = usage.get("input_token_details")
+    if isinstance(details, dict):
+        cleaned["cached_tokens"] = _clean_int(details.get("cache_read"))
+        cleaned["cache_creation_tokens"] = _clean_int(details.get("cache_creation"))
+    else:
+        # Backward-compatible provider payloads may report cache reads directly.
+        cleaned["cached_tokens"] = _clean_int(usage.get("cached_tokens"))
+        cleaned["cache_creation_tokens"] = None
     if all(value is None for value in cleaned.values()):
         return None
     return cleaned
@@ -47,9 +58,29 @@ def _clean_name(value: object, limit: int) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip()
-    if not normalized or any(ord(char) < 32 for char in normalized):
+    if (
+        not normalized
+        or any(ord(char) < 32 for char in normalized)
+        or not normalized[0].isalnum()
+        or any(
+            not (char.isascii() and (char.isalnum() or char in "._ /-"))
+            for char in normalized
+        )
+    ):
         return None
     return normalized[:limit]
+
+
+def _clean_schema_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > MAX_SCHEMA_NAME_CHARS:
+        return None
+    candidate = normalized.removeprefix("_")
+    if not candidate or not candidate[0].isalpha() or not candidate.isidentifier():
+        return None
+    return normalized
 
 
 @dataclass(slots=True)
@@ -59,15 +90,22 @@ class ModelUsageObservation:
     schema_name: str | None
     model_name: str | None
     duration_ms: int | None = None
-    usage: dict[str, int] | None = None
+    usage: dict[str, int | None] | None = None
     failed: bool = False
 
 
 @dataclass(slots=True)
 class ModelUsageScope:
-    """Node-scoped collector; one scope per executing graph node."""
+    """Node-scoped bounded collector; omitted observations are counted."""
 
     observations: list[ModelUsageObservation] = field(default_factory=list)
+    omitted_observations: int = 0
+
+    def record(self, observation: ModelUsageObservation) -> None:
+        if len(self.observations) < MAX_OBSERVATIONS_PER_SCOPE:
+            self.observations.append(observation)
+        else:
+            self.omitted_observations += 1
 
 
 _scope: ContextVar[ModelUsageScope | None] = ContextVar(
@@ -123,11 +161,10 @@ class UsageRecordingModel:
         usage = (
             None if failed else _clean_usage(getattr(response, "usage_metadata", None))
         )
-        scope.observations.append(
+        scope.record(
             ModelUsageObservation(
-                schema_name=_clean_name(
-                    object.__getattribute__(self, "_schema_name"),
-                    MAX_SCHEMA_NAME_CHARS,
+                schema_name=_clean_schema_name(
+                    object.__getattribute__(self, "_schema_name")
                 ),
                 model_name=model_name_of(object.__getattribute__(self, "_model")),
                 duration_ms=max(0, round((perf_counter() - started) * 1000)),

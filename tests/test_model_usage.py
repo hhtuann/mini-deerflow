@@ -12,14 +12,17 @@ from typing import Any
 
 import pytest
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, UsageMetadata
 from pydantic import BaseModel, ValidationError
 
 from mini_deerflow.model_usage import (
+    MAX_OBSERVATIONS_PER_SCOPE,
+    ModelUsageObservation,
     UsageRecordingModel,
     _clean_int,
     _clean_usage,
     close_scope,
+    current_scope,
     model_name_of,
     open_scope,
 )
@@ -51,14 +54,14 @@ class _Plan(BaseModel):
 
 
 def _message(usage: dict[str, int] | None = None, content: str = "{}") -> AIMessage:
-    # langchain-core's UsageMetadata requires input/output/total keys.
+    # Mirror langchain-core 1.6.x UsageMetadata exactly.
     if usage is not None:
         usage = {
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
             **(
-                {"cached_tokens": usage["cached_tokens"]}
+                {"input_token_details": {"cache_read": usage["cached_tokens"]}}
                 if "cached_tokens" in usage
                 else {}
             ),
@@ -158,12 +161,14 @@ def test_clean_usage_requires_sdk_dictionary_with_valid_fields():
         "output_tokens": None,
         "total_tokens": None,
         "cached_tokens": None,
+        "cache_creation_tokens": None,
     }
     assert _clean_usage({"total_tokens": 0}) == {
         "input_tokens": None,
         "output_tokens": None,
         "total_tokens": 0,
         "cached_tokens": None,
+        "cache_creation_tokens": None,
     }
 
 
@@ -201,6 +206,7 @@ def test_recording_delegate_captures_usage_per_invocation():
         "output_tokens": 5,
         "total_tokens": 15,
         "cached_tokens": None,
+        "cache_creation_tokens": None,
     }
     assert observation.failed is False
     assert observation.duration_ms is not None and observation.duration_ms >= 0
@@ -282,6 +288,7 @@ def test_native_seam_preserves_parsed_output_and_records_usage():
         "output_tokens": 2,
         "total_tokens": 6,
         "cached_tokens": None,
+        "cache_creation_tokens": None,
     }
 
 
@@ -622,3 +629,174 @@ def test_projected_view_defaults_usage_fields_to_none_for_legacy_events():
     assert view.model_attempt is None
     assert view.model_input_tokens is None
     assert view.usage_reported is None
+
+
+# ---------------------------------------------------------------------------
+# Independent-review regressions F1-F6
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["llama3.1:8b", "claude-3-5@sonnet", "модель-5", ".hidden-model"],
+)
+def test_unsupported_model_identity_never_breaks_successful_node(model_name: str):
+    """F1: provider identity is optional telemetry, never execution control."""
+
+    sink = _Sink()
+    tracer = ExecutionTracer(sink)
+    model = FakePromptJsonModel([_message({"total_tokens": 3})])
+    model.model_name = model_name
+    runnable = create_structured_output_runnable(
+        model, _Plan, method="json_mode", mode="prompt_json"
+    )
+
+    def handler(state: Any) -> dict[str, bool]:
+        runnable.invoke([])
+        return {"preserved": True}
+
+    with tracer.run_scope("t", "run", turn_id="turn"):
+        result = asyncio.run(tracer.wrap_node("planner", handler)({}))
+
+    assert result == {"preserved": True}
+    info = _model_events(sink.events)[0].model_invocation
+    assert info.model is None
+    assert any(e.event_type is ExecutionEventType.NODE_COMPLETED for e in sink.events)
+
+
+def test_telemetry_failure_never_replaces_original_provider_exception(monkeypatch):
+    """F2: even event materialization failure is strictly best effort."""
+
+    sink = _Sink()
+    tracer = ExecutionTracer(sink)
+    model = FakePromptJsonModel([RuntimeError("original provider failure")])
+    model.model_name = "llama3.1:8b"
+    runnable = create_structured_output_runnable(
+        model, _Plan, method="json_mode", mode="prompt_json"
+    )
+
+    original_emit = tracer.emit_event
+
+    def flaky_emit(event_type: ExecutionEventType, **fields: object) -> None:
+        if event_type is ExecutionEventType.MODEL_INVOCATION:
+            raise ValidationError.from_exception_data("telemetry", [])
+        original_emit(event_type, **fields)
+
+    monkeypatch.setattr(tracer, "emit_event", flaky_emit)
+
+    def handler(state: Any) -> dict[str, Any]:
+        runnable.invoke([])
+        return {}
+
+    with (
+        pytest.raises(RuntimeError, match="original provider failure"),
+        tracer.run_scope("t", "run", turn_id="turn"),
+    ):
+        asyncio.run(tracer.wrap_node("planner", handler)({}))
+
+    assert any(e.event_type is ExecutionEventType.NODE_FAILED for e in sink.events)
+
+
+def test_real_sdk_cache_read_and_creation_remain_distinct():
+    """F3: locked UsageMetadata details are authoritative and not aggregated."""
+
+    usage = UsageMetadata(
+        input_tokens=100,
+        output_tokens=10,
+        total_tokens=110,
+        input_token_details={"cache_read": 64, "cache_creation": 8},
+    )
+    assert _clean_usage(usage) == {
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "total_tokens": 110,
+        "cached_tokens": 64,
+        "cache_creation_tokens": 8,
+    }
+
+
+def test_native_parse_failure_preserves_raw_reported_usage():
+    """F4: parsing failed, but the successful provider call still consumed tokens."""
+
+    raw = AIMessage(
+        content="not json",
+        usage_metadata={"input_tokens": 500, "output_tokens": 50, "total_tokens": 550},
+    )
+
+    class _ParseFailureRunnable:
+        def invoke(self, messages: object) -> object:
+            return {
+                "raw": raw,
+                "parsed": None,
+                "parsing_error": OutputParserException("bad json"),
+            }
+
+    runnable = NativeStructuredRawRunnable(
+        _ParseFailureRunnable(), schema_name="Plan", model_name="glm-5.3"
+    )
+    scope, token = open_scope()
+    try:
+        with pytest.raises(OutputParserException, match="bad json"):
+            runnable.invoke([])
+    finally:
+        close_scope(token)
+    assert scope.observations[0].failed is True
+    assert scope.observations[0].usage == {
+        "input_tokens": 500,
+        "output_tokens": 50,
+        "total_tokens": 550,
+        "cached_tokens": None,
+        "cache_creation_tokens": None,
+    }
+
+
+def test_usage_scope_bounds_observations_and_reports_omissions_without_failure():
+    """F5: bounded diagnostics never clamp or break a 101+ invocation node."""
+
+    sink = _Sink()
+    tracer = ExecutionTracer(sink)
+
+    def handler(state: Any) -> dict[str, bool]:
+        scope = current_scope()
+        assert scope is not None
+        for _ in range(MAX_OBSERVATIONS_PER_SCOPE + 1):
+            scope.record(ModelUsageObservation("Plan", "glm-5.3"))
+        return {"preserved": True}
+
+    with tracer.run_scope("t", "run", turn_id="turn"):
+        result = asyncio.run(tracer.wrap_node("planner", handler)({}))
+
+    assert result == {"preserved": True}
+    events = _model_events(sink.events)
+    assert len(events) == MAX_OBSERVATIONS_PER_SCOPE
+    assert [event.model_invocation.attempt for event in events] == list(
+        range(1, MAX_OBSERVATIONS_PER_SCOPE + 1)
+    )
+    assert events[-1].model_invocation.usage_truncated is True
+    assert events[-1].model_invocation.omitted_invocations == 1
+
+
+def test_reexecuted_node_has_stable_execution_and_invocation_identity():
+    """F6: repeated execution is unambiguous without crossing run boundaries."""
+
+    sink = _Sink()
+    tracer = ExecutionTracer(sink)
+    model = FakePromptJsonModel([_message({"total_tokens": 1})] * 2)
+    runnable = create_structured_output_runnable(
+        model, _Plan, method="json_mode", mode="prompt_json"
+    )
+
+    def handler(state: Any) -> dict[str, Any]:
+        runnable.invoke([])
+        return {}
+
+    with tracer.run_scope("t", "run", turn_id="turn"):
+        traced = tracer.wrap_node("replan", handler)
+        asyncio.run(traced({}))
+        asyncio.run(traced({}))
+
+    infos = [event.model_invocation for event in _model_events(sink.events)]
+    assert [(i.node_execution, i.attempt, i.invocation) for i in infos] == [
+        (1, 1, 1),
+        (2, 1, 2),
+    ]
