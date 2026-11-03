@@ -60,9 +60,11 @@ def test_create_research_plan_sends_goal_and_tool_catalog() -> None:
 
     assert actual_plan == expected_plan
 
+    # include_raw=True captures provider usage without changing outputs.
     model.with_structured_output.assert_called_once_with(
         Plan,
         method="json_mode",
+        include_raw=True,
     )
 
     structured_model.invoke.assert_called_once()

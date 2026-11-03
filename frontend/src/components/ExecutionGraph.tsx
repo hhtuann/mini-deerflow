@@ -22,6 +22,8 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
     : [];
   const context = [...events].reverse().find((event) => event.context_estimated_tokens != null || event.context_payload_chars != null);
   const latest = events.at(-1);
+  const invocations = !isWorkflow ? traces.filter((event) => event.kind === 'model' && event.node != null && node?.id === `workflow:${event.run_id}:${event.node}`) : [];
+  const usage = invocations.at(-1);
   const { nodes, edges } = useMemo(() => {
     const layout = new dagre.graphlib.Graph().setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 65 }).setDefaultEdgeLabel(() => ({}));
     graph.nodes.forEach((item) => layout.setNode(item.id, { width: 180, height: 75 }));
@@ -90,8 +92,22 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
             <ul>{run.artifact.finding_summaries.slice(0, 5).map((finding, index) => <li key={index}>{finding}</li>)}</ul>
           </details>}
           <h4>Token usage &amp; cost</h4>
-          <Fields values={{ 'Actual prompt tokens': 'Not reported', 'Actual completion tokens': 'Not reported',
-            'Actual total tokens': 'Not reported', 'Provider cost': 'Not reported' }} />
+          {usage ? <>
+            <p className="caption">Provider-reported usage for the latest model invocation of this node (Execution {usage.model_execution ?? '—'} · attempt {usage.model_attempt ?? '—'} · invocation {usage.model_invocation ?? '—'}).</p>
+            <Fields values={{ Model: usage.model_name ?? 'Not reported', 'Prompt schema': usage.model_schema ?? 'Not reported',
+              'Provider input tokens': usage.usage_reported ? (usage.model_input_tokens ?? 'Not reported') : 'Not reported',
+              'Provider output tokens': usage.usage_reported ? (usage.model_output_tokens ?? 'Not reported') : 'Not reported',
+              'Provider total tokens': usage.usage_reported ? (usage.model_total_tokens ?? 'Not reported') : 'Not reported',
+              'Cache-read tokens': usage.usage_reported ? (usage.model_cached_tokens ?? 'Not reported') : 'Not reported',
+              'Cache-creation tokens': usage.usage_reported ? (usage.model_cache_creation_tokens ?? 'Not reported') : 'Not reported',
+              'Invocation latency (ms)': usage.model_duration_ms,
+              'Provider cost': 'Not reported' }} />
+            {usage.model_usage_truncated && <p className="notice">Telemetry bounded: {usage.model_omitted_invocations ?? 0} additional invocation(s) omitted.</p>}
+            {invocations.length > 1 && <details><summary>All model invocations ({invocations.length})</summary>
+              <ul>{invocations.map((item, index) => <li key={index}>Execution {item.model_execution ?? '—'} · attempt {item.model_attempt ?? '—'} · invocation {item.model_invocation ?? '—'}: {item.usage_reported ? `${item.model_input_tokens ?? 'Not reported'} in / ${item.model_output_tokens ?? 'Not reported'} out / ${item.model_total_tokens ?? 'Not reported'} total` : 'usage not reported'} · {item.model_duration_ms ?? '—'} ms</li>)}</ul>
+            </details>}
+          </> : <Fields values={{ 'Actual prompt tokens': 'Not reported', 'Actual completion tokens': 'Not reported',
+            'Actual total tokens': 'Not reported', 'Provider cost': 'Not reported' }} />}
           {context?.context_estimated_tokens != null && <Fields values={{ 'Context estimate (chars / 4; NOT billed tokens)': context.context_estimated_tokens }} />}
           <p className="caption">Only provider-reported usage could count as real tokens or cost. No estimates are presented as measurements.</p>
         </>}
