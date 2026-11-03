@@ -132,7 +132,12 @@ def current_scope() -> ModelUsageScope | None:
 
 
 def model_name_of(model: object) -> str | None:
-    return _clean_name(getattr(model, "model_name", None), MAX_MODEL_NAME_CHARS)
+    """Read optional provider identity without affecting model execution."""
+
+    try:
+        return _clean_name(getattr(model, "model_name", None), MAX_MODEL_NAME_CHARS)
+    except BaseException:  # noqa: BLE001 - optional telemetry must never escape
+        return None
 
 
 class UsageRecordingModel:
@@ -155,23 +160,30 @@ class UsageRecordingModel:
     def _record(
         self, response: object, started: float, *, failed: bool = False
     ) -> None:
-        scope = _scope.get()
-        if scope is None:
-            return
-        usage = (
-            None if failed else _clean_usage(getattr(response, "usage_metadata", None))
-        )
-        scope.record(
-            ModelUsageObservation(
-                schema_name=_clean_schema_name(
-                    object.__getattribute__(self, "_schema_name")
-                ),
-                model_name=model_name_of(object.__getattribute__(self, "_model")),
-                duration_ms=max(0, round((perf_counter() - started) * 1000)),
-                usage=usage,
-                failed=failed,
+        """Record best-effort telemetry without changing provider behavior."""
+
+        try:
+            scope = _scope.get()
+            if scope is None:
+                return
+            usage = (
+                None
+                if failed
+                else _clean_usage(getattr(response, "usage_metadata", None))
             )
-        )
+            scope.record(
+                ModelUsageObservation(
+                    schema_name=_clean_schema_name(
+                        object.__getattribute__(self, "_schema_name")
+                    ),
+                    model_name=model_name_of(object.__getattribute__(self, "_model")),
+                    duration_ms=max(0, round((perf_counter() - started) * 1000)),
+                    usage=usage,
+                    failed=failed,
+                )
+            )
+        except BaseException:  # noqa: BLE001 - optional telemetry must never escape
+            return
 
     def invoke(self, messages: object, *args: object, **kwargs: object) -> object:
         started = perf_counter()

@@ -71,19 +71,24 @@ class NativeStructuredRawRunnable[SchemaT: BaseModel]:
         self._model_name = model_name
 
     def _record(self, result: object, started: float, *, failed: bool) -> None:
-        scope = current_scope()
-        if scope is None:
-            return
-        raw = (result or {}).get("raw") if isinstance(result, dict) else None
-        scope.record(
-            ModelUsageObservation(
-                schema_name=_clean_schema_name(self._schema_name),
-                model_name=self._model_name,
-                duration_ms=max(0, round((perf_counter() - started) * 1000)),
-                usage=_clean_usage(getattr(raw, "usage_metadata", None)),
-                failed=failed,
+        """Record best-effort telemetry without changing runnable behavior."""
+
+        try:
+            scope = current_scope()
+            if scope is None:
+                return
+            raw = (result or {}).get("raw") if isinstance(result, dict) else None
+            scope.record(
+                ModelUsageObservation(
+                    schema_name=_clean_schema_name(self._schema_name),
+                    model_name=self._model_name,
+                    duration_ms=max(0, round((perf_counter() - started) * 1000)),
+                    usage=_clean_usage(getattr(raw, "usage_metadata", None)),
+                    failed=failed,
+                )
             )
-        )
+        except BaseException:  # noqa: BLE001 - optional telemetry must never escape
+            return
 
     def _extract(self, result: object, started: float) -> SchemaT:
         if not isinstance(result, dict) or not self._IS_RAW_SHAPE.match(

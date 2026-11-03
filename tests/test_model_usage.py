@@ -800,3 +800,123 @@ def test_reexecuted_node_has_stable_execution_and_invocation_identity():
         (1, 1, 1),
         (2, 1, 2),
     ]
+
+
+class _ExplodingUsageResponse:
+    content = '{"goal":"preserved"}'
+
+    @property
+    def usage_metadata(self) -> object:
+        raise RuntimeError("usage metadata getter exploded")
+
+
+class _ExplodingModelNamePromptModel(FakePromptJsonModel):
+    @property
+    def model_name(self) -> str:
+        raise RuntimeError("model name getter exploded")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_prompt_json_metadata_getters_never_replace_success(
+    asynchronous: bool,
+):
+    """F1/F2: collection is observational in sync and async prompt-json calls."""
+
+    model = _ExplodingModelNamePromptModel([_ExplodingUsageResponse()])
+    runnable = create_structured_output_runnable(
+        model, _Plan, method="json_mode", mode="prompt_json"
+    )
+    scope, token = open_scope()
+    try:
+        result = (
+            asyncio.run(runnable.ainvoke([]))
+            if asynchronous
+            else runnable.invoke([])
+        )
+    finally:
+        close_scope(token)
+
+    assert result == _Plan(goal="preserved")
+    assert scope.observations == []
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_prompt_json_metadata_getter_never_replaces_provider_exception(
+    asynchronous: bool,
+):
+    """F2: telemetry cannot mask the provider's original exception."""
+
+    original = ValueError("original provider failure")
+    model = _ExplodingModelNamePromptModel([original])
+    runnable = create_structured_output_runnable(
+        model, _Plan, method="json_mode", mode="prompt_json"
+    )
+    scope, token = open_scope()
+    try:
+        with pytest.raises(ValueError, match="original provider failure") as raised:
+            if asynchronous:
+                asyncio.run(runnable.ainvoke([]))
+            else:
+                runnable.invoke([])
+    finally:
+        close_scope(token)
+
+    assert raised.value is original
+    assert len(scope.observations) == 1
+    assert scope.observations[0].failed is True
+    assert scope.observations[0].model_name is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_native_metadata_getter_never_replaces_parsed_success(
+    asynchronous: bool,
+):
+    """F1/F2: native raw metadata cannot replace a valid parsed result."""
+
+    parsed = _Plan(goal="preserved")
+
+    class _Runnable:
+        def invoke(self, messages: object) -> object:
+            return {"raw": _ExplodingUsageResponse(), "parsed": parsed}
+
+        async def ainvoke(self, messages: object) -> object:
+            return self.invoke(messages)
+
+    runnable = NativeStructuredRawRunnable(
+        _Runnable(), schema_name="Plan", model_name="safe-model"
+    )
+    scope, token = open_scope()
+    try:
+        result = (
+            asyncio.run(runnable.ainvoke([]))
+            if asynchronous
+            else runnable.invoke([])
+        )
+    finally:
+        close_scope(token)
+
+    assert result is parsed
+    assert scope.observations == []
+
+
+def test_native_construction_ignores_exploding_model_name_getter():
+    """F1: optional identity lookup cannot prevent runnable construction."""
+
+    parsed = _Plan(goal="preserved")
+
+    class _Model(FakeNativeModel):
+        @property
+        def model_name(self) -> str:
+            raise RuntimeError("model name getter exploded")
+
+    runnable = create_structured_output_runnable(
+        _Model(parsed=parsed), _Plan, method="json_mode", mode="native"
+    )
+    scope, token = open_scope()
+    try:
+        result = runnable.invoke([])
+    finally:
+        close_scope(token)
+
+    assert result is parsed
+    assert scope.observations[0].model_name is None
