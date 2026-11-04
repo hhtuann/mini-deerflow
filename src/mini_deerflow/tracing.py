@@ -50,6 +50,7 @@ class TraceKind(str, Enum):
     FAN_IN = "fan_in"
     EVIDENCE = "evidence"
     MODEL = "model"
+    SYNTHESIS = "synthesis"
 
 
 class TracePhase(str, Enum):
@@ -81,6 +82,7 @@ class TraceOutcome(str, Enum):
     NOT_REQUESTED = "not_requested"
     SELECTED = "selected"
     CANCELLED = "cancelled"
+    FALLBACK = "fallback"
 
 
 class TraceErrorCategory(str, Enum):
@@ -151,6 +153,7 @@ class ExecutionEventType(str, Enum):
     CITATION_VALIDATED = "citation_validated"
     ARTIFACT_COMPLETED = "artifact_completed"
     MODEL_INVOCATION = "model_invocation"
+    SYNTHESIS_FALLBACK = "synthesis_fallback"
 
 
 class ExecutionStatus(str, Enum):
@@ -203,6 +206,49 @@ class ModelInvocationInfo(BaseModel):
     usage_reported: bool = False
     usage_truncated: bool = False
     omitted_invocations: int = Field(default=0, ge=0)
+
+
+# Closed classification literals for post-invocation synthesis validation
+# failures. These are diagnostic identities only — never text, payloads or
+# provider data. ``MODEL_INVOCATION`` outcomes stay provider-scoped: a
+# succeeded invocation can still fail in-app validation afterwards.
+SynthesisFailureCategoryValue = Literal[
+    "json_invalid",
+    "schema_invalid",
+    "grounding_invalid",
+    "provider_error",
+    "empty_content",
+]
+SynthesisFailureReasonValue = Literal[
+    "language_mismatch",
+    "evidence_index_out_of_range",
+    "url_in_prose",
+    "contradiction_required",
+]
+MAX_SYNTHESIS_ATTEMPT_RECORDS = 5
+
+
+class SynthesisAttemptFailure(BaseModel):
+    """One failed synthesis attempt: closed identity, bounded size."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: int = Field(ge=1, le=100)
+    category: SynthesisFailureCategoryValue
+    reason: SynthesisFailureReasonValue | None = None
+
+
+class SynthesisFailureInfo(BaseModel):
+    """Closed fallback diagnostic attached to a synthesis_fallback event."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    category: SynthesisFailureCategoryValue
+    reason: SynthesisFailureReasonValue | None = None
+    attempts: list[SynthesisAttemptFailure] = Field(
+        default_factory=list,
+        max_length=MAX_SYNTHESIS_ATTEMPT_RECORDS,
+    )
 
 
 _SAFE_METADATA_KEYS = frozenset(
@@ -322,6 +368,7 @@ class ExecutionEvent(BaseModel):
     error_category: TraceErrorCategory | None = None
     error_code: TraceErrorCode | None = None
     model_invocation: ModelInvocationInfo | None = None
+    synthesis_failure: SynthesisFailureInfo | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -891,6 +938,7 @@ def _event_type_from_parts(
         TraceKind.CITATION: ExecutionEventType.CITATION_VALIDATED,
         TraceKind.ARTIFACT: ExecutionEventType.ARTIFACT_COMPLETED,
         TraceKind.MODEL: ExecutionEventType.MODEL_INVOCATION,
+        TraceKind.SYNTHESIS: ExecutionEventType.SYNTHESIS_FALLBACK,
     }[kind]
 
 
@@ -961,6 +1009,11 @@ def _legacy_shape_for_event(
             TraceKind.MODEL,
             TracePhase.OUTCOME,
             TraceOutcome.SUCCEEDED,
+        ),
+        ExecutionEventType.SYNTHESIS_FALLBACK: (
+            TraceKind.SYNTHESIS,
+            TracePhase.OUTCOME,
+            TraceOutcome.FALLBACK,
         ),
         ExecutionEventType.FAN_IN_COMPLETED: (
             TraceKind.FAN_IN,

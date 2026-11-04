@@ -1,6 +1,9 @@
 """Evidence-grounded, language-aware public answer synthesis."""
 
+import json
 import re
+from dataclasses import dataclass
+from enum import Enum
 from typing import Annotated, Protocol, runtime_checkable
 
 from langchain_core.exceptions import OutputParserException
@@ -182,8 +185,68 @@ class AnswerSynthesisContext(SynthesisModel):
     context_projection: ProjectionMetadata | None = None
 
 
+class SynthesisFailureCategory(str, Enum):
+    """Closed classification for one synthesis attempt failure."""
+
+    JSON_INVALID = "json_invalid"
+    SCHEMA_INVALID = "schema_invalid"
+    GROUNDING_INVALID = "grounding_invalid"
+    PROVIDER_ERROR = "provider_error"
+    EMPTY_CONTENT = "empty_content"
+
+
+class SynthesisFailureReason(str, Enum):
+    """Closed grounding sub-reason; never free text."""
+
+    LANGUAGE_MISMATCH = "language_mismatch"
+    EVIDENCE_INDEX_OUT_OF_RANGE = "evidence_index_out_of_range"
+    URL_IN_PROSE = "url_in_prose"
+    CONTRADICTION_REQUIRED = "contradiction_required"
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesisAttemptFailure:
+    """One failed attempt: bounded identity only, no payload or message."""
+
+    attempt: int
+    category: SynthesisFailureCategory
+    reason: SynthesisFailureReason | None = None
+
+
+class GroundingValidationError(ValueError):
+    """A schema-valid draft failed trusted grounding validation."""
+
+    def __init__(self, message: str, *, reason: SynthesisFailureReason) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class AnswerSynthesisFormatError(RuntimeError):
     """Raised when model output cannot become a grounded public answer."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: SynthesisFailureCategory = SynthesisFailureCategory.SCHEMA_INVALID,
+        reason: SynthesisFailureReason | None = None,
+        attempt_failures: tuple[SynthesisAttemptFailure, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.category = SynthesisFailureCategory(category)
+        self.reason = SynthesisFailureReason(reason) if reason is not None else None
+        self.attempt_failures = tuple(
+            SynthesisAttemptFailure(
+                attempt=item.attempt,
+                category=SynthesisFailureCategory(item.category),
+                reason=(
+                    SynthesisFailureReason(item.reason)
+                    if item.reason is not None
+                    else None
+                ),
+            )
+            for item in attempt_failures
+        )
 
 
 @runtime_checkable
@@ -212,7 +275,10 @@ def infer_answer_language(goal: str) -> AnswerLanguage:
 
 def _validate_prose(value: str) -> str:
     if _URL_PATTERN.search(value):
-        raise ValueError("synthesized prose must not contain URLs")
+        raise GroundingValidationError(
+            "synthesized prose must not contain URLs",
+            reason=SynthesisFailureReason.URL_IN_PROSE,
+        )
     return value
 
 
@@ -223,7 +289,10 @@ def validate_answer_draft(
     """Map only valid evidence indices to citations owned by the runtime."""
 
     if draft.language != context.language:
-        raise ValueError("synthesized language does not match requested language")
+        raise GroundingValidationError(
+            "synthesized language does not match requested language",
+            reason=SynthesisFailureReason.LANGUAGE_MISMATCH,
+        )
     if (
         any(
             limitation.casefold().startswith("[contradiction]")
@@ -231,13 +300,19 @@ def validate_answer_draft(
         )
         and not draft.discrepancies
     ):
-        raise ValueError("known contradictions must be rendered explicitly")
+        raise GroundingValidationError(
+            "known contradictions must be rendered explicitly",
+            reason=SynthesisFailureReason.CONTRADICTION_REQUIRED,
+        )
 
     def citations(indices: list[int]) -> list[str]:
         resolved: list[str] = []
         for index in indices:
             if isinstance(index, bool) or index < 1 or index > len(context.evidence):
-                raise ValueError(f"evidence index {index!r} is outside the context")
+                raise GroundingValidationError(
+                    f"evidence index {index!r} is outside the context",
+                    reason=SynthesisFailureReason.EVIDENCE_INDEX_OUT_OF_RANGE,
+                )
             url = context.evidence[index - 1].canonical_url
             if url not in resolved:
                 resolved.append(url)
@@ -335,6 +410,7 @@ class LLMAnswerSynthesizer:
             ),
         ]
         last_error: Exception | None = None
+        attempt_failures: list[SynthesisAttemptFailure] = []
         for attempt in range(1, SYNTHESIS_MAX_ATTEMPTS + 1):
             messages = (
                 [
@@ -354,8 +430,43 @@ class LLMAnswerSynthesizer:
                 return validate_answer_draft(draft, context)
             except (OutputParserException, ValidationError, ValueError) as error:
                 last_error = error
+                category, reason = _classify_validation_failure(error)
+                attempt_failures.append(
+                    SynthesisAttemptFailure(
+                        attempt=attempt,
+                        category=category,
+                        reason=reason,
+                    )
+                )
 
+        final_failure = attempt_failures[-1] if attempt_failures else None
         raise AnswerSynthesisFormatError(
             "Model returned an invalid answer synthesis after "
-            f"{SYNTHESIS_MAX_ATTEMPTS} attempts"
+            f"{SYNTHESIS_MAX_ATTEMPTS} attempts",
+            category=(
+                final_failure.category
+                if final_failure
+                else SynthesisFailureCategory.SCHEMA_INVALID
+            ),
+            reason=final_failure.reason if final_failure else None,
+            attempt_failures=tuple(attempt_failures),
         ) from last_error
+
+
+def _classify_validation_failure(
+    error: Exception,
+) -> tuple[SynthesisFailureCategory, SynthesisFailureReason | None]:
+    """Map one retriable failure to a closed category; never its text."""
+
+    if isinstance(error, GroundingValidationError):
+        return SynthesisFailureCategory.GROUNDING_INVALID, error.reason
+    if isinstance(error, ValidationError):
+        error_types = {item.get("type") for item in error.errors()}
+        if "json_invalid" in error_types:
+            return SynthesisFailureCategory.JSON_INVALID, None
+        return SynthesisFailureCategory.SCHEMA_INVALID, None
+    if isinstance(error, OutputParserException):
+        if isinstance(error.__cause__, json.JSONDecodeError):
+            return SynthesisFailureCategory.JSON_INVALID, None
+        return SynthesisFailureCategory.SCHEMA_INVALID, None
+    return SynthesisFailureCategory.GROUNDING_INVALID, None

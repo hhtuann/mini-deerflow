@@ -21,6 +21,14 @@ from mini_deerflow.model_usage import (
 StructuredOutputMode = Literal["native", "prompt_json"]
 
 
+class EmptyModelContentError(TypeError):
+    """Model answered with no usable text content.
+
+    Subclasses :class:`TypeError` so existing except-clauses and retry
+    semantics elsewhere are unchanged; it only carries a closed type name.
+    """
+
+
 @runtime_checkable
 class PromptJsonModel(Protocol):
     """Minimum live-model surface needed for JSON specified in the prompt."""
@@ -152,7 +160,7 @@ class PromptJsonStructuredRunnable[SchemaT: BaseModel]:
     def _parse(self, response: object) -> SchemaT:
         content = _text_content(getattr(response, "content", response))
         if content is None:
-            raise TypeError("model response content must be text")
+            raise EmptyModelContentError("model response content must be text")
         normalized = _strip_code_fence(content)
         try:
             payload = json.loads(normalized)
