@@ -19,6 +19,7 @@ export const trace: TraceEvent = {
   model_input_tokens: null, model_output_tokens: null, model_total_tokens: null,
   model_cached_tokens: null, model_cache_creation_tokens: null, model_usage_truncated: null,
   model_omitted_invocations: null, usage_reported: null,
+  synthesis_fallback: null, synthesis_category: null, synthesis_reason: null, synthesis_attempts: null,
 };
 export const run: RunView = {
   thread_id: 'chat-one', turn_id: 'turn-one', operation: 'run', workflow_status: 'completed', goal: 'Research a useful topic',

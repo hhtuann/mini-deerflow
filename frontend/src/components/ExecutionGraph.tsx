@@ -24,6 +24,8 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
   const latest = events.at(-1);
   const invocations = !isWorkflow ? traces.filter((event) => event.kind === 'model' && event.node != null && node?.id === `workflow:${event.run_id}:${event.node}`) : [];
   const usage = invocations.at(-1);
+  const fallbackEvents = !isWorkflow ? traces.filter((event) => event.kind === 'synthesis' && event.node != null && node?.id === `workflow:${event.run_id}:${event.node}`) : [];
+  const fallback = fallbackEvents.at(-1);
   const { nodes, edges } = useMemo(() => {
     const layout = new dagre.graphlib.Graph().setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 65 }).setDefaultEdgeLabel(() => ({}));
     graph.nodes.forEach((item) => layout.setNode(item.id, { width: 180, height: 75 }));
@@ -77,6 +79,12 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
           <Fields values={{ Kind: node.kind, Parent: node.parent_id, Started: node.started_at,
             Completed: node.completed_at, 'Duration (ms)': node.duration_ms,
             'Last trace outcome': latest?.outcome, 'Error category': latest?.error_category, 'Error code': latest?.error_code }} />
+          {node.kind === 'workflow_node' && node.label === 'Synthesis' && fallback && <>
+            <Fields values={{
+              'Synthesis outcome': `Completed via fallback${fallback.synthesis_category ? ` (${fallback.synthesis_category}${fallback.synthesis_reason ? `/${fallback.synthesis_reason}` : ''})` : ''}`,
+              'Synthesis attempts': fallback.synthesis_attempts }} />
+            <p className="caption">Structured model synthesis failed after bounded attempts; the node finished through the deterministic fallback. Provider invocation outcomes above are unaffected.</p>
+          </>}
           <p>{node.safe_summary ?? 'Raw model/tool response not recorded. See the safe structured fields below for observable results.'}</p>
           {node.details.map((field, index) => <Fields key={index} values={{ [field.label]: field.value }} />)}
           {node.kind === 'workflow_node' && node.label === 'Planner' && !!run?.plan.length && <details>

@@ -19,6 +19,9 @@ from mini_deerflow.answer_synthesis import (
     AnswerSynthesisContext,
     AnswerSynthesisFormatError,
     AnswerSynthesizer,
+    SynthesisAttemptFailure,
+    SynthesisFailureCategory,
+    SynthesisFailureReason,
     infer_answer_language,
 )
 from mini_deerflow.context_budget import (
@@ -70,9 +73,11 @@ from mini_deerflow.review import (
 )
 from mini_deerflow.schemas import Plan
 from mini_deerflow.state import AgentState
+from mini_deerflow.structured_output import EmptyModelContentError
 from mini_deerflow.tools import ToolRegistry, ToolRunner
 from mini_deerflow.tools.contracts import ToolResult
 from mini_deerflow.tracing import (
+    MAX_SYNTHESIS_ATTEMPT_RECORDS,
     ExecutionEventType,
     ExecutionTracer,
     TraceErrorCategory,
@@ -80,6 +85,12 @@ from mini_deerflow.tracing import (
     TraceKind,
     TraceOutcome,
     TracePhase,
+)
+from mini_deerflow.tracing import (
+    SynthesisAttemptFailure as TraceSynthesisAttemptFailure,
+)
+from mini_deerflow.tracing import (
+    SynthesisFailureInfo as TraceSynthesisFailureInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,6 +143,86 @@ def _trace_projection(
         skill_instructions_omitted=projection.skill_omitted,
         context_policy_version=projection.policy_version,
     )
+
+
+def _synthesis_fallback_limitation(
+    category: SynthesisFailureCategory | None,
+    reason: SynthesisFailureReason | None,
+    language: str,
+) -> str:
+    """Describe the observed synthesis failure class; never invent causes."""
+
+    code = category.value + (f"/{reason.value}" if reason is not None else "")
+    if category in {
+        SynthesisFailureCategory.JSON_INVALID,
+        SynthesisFailureCategory.SCHEMA_INVALID,
+        SynthesisFailureCategory.GROUNDING_INVALID,
+    }:
+        return (
+            "Không thể tạo câu trả lời tổng hợp có cấu trúc vì đầu ra của mô "
+            "hình không vượt qua kiểm định "
+            f"(mã: {code}); câu trả lời được dựng từ các phát hiện đã xác thực."
+            if language == "vi"
+            else (
+                "A structured answer could not be synthesized because the "
+                "model output failed validation "
+                f"(code: {code}); the answer was built from validated findings."
+            )
+        )
+    if category is SynthesisFailureCategory.EMPTY_CONTENT:
+        return (
+            "Mô hình không trả về nội dung tổng hợp khả dụng; câu trả lời "
+            "được dựng từ các phát hiện đã xác thực."
+            if language == "vi"
+            else (
+                "The model returned no usable synthesis content; the answer "
+                "was built from validated findings."
+            )
+        )
+    return (
+        "Không thể tổng hợp câu trả lời có cấu trúc vì dịch vụ mô hình "
+        "không khả dụng; câu trả lời được dựng từ các phát hiện đã "
+        "xác thực."
+        if language == "vi"
+        else (
+            "A structured answer could not be synthesized because the "
+            "model service was unavailable; the answer was built from "
+            "validated findings."
+        )
+    )
+
+
+def _trace_synthesis_fallback(
+    tracer: ExecutionTracer,
+    category: SynthesisFailureCategory,
+    reason: SynthesisFailureReason | None,
+    attempts: tuple[SynthesisAttemptFailure, ...],
+) -> None:
+    """Emit one bounded fallback diagnostic; telemetry is fail-open."""
+
+    try:
+        tracer.emit_event(
+            ExecutionEventType.SYNTHESIS_FALLBACK,
+            node="synthesize",
+            outcome=TraceOutcome.FALLBACK,
+            synthesis_failure=TraceSynthesisFailureInfo(
+                category=category.value,
+                reason=reason.value if reason is not None else None,
+                attempts=[
+                    TraceSynthesisAttemptFailure(
+                        attempt=item.attempt,
+                        category=item.category.value,
+                        reason=(item.reason.value if item.reason is not None else None),
+                    )
+                    for item in attempts[:MAX_SYNTHESIS_ATTEMPT_RECORDS]
+                ],
+            ),
+        )
+    except Exception as error:  # noqa: BLE001 - telemetry must never fail a node
+        logger.warning(
+            "Synthesis fallback telemetry failed (%s); agent execution continues",
+            type(error).__name__,
+        )
 
 
 def _tool_trace_classification(
@@ -1213,6 +1304,9 @@ def build_agent_workflow(
         answer_findings = list(state.get("findings", []))
         public_answer: UserFacingAnswer | None = None
         synthesis_failed = False
+        synthesis_category: SynthesisFailureCategory | None = None
+        synthesis_reason: SynthesisFailureReason | None = None
+        synthesis_attempt_failures: tuple[SynthesisAttemptFailure, ...] = ()
 
         if answer_synthesizer is not None:
             projected_evidence, synthesis_evidence_metadata = project_evidence_records(
@@ -1260,7 +1354,10 @@ def build_agent_workflow(
                 public_answer = await answer_synthesizer.synthesize_answer(
                     synthesis_context
                 )
-            except AnswerSynthesisFormatError:
+            except AnswerSynthesisFormatError as error:
+                synthesis_category = error.category
+                synthesis_reason = error.reason
+                synthesis_attempt_failures = tuple(error.attempt_failures)
                 synthesis_error = (
                     "Structured answer synthesis was invalid; a deterministic "
                     "safe fallback was rendered."
@@ -1268,7 +1365,17 @@ def build_agent_workflow(
                 synthesis_failed = True
                 errors.append(synthesis_error)
                 logger.warning(synthesis_error)
+            except EmptyModelContentError:
+                synthesis_category = SynthesisFailureCategory.EMPTY_CONTENT
+                synthesis_error = (
+                    "Structured answer synthesis returned no usable content; "
+                    "a deterministic safe fallback was rendered."
+                )
+                synthesis_failed = True
+                errors.append(synthesis_error)
+                logger.warning(synthesis_error)
             except Exception:  # noqa: BLE001 - normalize the synthesis provider seam
+                synthesis_category = SynthesisFailureCategory.PROVIDER_ERROR
                 synthesis_error = (
                     "Structured answer synthesis was unavailable; a deterministic "
                     "safe fallback was rendered."
@@ -1276,19 +1383,20 @@ def build_agent_workflow(
                 synthesis_failed = True
                 errors.append(synthesis_error)
                 logger.warning(synthesis_error)
+            if synthesis_failed and synthesis_category is not None:
+                _trace_synthesis_fallback(
+                    resolved_tracer,
+                    synthesis_category,
+                    synthesis_reason,
+                    synthesis_attempt_failures,
+                )
 
         if public_answer is None:
             if synthesis_failed:
-                fallback_limitation = (
-                    "Không thể tổng hợp câu trả lời có cấu trúc vì dịch vụ mô hình "
-                    "không khả dụng; câu trả lời được dựng từ các phát hiện đã "
-                    "xác thực."
-                    if output_language == "vi"
-                    else (
-                        "A structured answer could not be synthesized because the "
-                        "model service was unavailable; the answer was built from "
-                        "validated findings."
-                    )
+                fallback_limitation = _synthesis_fallback_limitation(
+                    synthesis_category,
+                    synthesis_reason,
+                    output_language,
                 )
                 public_answer = build_user_facing_answer(
                     findings=answer_findings,

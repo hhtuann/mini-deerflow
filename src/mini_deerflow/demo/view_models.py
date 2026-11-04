@@ -197,6 +197,10 @@ class TraceEventView:
     model_usage_truncated: bool | None = None
     model_omitted_invocations: int | None = None
     usage_reported: bool | None = None
+    synthesis_fallback: bool | None = None
+    synthesis_category: str | None = None
+    synthesis_reason: str | None = None
+    synthesis_attempts: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +335,42 @@ def project_chat_session(
     )
 
 
+_SYNTHESIS_CATEGORIES = frozenset(
+    {
+        "json_invalid",
+        "schema_invalid",
+        "grounding_invalid",
+        "provider_error",
+        "empty_content",
+    }
+)
+_SYNTHESIS_REASONS = frozenset(
+    {
+        "language_mismatch",
+        "evidence_index_out_of_range",
+        "url_in_prose",
+        "contradiction_required",
+    }
+)
+
+
+def _safe_synthesis_code(value: object) -> str | None:
+    """Project one closed synthesis diagnostic code or nothing."""
+
+    if isinstance(value, str) and value in (_SYNTHESIS_CATEGORIES | _SYNTHESIS_REASONS):
+        return value
+    return None
+
+
+def _safe_synthesis_attempt_count(info: object) -> int | None:
+    """Project the bounded per-attempt diagnostic count or nothing."""
+
+    attempts = getattr(info, "attempts", None)
+    if isinstance(attempts, list):
+        return len(attempts)
+    return None
+
+
 def project_trace_event(event: ExecutionTrace) -> TraceEventView:
     """Project one already-redacted trace without opening its schema."""
 
@@ -429,6 +469,18 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
         ),
         usage_reported=getattr(
             getattr(event, "model_invocation", None), "usage_reported", None
+        ),
+        synthesis_fallback=(
+            getattr(event, "synthesis_failure", None) is not None or None
+        ),
+        synthesis_category=_safe_synthesis_code(
+            getattr(getattr(event, "synthesis_failure", None), "category", None)
+        ),
+        synthesis_reason=_safe_synthesis_code(
+            getattr(getattr(event, "synthesis_failure", None), "reason", None)
+        ),
+        synthesis_attempts=_safe_synthesis_attempt_count(
+            getattr(event, "synthesis_failure", None)
         ),
     )
 
