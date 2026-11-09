@@ -751,11 +751,13 @@ class TestFailClosedAndBudgets:
         assert "SDT IN CELL" in "\n".join(chunk.text for chunk in chunks)
 
     def test_hard_split_honors_deadline(self) -> None:
-        # 0.5 s is consumed by neither the pre-split regex nor the per-unit
-        # check on a fast host, so only the per-iteration split guard can
-        # fire — a true discriminator against the pre-fix unchecked loop
-        # (which ran the full ~4 s split and finished as budget_exceeded).
-        huge = "word " * 800_000
+        # 8 M chars make the quadratic split (~32 GB of slicing copies)
+        # physically unable to finish inside 0.5 s on any runner, while the
+        # pre-split regex survives the budget — so only the per-iteration
+        # split guard can fire. At the pre-fix HEAD the same input finishes
+        # the unchecked split and succeeds (DID NOT RAISE), making this a
+        # machine-independent discriminator.
+        huge = "word " * 1_600_000
         limits = DocumentExtractionLimits(deadline_seconds=0.5, max_chars=50_000_000)
         with pytest.raises(ExtractionUnavailableError) as error:
             extract_document(TXT_MIME, huge.encode(), limits)
