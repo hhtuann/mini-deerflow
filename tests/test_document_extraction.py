@@ -756,9 +756,7 @@ class TestFailClosedAndBudgets:
         # fire — a true discriminator against the pre-fix unchecked loop
         # (which ran the full ~4 s split and finished as budget_exceeded).
         huge = "word " * 800_000
-        limits = DocumentExtractionLimits(
-            deadline_seconds=0.5, max_chars=50_000_000
-        )
+        limits = DocumentExtractionLimits(deadline_seconds=0.5, max_chars=50_000_000)
         with pytest.raises(ExtractionUnavailableError) as error:
             extract_document(TXT_MIME, huge.encode(), limits)
         assert error.value.error_class == "deadline_exceeded"
