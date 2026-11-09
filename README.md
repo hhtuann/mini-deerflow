@@ -578,9 +578,13 @@ opaque server-generated values, cross-workspace access fails closed as 404,
 and the only request-size exception to the 16 KiB boundary is the two
 raw-body upload routes, capped at the configured per-file quota and audited
 by the deployment-readiness gate. This is enumeration resistance for a
-trusted single-user loopback service, not authentication or tenancy. See
+trusted single-user loopback service, not authentication or tenancy. D2
+adds bounded extraction (`document_extraction` jobs): deterministic
+hash-tied chunks with genuine PDF page / DOCX paragraph-table / TXT line
+locators, closed failure classes, and refuse-first handling of encrypted,
+macro, remote-referenced, or scripted documents. See
 [`docs/document-workspace.md`](docs/document-workspace.md) for the storage,
-lifecycle, quota, and API contracts.
+lifecycle, quota, extraction, and API contracts.
 
 ### Session sandbox mentor check
 

@@ -15,6 +15,9 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from mini_deerflow.api.dto import (
+    ChunkDetailDTO,
+    ChunkLocatorDTO,
+    ChunkSummaryDTO,
     ConversationsDTO,
     HealthDTO,
     JobDTO,
@@ -44,6 +47,13 @@ from mini_deerflow.demo.service import (
     RunDemoCommand,
 )
 from mini_deerflow.demo.view_models import ChatSessionView
+from mini_deerflow.document_extraction import (
+    PREVIEW_CHARS,
+    DocumentChunk,
+    DocumentExtractionLimits,
+    ExtractionRecord,
+    run_document_extraction,
+)
 from mini_deerflow.documents import (
     DOCX_MIME,
     PDF_MIME,
@@ -57,6 +67,7 @@ from mini_deerflow.documents import (
     DocumentValidationError,
     DocumentWorkspaceStore,
     WorkspaceRecord,
+    resolve_document_extraction_limits,
     resolve_document_limits,
 )
 from mini_deerflow.persistence import ThreadNotFoundError
@@ -120,6 +131,7 @@ def create_app(
     presentation_stores: Mapping[Mode, PptxArtifactStore] | None = None,
     slide_services: Mapping[Mode, SlideAgentService] | None = None,
     document_limits: DocumentLimits | None = None,
+    extraction_limits: DocumentExtractionLimits | None = None,
 ) -> FastAPI:
     """Create an isolated app; supplied services override either default mode.
 
@@ -132,7 +144,9 @@ def create_app(
     Document workspaces add a per-mode SQLite ledger plus hardened blob tree
     under the same roots; startup sweeps crash orphans. The request boundary
     keeps the tight default cap everywhere except the two raw-body upload
-    routes, which accept exactly the configured per-file quota.
+    routes, which accept exactly the configured per-file quota. Document
+    extraction runs as a ``document_extraction`` job bounded by the resolved
+    extraction budgets.
     """
     root = (
         Path(storage_root) if storage_root is not None else Path(".mini-deerflow/demo")
@@ -140,13 +154,15 @@ def create_app(
     live_root = (
         root / "live" if storage_root is not None else Path(".mini-deerflow/live")
     )
-    # Resolve (and validate) quotas before any Settings-consuming component
-    # is built: an invalid or unverifiable explicit document override fails
-    # closed with the controlled DocumentLimitsError instead of a raw
-    # provider-settings error. Explicit injection overrides the resolved
-    # values but never bypasses this validation.
+    # Resolve (and validate) document configuration before any
+    # Settings-consuming component is built: an invalid or unverifiable
+    # explicit override fails closed with the controlled DocumentLimitsError
+    # instead of a raw provider-settings error. Explicit injection overrides
+    # the resolved values but never bypasses this validation.
     resolved_limits = resolve_document_limits()
     limits = document_limits or resolved_limits
+    resolved_extraction = resolve_document_extraction_limits()
+    extraction_limits = extraction_limits or resolved_extraction
     runtime_services = {
         "offline": DemoRuntimeService(OfflineDemoBackend(root)),
         "live": DemoRuntimeService(LiveDemoBackend(live_root)),
@@ -654,6 +670,106 @@ def create_app(
             jobs.check_idle()
             await document_stores[mode].delete_document(workspace_id, document_id)
         return Response(status_code=204)
+
+    @app.post(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}/extraction",
+        response_model=JobDTO,
+        status_code=202,
+    )
+    async def extract_document_endpoint(
+        mode: Mode, workspace_id: Identifier, document_id: Identifier
+    ) -> JobDTO:
+        store = document_stores[mode]
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            await store.get_document(workspace_id, document_id)
+            try:
+                existing = await store.get_extraction(workspace_id, document_id)
+            except DocumentNotFoundError:
+                existing = None
+            if existing is not None and existing.status == "completed":
+                raise HTTPException(409, "Extraction already exists.")
+
+        def task(sink):
+            asyncio.run(
+                run_document_extraction(
+                    store, workspace_id, document_id, extraction_limits
+                )
+            )
+
+        # Document jobs carry the workspace/document identifiers in the same
+        # bookkeeping fields the demo run model uses for thread/turn.
+        return jobs.submit(mode, "document_extraction", workspace_id, document_id, task)
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}/extraction",
+        response_model=ExtractionRecord,
+    )
+    async def document_extraction(
+        mode: Mode, workspace_id: Identifier, document_id: Identifier
+    ) -> ExtractionRecord:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].get_extraction(workspace_id, document_id)
+
+    async def _available_chunks(
+        store: DocumentWorkspaceStore, workspace_id: str, document_id: str
+    ) -> tuple[DocumentChunk, ...]:
+        extraction = await store.get_extraction(workspace_id, document_id)
+        if extraction.status != "completed":
+            raise HTTPException(409, "Document extraction is unavailable.")
+        return await store.list_chunks(workspace_id, document_id)
+
+    def _chunk_summary(chunk: DocumentChunk) -> ChunkSummaryDTO:
+        return ChunkSummaryDTO(
+            chunk_id=chunk.chunk_id,
+            index=chunk.index,
+            kind=chunk.kind,
+            preview=chunk.text[:PREVIEW_CHARS],
+            char_start=chunk.char_start,
+            char_end=chunk.char_end,
+            locator=ChunkLocatorDTO(**chunk.locator.model_dump()),
+        )
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}/chunks",
+        response_model=tuple[ChunkSummaryDTO, ...],
+    )
+    async def document_chunks(
+        mode: Mode, workspace_id: Identifier, document_id: Identifier
+    ) -> tuple[ChunkSummaryDTO, ...]:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            chunks = await _available_chunks(
+                document_stores[mode], workspace_id, document_id
+            )
+        return tuple(_chunk_summary(chunk) for chunk in chunks)
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}"
+        "/chunks/{chunk_id}",
+        response_model=ChunkDetailDTO,
+    )
+    async def document_chunk(
+        mode: Mode,
+        workspace_id: Identifier,
+        document_id: Identifier,
+        chunk_id: str = ApiPath(pattern=r"^[0-9a-f]{16}$"),
+    ) -> ChunkDetailDTO:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            chunk = await document_stores[mode].get_chunk(
+                workspace_id, document_id, chunk_id
+            )
+        return ChunkDetailDTO(
+            chunk_id=chunk.chunk_id,
+            index=chunk.index,
+            kind=chunk.kind,
+            text=chunk.text,
+            char_start=chunk.char_start,
+            char_end=chunk.char_end,
+            locator=ChunkLocatorDTO(**chunk.locator.model_dump()),
+        )
 
     return app
 

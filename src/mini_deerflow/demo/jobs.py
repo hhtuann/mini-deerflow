@@ -22,8 +22,10 @@ from mini_deerflow.demo.view_models import (
 )
 from mini_deerflow.tracing import ExecutionTrace, TraceSink
 
-JobOperation = Literal["run", "continue", "resume", "presentation"]
-JobTask = Callable[[TraceSink], DemoRunView]
+JobOperation = Literal[
+    "run", "continue", "resume", "presentation", "document_extraction"
+]
+JobTask = Callable[[TraceSink], "DemoRunView | None"]
 JobErrorMapper = Callable[[BaseException, str], str]
 
 
@@ -129,9 +131,16 @@ class DemoJobManager:
         *,
         turn_id: str | None = None,
     ) -> str:
-        if operation not in ("run", "continue", "resume", "presentation"):
+        if operation not in (
+            "run",
+            "continue",
+            "resume",
+            "presentation",
+            "document_extraction",
+        ):
             raise ValueError(
-                "operation must be 'run', 'continue', 'resume', or 'presentation'"
+                "operation must be 'run', 'continue', 'resume', "
+                "'presentation', or 'document_extraction'"
             )
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise ValueError("thread_id must not be empty")
@@ -223,13 +232,13 @@ class DemoJobManager:
         job_id: str,
         task: JobTask,
         trace_sink: QueueTraceSink,
-    ) -> DemoRunView:
+    ) -> DemoRunView | None:
         with self._lock:
             self._state = JobState.RUNNING
         try:
             view = task(trace_sink)
-            if not isinstance(view, DemoRunView):
-                raise TypeError("demo job must return DemoRunView")
+            if view is not None and not isinstance(view, DemoRunView):
+                raise TypeError("demo job must return DemoRunView or None")
         except BaseException as error:
             message = self._safe_error_message(error, job_id)
             with self._lock:
@@ -242,7 +251,8 @@ class DemoJobManager:
                 self._state = JobState.SUCCEEDED
                 self._error_message = None
                 self._view = view
-                self._last_completed_view = view
+                if view is not None:
+                    self._last_completed_view = view
             return view
 
     def _safe_error_message(self, error: BaseException, job_id: str) -> str:
