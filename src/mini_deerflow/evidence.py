@@ -58,7 +58,7 @@ _INTERNAL_PREFIX_PATTERN = re.compile(
 # prefix an otherwise substantive model-authored finding summary. They are
 # stripped only in claim extraction; the remainder is still filtered.
 _VIETNAMESE_EXECUTION_LEADIN_PATTERN = re.compile(
-    r"^(?:b\u01b0\u1edbc(?:\s+s\u1ed1)?|step)\s+\d+\s+"
+    r"^(?:b\u01b0\u1edbc(?:\s+s\u1ed1)?|step)\s+\d+(?:\s+|(?=[:\-\u2013\u2014]))"
     r"(?:ho\u00e0n\s+t\u1ea5t|ho\u00e0n\s+th\u00e0nh)?\s*[:\-\u2013\u2014]?\s*",
     re.IGNORECASE,
 )

@@ -8,6 +8,7 @@ Track A (honest fallback) + Track B (safe diagnostics) land.
 import asyncio
 from collections import deque
 
+import pytest
 from langchain_core.messages import UsageMetadata
 
 from mini_deerflow.actions import CompleteStepAction
@@ -60,6 +61,94 @@ def make_evidence() -> list[EvidenceRecord]:
 
 
 # ---------------------------------------------------------------- Track A1/A2
+
+
+def _answer_for_summary(
+    summary: str,
+    *,
+    citations: list[str] | None = None,
+):
+    finding = StepFinding(
+        step_number=1,
+        summary=summary,
+        citations=WIKI[:2] if citations is None else citations,
+    )
+    evidence = make_evidence()
+    return build_user_facing_answer(
+        findings=[finding],
+        evidence=evidence,
+        language="vi",
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "Bước 1:",
+        "Bước 1 -",
+        "Bước 1 hoàn tất:",
+    ],
+)
+def test_vietnamese_step_prefix_keeps_cited_substantive_claim(prefix: str) -> None:
+    answer = _answer_for_summary(
+        f"{prefix} Năng lượng tái tạo tăng theo các nguồn công khai."
+    )
+
+    assert [claim.text for claim in answer.summary] == [
+        "Năng lượng tái tạo tăng theo các nguồn công khai."
+    ]
+    assert answer.summary[0].citations == WIKI[:2]
+
+
+def test_vietnamese_step_prefix_does_not_match_number_followed_by_letters() -> None:
+    answer = _answer_for_summary(
+        "Bước 1abc: Nội dung này không phải tiền tố thực thi hợp lệ."
+    )
+
+    assert [claim.text for claim in answer.summary] == [
+        "Bước 1abc: Nội dung này không phải tiền tố thực thi hợp lệ."
+    ]
+
+
+def test_step_prefix_keeps_rejecting_unknown_citations() -> None:
+    answer = _answer_for_summary(
+        "Bước 1: Nội dung không có nguồn đã xác thực.",
+        citations=["https://unverified.example.invalid/source"],
+    )
+
+    assert not answer.summary
+    assert not answer.sources
+
+
+def test_step_prefix_preserves_long_multicitation_vietnamese_finding() -> None:
+    body = " ".join(
+        [
+            "Điện gió và điện mặt trời bổ trợ lẫn nhau theo dữ liệu công khai."
+            for _ in range(12)
+        ]
+    )
+    answer = _answer_for_summary(
+        f"Bước 1: {body}",
+        citations=WIKI[:5],
+    )
+
+    assert answer.summary
+    assert len(answer.summary[0].text) <= 1_000
+    assert answer.summary[0].citations == WIKI[:5]
+    assert not answer.summary[0].text.startswith("Bước 1:")
+
+
+def test_step_prefix_never_promotes_unverified_url_marker() -> None:
+    answer = _answer_for_summary(
+        "Bước 1: Chi tiết [unverified URL omitted] không được công khai. "
+        "Năng lượng tái tạo tăng theo nguồn đã xác thực."
+    )
+    rendered = render_user_answer(evidence=make_evidence(), answer=answer)
+
+    assert answer.summary
+    assert "Năng lượng tái tạo tăng" in rendered
+    assert "unverified URL omitted" not in rendered
+    assert "Chi tiết" not in rendered
 
 
 def test_vietnamese_leadin_multicitation_finding_keeps_claims() -> None:
