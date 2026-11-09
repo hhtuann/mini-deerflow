@@ -1174,11 +1174,41 @@ class DocumentWorkspaceStore:
         chunk_id: str,
         version: int | None = None,
     ) -> Any:
-        chunks = await self.list_chunks(workspace_id, document_id, version)
-        for chunk in chunks:
-            if chunk.chunk_id == chunk_id:
-                return chunk
-        raise DocumentNotFoundError("Chunk was not found.")
+        from mini_deerflow.document_extraction import DocumentChunk, SourceLocator
+
+        workspace_id = _validated_identifier(workspace_id, "workspace_id")
+        document_id = _validated_identifier(document_id, "document_id")
+        if not isinstance(chunk_id, str) or not re.fullmatch(r"[0-9a-f]{16}", chunk_id):
+            raise DocumentValidationError("chunk_id is invalid")
+        await self.get_extraction(workspace_id, document_id, version)
+        async with self._connection() as connection:
+            await connection.execute("BEGIN")
+            document = await self._active_document_row(
+                connection, workspace_id, document_id
+            )
+            resolved = (
+                version if version is not None else int(document["latest_version"])
+            )
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM document_chunks "
+                    "WHERE workspace_id = ? AND document_id = ? AND version = ? "
+                    "AND chunk_id = ?",
+                    (workspace_id, document_id, resolved, chunk_id),
+                )
+            ).fetchone()
+            await connection.commit()
+        if row is None:
+            raise DocumentNotFoundError("Chunk was not found.")
+        return DocumentChunk(
+            chunk_id=row["chunk_id"],
+            index=row["chunk_index"],
+            kind=row["kind"],
+            text=row["text"],
+            char_start=row["char_start"],
+            char_end=row["char_end"],
+            locator=SourceLocator.model_validate_json(row["locator_json"]),
+        )
 
     async def recover(self) -> None:
         """Sweep crash orphans: staging files and unreferenced blobs.

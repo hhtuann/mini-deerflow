@@ -164,8 +164,10 @@ re-submitted). Result records are terminal-only: `completed` or
 Raw exception text, paths, and document internals never surface.
 
 - **PDF** (pypdf, text layer only): genuine 1-based page locators, never
-  synthesized; encrypted, `/JavaScript`/`/OpenAction`/`/EmbeddedFiles`
-  scripted, or no-text documents are marked unavailable.
+  synthesized; encrypted, scripted (catalog `/JavaScript` / `/OpenAction` /
+  `/EmbeddedFiles` / `/AA`, `/Names` JavaScript tree, `/AcroForm` XFA,
+  page-level `/AA`, annotation `/AA` or `/JavaScript` actions), or no-text
+  documents are marked unavailable.
 - **DOCX** (stdlib `zipfile` + `defusedxml`, no new parser dependency):
   paragraph and table locators only — **no invented page numbers**; macro
   parts (`word/vbaProject.bin`) and external relationship targets are
@@ -180,8 +182,14 @@ Raw exception text, paths, and document internals never surface.
 - **Budgets** (cooperative): deadline (default 30 s, checked per
   page/paragraph/entry), max pages 300, max extracted chars 2 M, max XML
   bytes 20 MiB, max zip entries 5,000, max total uncompressed 100 MiB.
-  Honest limit: a pathological CPU path inside pypdf cannot be preempted
-  in-thread; it is bounded by the D1 input-size quota plus these checks.
+  The character budget is enforced **incrementally**: a running total is
+  checked after every PDF page, and a within-page pypdf text visitor aborts
+  as soon as a single page's extracted text exceeds the cap, so
+  text-generating decompression bombs die at the budget instead of after a
+  full parse; pypdf's own `LimitReachedError` guard maps to
+  `budget_exceeded`. Honest residual limit: a stream that decompresses
+  huge *non-text* garbage inside pypdf is still only cooperatively bounded
+  (deadline after the page returns; the D1 input-size quota caps the file).
 - **API (additive)**: `POST …/extraction` (202 job; 409 when a completed
   extraction exists for the version; unavailable can be re-queued),
   `GET …/extraction`, `GET …/chunks` (≤200-char previews), and

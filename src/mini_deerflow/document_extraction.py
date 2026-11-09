@@ -173,29 +173,92 @@ def _strip_control_noise(text: str) -> str:
 # ---------------------------------------------------------------------------
 # PDF (text layer only)
 # ---------------------------------------------------------------------------
+def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
+    """Catalog + page + annotation + names-tree + XFA script detection.
+
+    Cheap key-presence checks only: the service never renders or executes
+    PDFs, so detection is structural refusal, not interpretation.
+    """
+
+    root = reader.trailer.get("/Root")
+    if root is not None:
+        for flag in ("/JavaScript", "/OpenAction", "/EmbeddedFiles", "/AA"):
+            if flag in root:
+                return True
+        names = root.get("/Names")
+        if names is not None and "/JavaScript" in names:
+            return True
+        acroform = root.get("/AcroForm")
+        if acroform is not None and "/XFA" in acroform:
+            return True
+    for page in pages:
+        if "/AA" in page:
+            return True
+        annotations = page.get("/Annots")
+        if annotations is None:
+            continue
+        for annotation in annotations:
+            if "/AA" in annotation:
+                return True
+            action = annotation.get("/A")
+            if action is not None and action.get("/S") == "/JavaScript":
+                return True
+    return False
+
+
+class _PageBudgetExceeded(Exception):
+    """Internal cooperative abort: within-page text budget exhausted."""
+
+
+def _make_page_visitor(bucket: list[str], cap: int):
+    """Build a pypdf text visitor that aborts once a page exceeds ``cap``."""
+
+    chars = 0
+
+    def visitor(text: str, *_args: object) -> None:
+        nonlocal chars
+        if text:
+            bucket.append(text)
+            chars += len(text)
+            if chars > cap:
+                raise _PageBudgetExceeded
+
+    return visitor
+
+
 def _extract_pdf_units(
     data: bytes, limits: DocumentExtractionLimits, deadline: _Deadline
 ) -> list[_Unit]:
     from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
+    from pypdf.errors import LimitReachedError, PyPdfError
 
     try:
         reader = PdfReader(io.BytesIO(data), strict=False)
         if reader.is_encrypted:
             raise ExtractionUnavailableError("encrypted")
-        root = reader.trailer.get("/Root")
-        if root is not None:
-            for flag in ("/JavaScript", "/OpenAction", "/EmbeddedFiles", "/AA"):
-                if flag in root:
-                    raise ExtractionUnavailableError("embedded_script")
         if len(reader.pages) > limits.max_pages:
             raise ExtractionUnavailableError("budget_exceeded")
+        if _pdf_has_scripting(reader, reader.pages):
+            raise ExtractionUnavailableError("embedded_script")
         units: list[_Unit] = []
+        running_chars = 0
         for number, page in enumerate(reader.pages, start=1):
             deadline.check()
-            text = page.extract_text() or ""
-            text = _strip_control_noise(text).strip()
+            # Cooperative within-page bound: a text-generating content
+            # stream aborts as soon as it exceeds the char budget, so bombs
+            # die at max_chars of extracted text instead of after a full
+            # decompression.
+            accumulated: list[str] = []
+            visitor = _make_page_visitor(accumulated, limits.max_chars)
+            try:
+                page.extract_text(visitor_text=visitor)
+            except _PageBudgetExceeded:
+                raise ExtractionUnavailableError("budget_exceeded") from None
+            text = _strip_control_noise("".join(accumulated)).strip()
             if text:
+                running_chars += len(text)
+                if running_chars > limits.max_chars:
+                    raise ExtractionUnavailableError("budget_exceeded")
                 units.append(
                     _Unit(
                         "page",
@@ -206,8 +269,12 @@ def _extract_pdf_units(
         return units
     except ExtractionUnavailableError:
         raise
+    except LimitReachedError:
+        # pypdf's own decompression/stream heuristics tripped: this is a
+        # resource-budget outcome, not malformed structure.
+        raise ExtractionUnavailableError("budget_exceeded") from None
     except (
-        PdfReadError,
+        PyPdfError,
         ValueError,
         TypeError,
         KeyError,
@@ -258,8 +325,15 @@ def _extract_docx_units(
             raise ExtractionUnavailableError("malformed") from error
         if len(infos) > limits.max_zip_entries:
             raise ExtractionUnavailableError("budget_exceeded")
-        if "word/vbaProject.bin" in archive.namelist():
+        names = archive.namelist()
+        if any(name.lower() == "word/vbaproject.bin" for name in names):
+            # Case-exact OPC name plus case-variant forms: a macro part is
+            # refused even under obfuscated casing (fail-closed family).
             raise ExtractionUnavailableError("embedded_macro")
+        if names.count("word/document.xml") > 1:
+            # Duplicate main-part entries resolve ambiguously across
+            # readers; refuse rather than silently trusting one of them.
+            raise ExtractionUnavailableError("malformed")
         # Decompression bounding: declared entry sizes are checked BEFORE
         # any entry is read (zipfile enforces declared sizes/CRC at read
         # time), only document.xml and its rels are ever decompressed, and
@@ -343,7 +417,7 @@ def _extract_txt_units(
 ) -> list[_Unit]:
     del limits
     try:
-        text = data.decode("utf-8")
+        text = data.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise ExtractionUnavailableError("malformed") from error
     units: list[_Unit] = []
@@ -384,12 +458,15 @@ def _pack_units(units: list[_Unit], source_sha: str) -> tuple[str, list[Document
 
     full_parts: list[str] = []
     chunks: list[DocumentChunk] = []
+    running_offset = 0
 
     def emit(parts: list[str], kind: str, locator: SourceLocator) -> None:
+        nonlocal running_offset
         text = "\n".join(part for part in parts if part)
         if not text.strip():
             return
-        char_start = len("\n".join(full_parts)) + (1 if full_parts else 0)
+        char_start = running_offset
+        running_offset += len(text) + 1
         full_parts.append(text)
         index = len(chunks) + 1
         chunk_id = hashlib.sha256(f"{source_sha}:{index}".encode()).hexdigest()[:16]

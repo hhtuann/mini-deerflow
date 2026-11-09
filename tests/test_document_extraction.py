@@ -59,7 +59,14 @@ def _upload(store: DocumentWorkspaceStore, filename: str, data: bytes, mime: str
 # ---------------------------------------------------------------------------
 # Fixture builders (synthetic documents only)
 # ---------------------------------------------------------------------------
-def _build_pdf(pages: list[list[str]], *, scripted: bool = False) -> bytes:
+def _build_pdf(
+    pages: list[list[str]],
+    *,
+    scripted: bool = False,
+    catalog_extra: str = "",
+    page_extra: str = "",
+    extra_objects: dict[int, bytes] | None = None,
+) -> bytes:
     """Hand-build a minimal but structurally valid PDF with text layers."""
 
     objects: list[bytes] = []
@@ -69,7 +76,7 @@ def _build_pdf(pages: list[list[str]], *, scripted: bool = False) -> bytes:
 
     page_ids = [3 + 2 * index for index in range(len(pages))]
     kids = " ".join(f"{pid} 0 R" for pid in page_ids)
-    obj(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    obj(1, f"<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>".encode())
     obj(2, f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode())
     for index, lines in enumerate(pages):
         page_id = page_ids[index]
@@ -87,7 +94,10 @@ def _build_pdf(pages: list[list[str]], *, scripted: bool = False) -> bytes:
             (
                 b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
                 b"/Resources << /Font << /F1 900 0 R >> >> "
-                b"/Contents " + f"{content_id} 0 R".encode() + b" >>"
+                + page_extra.encode()
+                + b" /Contents "
+                + f"{content_id} 0 R".encode()
+                + b" >>"
             ),
         )
         obj(
@@ -98,6 +108,8 @@ def _build_pdf(pages: list[list[str]], *, scripted: bool = False) -> bytes:
             + stream
             + b"\nendstream",
         )
+    for number, body in sorted((extra_objects or {}).items()):
+        obj(number, body)
     obj(900, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     out = io.BytesIO()
     out.write(b"%PDF-1.4\n")
@@ -317,6 +329,111 @@ class TestFailClosedAndBudgets:
             extract_document(PDF_MIME, data, DEFAULT_EXTRACTION_LIMITS)
         assert error.value.error_class == "embedded_script"
 
+    @pytest.mark.parametrize(
+        "catalog_extra,page_extra,extra_objects",
+        (
+            ("", "/AA << /O << /S /JavaScript /JS (x) >> >>", None),
+            ("", "/AA << /C << /S /JavaScript /JS (x) >> >>", None),
+            ("/Names << /JavaScript << >> >>", "", None),
+            ("/AcroForm << /XFA 901 0 R >>", "", None),
+            (
+                "",
+                "/Annots [901 0 R]",
+                {
+                    901: (
+                        b"<< /Type /Annot /Subtype /Widget "
+                        b"/AA << /K << /S /JavaScript /JS (x) >> >> >>"
+                    )
+                },
+            ),
+            (
+                "",
+                "/Annots [901 0 R]",
+                {
+                    901: (
+                        b"<< /Type /Annot /Subtype /Link "
+                        b"/A << /S /JavaScript /JS (x) >> >>"
+                    )
+                },
+            ),
+        ),
+        ids=[
+            "page-aa-o",
+            "page-aa-c",
+            "names-js",
+            "acroform-xfa",
+            "annot-aa",
+            "annot-action",
+        ],
+    )
+    def test_scripted_pdf_variants_are_refused(
+        self, catalog_extra: str, page_extra: str, extra_objects
+    ) -> None:
+        data = _build_pdf(
+            ["innocent"],
+            catalog_extra=catalog_extra,
+            page_extra=page_extra,
+            extra_objects=extra_objects,
+        )
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_script"
+
+    def test_pypdf_error_maps_to_budget_not_raw_escape(self, monkeypatch) -> None:
+        """LimitReachedError (pypdf's own DoS guard) stays a closed class."""
+
+        from pypdf.errors import LimitReachedError
+
+        class _Boom:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                raise LimitReachedError("limit reached while decompressing")
+
+        monkeypatch.setattr("pypdf.PdfReader", _Boom)
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, b"%PDF-1.4 whatever", DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "budget_exceeded"
+
+    def test_multi_page_char_budget_aborts_early(self) -> None:
+        big_page = [f"text block {index} padding" for index in range(4_000)]
+        data = _build_pdf([big_page] * 6)
+        limits = DocumentExtractionLimits(max_chars=50_000)
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, limits)
+        assert error.value.error_class == "budget_exceeded"
+
+    def test_duplicate_document_xml_entries_are_malformed(self) -> None:
+        base = _build_docx(["duplicate entries"])
+        buffer = io.BytesIO()
+        with (
+            zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive,
+            zipfile.ZipFile(io.BytesIO(base)) as inner,
+        ):
+            for info in inner.infolist():
+                archive.writestr(info, inner.read(info.filename))
+            archive.writestr("word/document.xml", "<duplicate/>")
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(DOCX_MIME, buffer.getvalue(), DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "malformed"
+
+    def test_macro_case_variant_is_refused(self) -> None:
+        base = _build_docx(["text"])
+        buffer = io.BytesIO()
+        with (
+            zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive,
+            zipfile.ZipFile(io.BytesIO(base)) as inner,
+        ):
+            for info in inner.infolist():
+                archive.writestr(info, inner.read(info.filename))
+            archive.writestr("word/VBAproject.BIN", b"\x00macro")
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(DOCX_MIME, buffer.getvalue(), DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_macro"
+
+    def test_txt_bom_not_preserved_in_first_chunk(self) -> None:
+        prefixed = "﻿".encode() + b"BOM-free first line\n"
+        _, chunks, _ = extract_document(TXT_MIME, prefixed, DEFAULT_EXTRACTION_LIMITS)
+        assert "\ufeff" not in chunks[0].text
+
     def test_malformed_pdf_unavailable(self) -> None:
         data = b"%PDF-1.4 this is not a real pdf structure at all"
         with pytest.raises(ExtractionUnavailableError) as error:
@@ -436,7 +553,8 @@ class TestFailClosedAndBudgets:
                 extract_document(mime, data, DEFAULT_EXTRACTION_LIMITS)
             message = str(error.value)
             assert "Traceback" not in message
-            assert "xml" not in message.lower() or "word/" not in message
+            assert "word/" not in message
+            assert "document.xml" not in message
 
 
 class TestStoreIntegration:
