@@ -640,3 +640,42 @@ class TestSchemaIntegrity:
             "versions",
         }
         json.dumps(payload)
+
+    def test_identical_version_upload_still_applies_rename(
+        self, tmp_path: Path
+    ) -> None:
+        store = _store(tmp_path)
+        workspace_id = _workspace(store)
+        document = _upload(store, workspace_id, "old.txt", TXT_BYTES)
+        renamed = _run(
+            store.upload_version(
+                workspace_id,
+                document.document_id,
+                filename="renamed-identical.txt",
+                content_type=TXT_MIME,
+                data=TXT_BYTES,
+            )
+        )
+        assert renamed.latest_version == 1
+        assert len(renamed.versions) == 1
+        assert renamed.filename == "renamed-identical.txt"
+
+
+def test_resolve_document_limits_applies_env_without_api_key(monkeypatch) -> None:
+    from mini_deerflow.documents import resolve_document_limits
+
+    monkeypatch.delenv("MINI_DEERFLOW_API_KEY", raising=False)
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "1048576")
+    limits = resolve_document_limits()
+    assert limits.max_document_bytes == 1_048_576
+    assert limits.max_documents_per_workspace == 50
+
+
+def test_resolve_document_limits_falls_back_on_invalid_settings(
+    monkeypatch,
+) -> None:
+    from mini_deerflow.documents import DEFAULT_DOCUMENT_LIMITS, resolve_document_limits
+
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    limits = resolve_document_limits()
+    assert limits == DEFAULT_DOCUMENT_LIMITS

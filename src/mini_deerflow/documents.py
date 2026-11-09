@@ -134,17 +134,19 @@ DEFAULT_DOCUMENT_LIMITS = DocumentLimits(
 
 
 def resolve_document_limits() -> DocumentLimits:
-    """Prefer environment-derived settings; fall back when unset/unparsable.
+    """Prefer environment-derived settings; fall back when unparseable.
 
     ``Settings`` requires a provider API key which unrelated local tools may
-    not have; document quotas must stay usable without one, so any settings
-    failure falls back to the audited defaults instead of failing.
+    not have, yet operator-set document quotas must still apply; a placeholder
+    key (never used for document operations) lets validation run without one.
+    A settings payload that is invalid for any other reason falls back to the
+    audited defaults instead of failing.
     """
 
     try:
         from mini_deerflow.config import Settings
 
-        settings = Settings()
+        settings = Settings(api_key="document-limits-placeholder")
     except ValidationError:
         return DEFAULT_DOCUMENT_LIMITS
     return DocumentLimits(
@@ -696,6 +698,14 @@ class DocumentWorkspaceStore:
                     )
                 ).fetchone()
                 identical = latest is not None and latest["sha256"] == sha256
+            if identical and rename:
+                # Identical bytes stay idempotent, but an explicit rename is
+                # display metadata and must still take effect.
+                await connection.execute(
+                    "UPDATE documents SET filename = ?, updated_at = ? "
+                    "WHERE workspace_id = ? AND document_id = ?",
+                    (validated_filename, now, workspace_id, document_id),
+                )
             if not identical:
                 new_version = latest_version + 1
                 if new_version > self.limits.max_versions_per_document:

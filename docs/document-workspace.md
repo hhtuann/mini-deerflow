@@ -102,7 +102,8 @@ contents.
   document_count, total_bytes`.
 - `DocumentRecord`: `workspace_id, document_id, filename, content_type,
   status, created_at, updated_at, latest_version, byte_size, sha256,
-  versions[]` — `versions[]` omitted-empty in list responses.
+  versions[]` — list responses return each record with an empty `versions`
+  array; the single-document GET returns the full version history.
 - Content downloads carry `ETag` = version sha256, `X-Document-Version`,
   `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and a
   **fixed ASCII** `Content-Disposition` filename; user filenames never
