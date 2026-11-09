@@ -85,6 +85,11 @@ def _build_pdf(
         y = 720
         for line in lines:
             escaped = line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+            if line.startswith("\x00bare "):
+                # Deferred-flush shape: bare Tj runs with no positioning ops
+                # never flush pypdf's text visitor mid-stream.
+                stream_parts.append(f"({escaped[6:]}) Tj")
+                continue
             stream_parts.append(f"1 0 0 1 72 {y} Tm ({escaped}) Tj")
             y -= 20
         stream_parts.append("ET")
@@ -396,6 +401,16 @@ class TestFailClosedAndBudgets:
     def test_multi_page_char_budget_aborts_early(self) -> None:
         big_page = [f"text block {index} padding" for index in range(4_000)]
         data = _build_pdf([big_page] * 6)
+        limits = DocumentExtractionLimits(max_chars=50_000)
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, limits)
+        assert error.value.error_class == "budget_exceeded"
+
+    def test_deferred_flush_bomb_still_budget_bounded(self) -> None:
+        """Bare-Tj streams defer the visitor abort; the budget still holds."""
+
+        bare = ["\x00bare AAAAAAAAAAAAAAAAAAAA" for _ in range(3_000)]
+        data = _build_pdf([bare])
         limits = DocumentExtractionLimits(max_chars=50_000)
         with pytest.raises(ExtractionUnavailableError) as error:
             extract_document(PDF_MIME, data, limits)

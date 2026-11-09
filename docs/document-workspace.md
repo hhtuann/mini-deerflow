@@ -184,12 +184,17 @@ Raw exception text, paths, and document internals never surface.
   bytes 20 MiB, max zip entries 5,000, max total uncompressed 100 MiB.
   The character budget is enforced **incrementally**: a running total is
   checked after every PDF page, and a within-page pypdf text visitor aborts
-  as soon as a single page's extracted text exceeds the cap, so
-  text-generating decompression bombs die at the budget instead of after a
-  full parse; pypdf's own `LimitReachedError` guard maps to
-  `budget_exceeded`. Honest residual limit: a stream that decompresses
-  huge *non-text* garbage inside pypdf is still only cooperatively bounded
-  (deadline after the page returns; the D1 input-size quota caps the file).
+  a page as soon as its flushed text exceeds the cap — at pypdf's visitor
+  granularity (positioning operations, TJ-array boundaries, end of stream).
+  A degenerate stream of bare `Tj` repeats without positioning ops defers
+  the abort to end-of-stream: it is bounded by pypdf's own
+  decompression/parsing caps (zlib output length, stream-parsing work)
+  rather than the deadline, and can hold the single worker for a bounded
+  stretch before terminating as `budget_exceeded` (pypdf's
+  `LimitReachedError` maps there too). Honest residual limit: extraction is
+  cooperative, not preemptive — the D1 input-size quota plus these caps
+  bound the worst case; hard preemption would need process isolation
+  (out of D2 scope).
 - **API (additive)**: `POST …/extraction` (202 job; 409 when a completed
   extraction exists for the version; unavailable can be re-queued),
   `GET …/extraction`, `GET …/chunks` (≤200-char previews), and

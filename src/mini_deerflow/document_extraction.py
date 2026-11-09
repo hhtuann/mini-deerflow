@@ -228,6 +228,13 @@ def _make_page_visitor(bucket: list[str], cap: int):
     return visitor
 
 
+# NOTE: pypdf's extract_text catches broad exceptions inside its Do/XObject
+# branch and only logs a warning, so a visitor abort raised within a Form
+# XObject may be swallowed there. Termination stays correct regardless: the
+# post-page running-char check still enforces the budget. Do not refactor
+# to depend on the visitor exception surviving extract_text.
+
+
 def _extract_pdf_units(
     data: bytes, limits: DocumentExtractionLimits, deadline: _Deadline
 ) -> list[_Unit]:
