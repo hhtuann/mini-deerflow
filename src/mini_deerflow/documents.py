@@ -152,9 +152,11 @@ class DocumentLimitsError(DocumentError):
 def _document_override_present() -> bool:
     """Report whether any document quota key is explicitly configured.
 
-    Mirrors the sources ``Settings`` reads (process environment plus a
-    ``.env`` file in the working directory) so a present-but-unresolvable
-    operator override can never be silently replaced by defaults.
+    Mirrors the exact sources ``Settings`` reads (process environment plus a
+    ``.env`` file parsed by python-dotenv itself, so ``export``-prefixed and
+    BOM-prefixed keys count exactly as ``Settings`` applies them) — a
+    present-but-unresolvable operator override can never be silently
+    replaced by defaults.
     """
 
     names = {
@@ -168,16 +170,16 @@ def _document_override_present() -> bool:
     if not env_file.is_file():
         return False
     try:
-        content = env_file.read_text(encoding="utf-8")
+        from dotenv import dotenv_values
+
+        file_keys = dotenv_values(env_file)
     except OSError:
         # Unreadable configuration while settings already failed: assume an
         # override exists so the caller fails closed instead of broadening.
         return True
-    for line in content.splitlines():
-        key = line.split("=", 1)[0].strip().lower()
-        if key in names:
-            return True
-    return False
+    return any(
+        value is not None and key.lower() in names for key, value in file_keys.items()
+    )
 
 
 def resolve_document_limits() -> DocumentLimits:

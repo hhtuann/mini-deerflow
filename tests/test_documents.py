@@ -756,6 +756,51 @@ def test_document_override_in_env_file_counts_as_explicit(
         resolve_document_limits()
 
 
+def test_document_override_with_export_prefix_env_file_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """python-dotenv applies ``export KEY=``; detection must match."""
+
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    (tmp_path / ".env").write_text(
+        "export MINI_DEERFLOW_DOCUMENT_MAX_BYTES=2048\n", encoding="utf-8"
+    )
+    with pytest.raises(DocumentLimitsError):
+        resolve_document_limits()
+
+
+def test_document_override_with_bom_env_file_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """python-dotenv tolerates a UTF-8 BOM; detection must match."""
+
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    (tmp_path / ".env").write_bytes("﻿MINI_DEERFLOW_DOCUMENT_MAX_BYTES=2048\n".encode())
+    with pytest.raises(DocumentLimitsError):
+        resolve_document_limits()
+
+
+def test_bare_env_line_without_assignment_is_not_an_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stray key without ``=`` is ignored by python-dotenv and by us."""
+
+    from mini_deerflow.documents import DEFAULT_DOCUMENT_LIMITS, resolve_document_limits
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    (tmp_path / ".env").write_text(
+        "MINI_DEERFLOW_DOCUMENT_MAX_BYTES\n", encoding="utf-8"
+    )
+    assert resolve_document_limits() == DEFAULT_DOCUMENT_LIMITS
+
+
 def test_unrelated_invalid_setting_without_any_override_keeps_defaults(
     tmp_path: Path, monkeypatch
 ) -> None:
