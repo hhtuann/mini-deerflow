@@ -20,6 +20,7 @@ from mini_deerflow.persistence import (
     open_sqlite_checkpointer,
 )
 from mini_deerflow.planner import create_research_plan
+from mini_deerflow.resource_limits import ResourceLimitExceeded
 from mini_deerflow.runtime import (
     RuntimeLimits,
     open_default_agent_runtime,
@@ -297,6 +298,11 @@ async def list_research_threads(
 def _safe_cli_error(error: BaseException) -> str:
     """Render only controlled diagnostics, never arbitrary exception text."""
 
+    if isinstance(error, ResourceLimitExceeded):
+        return (
+            "Live research reached its configured time or output limit. "
+            "Resume the thread if a checkpoint is available."
+        )
     if isinstance(error, ThreadAlreadyExistsError | ThreadNotFoundError):
         return str(error)
     if isinstance(error, PersistenceError):
@@ -343,6 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_replan_cycles=arguments.max_replan_cycles,
             recursion_limit=arguments.recursion_limit,
             max_delegation_concurrency=arguments.max_delegation_concurrency,
+            live_run_deadline_seconds=Settings().live_run_deadline_seconds,
         )
         tracer = (
             ExecutionTracer(JsonLinesTraceSink(sys.stderr))

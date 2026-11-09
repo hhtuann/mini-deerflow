@@ -665,23 +665,38 @@ class AgentRuntime:
         *,
         config: dict[str, object],
     ) -> object:
-        """Cancel and await graph work when this explicit operation expires."""
+        """Cancel and await graph work when this explicit operation expires.
+
+        A callee that swallows ``CancelledError`` and returns after expiry is
+        still classified as a deadline breach: a late result cannot be
+        accepted as success, and no later work is scheduled from this call.
+        Noncooperative in-flight remote work is documented as uncontrollable.
+        """
 
         deadline = asyncio.timeout(self.limits.live_run_deadline_seconds)
         try:
             async with deadline:
-                return await self.graph.ainvoke(state, config=config)
+                result = await self.graph.ainvoke(state, config=config)
         except TimeoutError as error:
             if not deadline.expired():
                 raise
-            self.tracer.emit_event(
-                ExecutionEventType.RESOURCE_LIMIT_REACHED,
-                outcome=TraceOutcome.REFUSED,
-                error_category=TraceErrorCategory.RESOURCE_LIMIT,
-                error_code=TraceErrorCode.OVERALL_DEADLINE_EXCEEDED,
-                resource_limit=ResourceLimitInfo(reason="overall_deadline_exceeded"),
-            )
-            raise ResourceLimitExceeded("overall_deadline_exceeded") from error
+            raise self._overall_deadline_exceeded() from error
+        if deadline.expired():
+            # Cancellation was delivered but suppressed by the callee.
+            raise self._overall_deadline_exceeded()
+        return result
+
+    def _overall_deadline_exceeded(self) -> ResourceLimitExceeded:
+        """Emit the closed limit trace and build the application error."""
+
+        self.tracer.emit_event(
+            ExecutionEventType.RESOURCE_LIMIT_REACHED,
+            outcome=TraceOutcome.REFUSED,
+            error_category=TraceErrorCategory.RESOURCE_LIMIT,
+            error_code=TraceErrorCode.OVERALL_DEADLINE_EXCEEDED,
+            resource_limit=ResourceLimitInfo(reason="overall_deadline_exceeded"),
+        )
+        return ResourceLimitExceeded("overall_deadline_exceeded")
 
     async def _load_turn_state(self, turn: TurnRecord) -> AgentState:
         state = await self._try_load_turn_state(turn)

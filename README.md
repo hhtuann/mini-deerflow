@@ -401,6 +401,15 @@ Wikipedia requests, and `prompt_json` for structured output. Live research has a
 deadline spanning its bounded attempts. Model calls request at most `8,192` output
 tokens where the provider supports the OpenAI-compatible `max_tokens` option, and
 prompt-JSON synthesis rejects responses above `32,768` characters without retrying.
+
+Scope: the wall-clock deadlines apply only to Live research operations
+(`run`, `continue`, `resume`); PPTX slide planning keeps its own service
+lifecycle and is never wrapped by the research deadline. The
+`MINI_DEERFLOW_MODEL_MAX_OUTPUT_TOKENS` request cap, however, is
+model-level: it applies to every model built through `create_chat_model`,
+including the live slide planner, because presentation and research share
+the same provider model configuration. If a provider rejects that cap for
+slides, lower the setting or configure a separate model accordingly.
 Override these validated controls with `MINI_DEERFLOW_LIVE_RUN_DEADLINE_SECONDS`,
 `MINI_DEERFLOW_SYNTHESIS_DEADLINE_SECONDS`,
 `MINI_DEERFLOW_MODEL_MAX_OUTPUT_TOKENS`, and

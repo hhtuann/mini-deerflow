@@ -436,9 +436,14 @@ class LLMAnswerSynthesizer:
         last_error: Exception | None = None
         attempt_failures: list[SynthesisAttemptFailure] = []
         deadline = asyncio.timeout(self._deadline_seconds)
+        answer: UserFacingAnswer | None = None
         try:
             async with deadline:
                 for attempt in range(1, SYNTHESIS_MAX_ATTEMPTS + 1):
+                    if deadline.expired():
+                        # Cancellation was delivered and suppressed earlier;
+                        # never schedule another invocation after expiry.
+                        raise TimeoutError
                     messages = (
                         [
                             *base_messages,
@@ -454,7 +459,8 @@ class LLMAnswerSynthesizer:
                             if isinstance(response, AnswerSynthesisDraft)
                             else AnswerSynthesisDraft.model_validate(response)
                         )
-                        return validate_answer_draft(draft, context)
+                        answer = validate_answer_draft(draft, context)
+                        break
                     except ResourceLimitExceeded as error:
                         attempt_failures.append(
                             SynthesisAttemptFailure(
@@ -483,16 +489,18 @@ class LLMAnswerSynthesizer:
         except TimeoutError as error:
             if not deadline.expired():
                 raise
-            attempt = min(len(attempt_failures) + 1, SYNTHESIS_MAX_ATTEMPTS)
-            attempt_failures.append(
-                SynthesisAttemptFailure(
-                    attempt=attempt,
-                    category=SynthesisFailureCategory.RESOURCE_LIMIT,
-                    reason=SynthesisFailureReason.SYNTHESIS_DEADLINE_EXCEEDED,
-                )
-            )
+            self._record_deadline_failure(attempt_failures)
             limit = ResourceLimitExceeded("synthesis_deadline_exceeded")
             raise self._resource_limit_error(limit, attempt_failures) from error
+
+        if answer is not None and deadline.expired():
+            # The provider swallowed cancellation and returned late; a late
+            # structured answer is not acceptable as a success.
+            self._record_deadline_failure(attempt_failures)
+            limit = ResourceLimitExceeded("synthesis_deadline_exceeded")
+            raise self._resource_limit_error(limit, attempt_failures)
+        if answer is not None:
+            return answer
 
         final_failure = attempt_failures[-1] if attempt_failures else None
         raise AnswerSynthesisFormatError(
@@ -506,6 +514,20 @@ class LLMAnswerSynthesizer:
             reason=final_failure.reason if final_failure else None,
             attempt_failures=tuple(attempt_failures),
         ) from last_error
+
+    @staticmethod
+    def _record_deadline_failure(
+        attempt_failures: list[SynthesisAttemptFailure],
+    ) -> None:
+        """Record the attempt that the deadline stopped or invalidated."""
+
+        attempt_failures.append(
+            SynthesisAttemptFailure(
+                attempt=min(len(attempt_failures) + 1, SYNTHESIS_MAX_ATTEMPTS),
+                category=SynthesisFailureCategory.RESOURCE_LIMIT,
+                reason=SynthesisFailureReason.SYNTHESIS_DEADLINE_EXCEEDED,
+            )
+        )
 
     @staticmethod
     def _resource_limit_error(
