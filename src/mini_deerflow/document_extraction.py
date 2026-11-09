@@ -188,7 +188,9 @@ def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
             if flag in root:
                 return True
         names = root.get("/Names")
-        if names is not None and "/JavaScript" in names:
+        if names is not None and any(
+            flag in names for flag in ("/JavaScript", "/EmbeddedFiles")
+        ):
             return True
         acroform = root.get("/AcroForm")
         if acroform is not None and "/XFA" in acroform:
@@ -364,8 +366,18 @@ def _extract_docx_units(
             rels = b""
         except (OSError, zipfile.BadZipFile) as error:
             raise ExtractionUnavailableError("malformed") from error
-        if b'TargetMode="External"' in rels:
-            raise ExtractionUnavailableError("embedded_remote")
+        if rels:
+            # Parse the relationships as bounded XML (size already capped by
+            # the declared-entry budget above) instead of substring matching:
+            # single-quoted, spaced, or reordered attributes are
+            # standards-valid and must not evade the external check.
+            try:
+                rels_root = SafeElementTree.fromstring(rels)
+            except (SyntaxError, ValueError) as error:
+                raise ExtractionUnavailableError("malformed") from error
+            for relationship in rels_root.iter():
+                if str(relationship.get("TargetMode", "")).lower() == "external":
+                    raise ExtractionUnavailableError("embedded_remote")
         try:
             document = archive.read("word/document.xml")
         except KeyError as error:

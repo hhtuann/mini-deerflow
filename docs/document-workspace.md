@@ -165,13 +165,15 @@ Raw exception text, paths, and document internals never surface.
 
 - **PDF** (pypdf, text layer only): genuine 1-based page locators, never
   synthesized; encrypted, scripted (catalog `/JavaScript` / `/OpenAction` /
-  `/EmbeddedFiles` / `/AA`, `/Names` JavaScript tree, `/AcroForm` XFA,
-  page-level `/AA`, annotation `/AA` or `/JavaScript` actions), or no-text
-  documents are marked unavailable.
+  `/EmbeddedFiles` / `/AA`, `/Names` JavaScript tree **or** embedded-file
+  attachments, `/AcroForm` XFA, page-level `/AA`, annotation `/AA` or
+  `/JavaScript` actions), or no-text documents are marked unavailable.
 - **DOCX** (stdlib `zipfile` + `defusedxml`, no new parser dependency):
   paragraph and table locators only — **no invented page numbers**; macro
   parts (`word/vbaProject.bin`) and external relationship targets are
-  refused; ZIP decompression is bounded by declared entry sizes checked
+  refused (relationships parsed as bounded XML, so quoting/spacing/
+  attribute order cannot evade the check; unparseable rels are malformed);
+  ZIP decompression is bounded by declared entry sizes checked
   before any read (only `document.xml` and its rels are ever decompressed);
   a compression-ratio heuristic was deliberately rejected because
   legitimately compressible XML false-positives.

@@ -177,6 +177,7 @@ def _build_docx(
     *,
     macro: bool = False,
     external_rels: bool = False,
+    rels_xml: str | None = None,
     extra_entries: dict[str, bytes] | None = None,
     document_xml: str | None = None,
 ) -> bytes:
@@ -205,15 +206,19 @@ def _build_docx(
             "</Relationships>",
         )
         rels = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" '
-            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
-            'Target="https://example.invalid/image.png" TargetMode="External"/>'
-            "</Relationships>"
-            if external_rels
-            else '<?xml version="1.0" encoding="UTF-8"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
+            rels_xml
+            if rels_xml is not None
+            else (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                'Target="https://example.invalid/image.png" TargetMode="External"/>'
+                "</Relationships>"
+                if external_rels
+                else '<?xml version="1.0" encoding="UTF-8"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
+            )
         )
         archive.writestr("word/_rels/document.xml.rels", rels)
         archive.writestr("word/document.xml", xml)
@@ -504,6 +509,57 @@ class TestFailClosedAndBudgets:
         with pytest.raises(ExtractionUnavailableError) as error:
             extract_document(DOCX_MIME, data, DEFAULT_EXTRACTION_LIMITS)
         assert error.value.error_class == "embedded_remote"
+
+    @pytest.mark.parametrize(
+        "rels_xml",
+        (
+            (
+                '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                "Target='https://example.invalid/x' TargetMode='External'/></Relationships>"
+            ),
+            (
+                '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship TargetMode = "External" Id="rId2" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                'Target="https://example.invalid/y"/></Relationships>'
+            ),
+        ),
+        ids=["single-quoted", "spaced-reordered"],
+    )
+    def test_external_relationship_attribute_variants_refused(
+        self, rels_xml: str
+    ) -> None:
+        """Quoting/spacing/order must not evade the external-reference check."""
+
+        data = _build_docx(["text"], rels_xml=rels_xml)
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(DOCX_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_remote"
+
+    def test_malformed_rels_docx_unavailable(self) -> None:
+        data = _build_docx(
+            ["text"], rels_xml="<?xml version='1.0'?><Relationships <broken"
+        )
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(DOCX_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "malformed"
+
+    def test_pdf_attachment_in_names_tree_is_refused(self) -> None:
+        """Writer-generated attachments live under /Names /EmbeddedFiles."""
+
+        from pypdf import PdfReader, PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        writer.add_attachment("payload.txt", b"synthetic attachment")
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        reader = PdfReader(io.BytesIO(buffer.getvalue()))
+        assert "/EmbeddedFiles" in reader.trailer["/Root"]["/Names"]
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, buffer.getvalue(), DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_script"
 
     def test_zip_bomb_uncompressed_total_budget_enforced(self) -> None:
         """Declared-size caps bound decompression before any entry is read."""
