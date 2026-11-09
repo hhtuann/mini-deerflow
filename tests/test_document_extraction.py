@@ -758,9 +758,7 @@ class TestFailClosedAndBudgets:
         # the same input finishes the unchecked split and succeeds
         # (DID NOT RAISE), making this a machine-independent discriminator.
         huge = "word " * 3_200_000
-        limits = DocumentExtractionLimits(
-            deadline_seconds=0.5, max_chars=50_000_000
-        )
+        limits = DocumentExtractionLimits(deadline_seconds=0.5, max_chars=50_000_000)
         with pytest.raises(ExtractionUnavailableError) as error:
             extract_document(TXT_MIME, huge.encode(), limits)
         assert error.value.error_class == "deadline_exceeded"
