@@ -140,6 +140,10 @@ def create_app(
     live_root = (
         root / "live" if storage_root is not None else Path(".mini-deerflow/live")
     )
+    # Resolve quotas before any Settings-consuming component is built so an
+    # invalid explicit document override fails closed with the controlled
+    # DocumentLimitsError instead of a raw provider-settings error.
+    limits = document_limits or resolve_document_limits()
     runtime_services = {
         "offline": DemoRuntimeService(OfflineDemoBackend(root)),
         "live": DemoRuntimeService(LiveDemoBackend(live_root)),
@@ -170,7 +174,6 @@ def create_app(
         if set(slide_services) - {"offline", "live"}:
             raise ValueError("Unsupported slide service mode.")
         slide_agents.update(slide_services)
-    limits = document_limits or resolve_document_limits()
     document_stores: dict[Mode, DocumentWorkspaceStore] = {
         "offline": DocumentWorkspaceStore(root, limits=limits),
         "live": DocumentWorkspaceStore(live_root, limits=limits),

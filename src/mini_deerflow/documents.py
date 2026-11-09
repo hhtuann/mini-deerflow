@@ -67,6 +67,10 @@ class DocumentUnsupportedTypeError(DocumentValidationError):
 
 
 def _sniff_pdf(data: bytes) -> bool:
+    # D1 performs shallow signature checks only: `%PDF-` anywhere in the
+    # first KiB and the ZIP local-header prefix are NOT format validation.
+    # Stored bytes stay untrusted; D2 owns structural parsing and must bound
+    # ZIP decompression and reject malformed structure itself.
     return b"%PDF-" in data[:MAX_PDF_SNIFF_OFFSET]
 
 
@@ -132,29 +136,50 @@ DEFAULT_DOCUMENT_LIMITS = DocumentLimits(
     max_workspaces=100,
 )
 
+_DOCUMENT_LIMIT_SETTINGS_FIELDS = (
+    ("document_max_bytes", "max_document_bytes"),
+    ("document_workspace_max_documents", "max_documents_per_workspace"),
+    ("document_max_versions", "max_versions_per_document"),
+    ("document_workspace_max_bytes", "max_workspace_bytes"),
+    ("document_max_workspaces", "max_workspaces"),
+)
+
+
+class DocumentLimitsError(DocumentError):
+    """Explicit document quota configuration is invalid; refuse to operate."""
+
 
 def resolve_document_limits() -> DocumentLimits:
-    """Prefer environment-derived settings; fall back when unparseable.
+    """Resolve quotas from settings, failing closed on invalid overrides.
 
     ``Settings`` requires a provider API key which unrelated local tools may
     not have, yet operator-set document quotas must still apply; a placeholder
     key (never used for document operations) lets validation run without one.
-    A settings payload that is invalid for any other reason falls back to the
-    audited defaults instead of failing.
+    An explicitly configured but invalid *document* quota can never silently
+    broaden to the audited defaults — it raises :class:`DocumentLimitsError`
+    so app construction and the server refuse to start. Invalid settings for
+    unrelated provider fields keep falling back to the defaults.
     """
 
     try:
         from mini_deerflow.config import Settings
 
         settings = Settings(api_key="document-limits-placeholder")
-    except ValidationError:
+    except ValidationError as error:
+        document_fields = {
+            settings_name for settings_name, _ in _DOCUMENT_LIMIT_SETTINGS_FIELDS
+        }
+        locations = {item.get("loc", ())[:1] for item in error.errors()}
+        if any((field,) in locations for field in document_fields):
+            raise DocumentLimitsError(
+                "Document quota configuration is invalid."
+            ) from None
         return DEFAULT_DOCUMENT_LIMITS
     return DocumentLimits(
-        max_document_bytes=settings.document_max_bytes,
-        max_documents_per_workspace=settings.document_workspace_max_documents,
-        max_versions_per_document=settings.document_max_versions,
-        max_workspace_bytes=settings.document_workspace_max_bytes,
-        max_workspaces=settings.document_max_workspaces,
+        **{
+            limits_name: getattr(settings, settings_name)
+            for settings_name, limits_name in _DOCUMENT_LIMIT_SETTINGS_FIELDS
+        }
     )
 
 
@@ -910,6 +935,7 @@ __all__ = [
     "DocumentError",
     "DocumentIntegrityError",
     "DocumentLimits",
+    "DocumentLimitsError",
     "DocumentNotFoundError",
     "DocumentQuotaError",
     "DocumentRecord",

@@ -679,3 +679,51 @@ def test_resolve_document_limits_falls_back_on_invalid_settings(
     monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
     limits = resolve_document_limits()
     assert limits == DEFAULT_DOCUMENT_LIMITS
+
+
+@pytest.mark.parametrize(
+    "env_name,value",
+    (
+        ("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999"),  # below 1 KiB floor
+        ("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "not-a-number"),
+        ("MINI_DEERFLOW_DOCUMENT_WORKSPACE_MAX_DOCUMENTS", "0"),
+        ("MINI_DEERFLOW_DOCUMENT_MAX_VERSIONS", "-5"),
+        ("MINI_DEERFLOW_DOCUMENT_WORKSPACE_MAX_BYTES", "1"),  # below 1 MiB floor
+        ("MINI_DEERFLOW_DOCUMENT_MAX_WORKSPACES", "bogus"),
+    ),
+)
+def test_resolve_document_limits_fails_closed_on_invalid_document_override(
+    monkeypatch, env_name: str, value: str
+) -> None:
+    """An explicitly invalid document quota must never broaden to defaults."""
+
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.setenv(env_name, value)
+    with pytest.raises(DocumentLimitsError) as error:
+        resolve_document_limits()
+    message = str(error.value)
+    assert str(value) not in message
+    assert "quota" in message
+
+
+def test_invalid_document_override_fails_closed_without_provider_key(
+    monkeypatch,
+) -> None:
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.delenv("MINI_DEERFLOW_API_KEY", raising=False)
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999")
+    with pytest.raises(DocumentLimitsError):
+        resolve_document_limits()
+
+
+def test_invalid_document_override_beats_unrelated_invalid_settings(
+    monkeypatch,
+) -> None:
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999")
+    with pytest.raises(DocumentLimitsError):
+        resolve_document_limits()

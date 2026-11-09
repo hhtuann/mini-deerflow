@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from mini_deerflow.api import create_app
@@ -404,3 +405,41 @@ class TestPersistenceAndSafety:
                 return response.status_code
 
         assert asyncio.run(scenario()) == 413
+
+
+def test_create_app_fails_closed_on_invalid_document_quota_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The effective app builder must refuse invalid explicit quotas."""
+
+    from mini_deerflow.documents import DocumentLimitsError
+
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999")
+    with pytest.raises(DocumentLimitsError) as error:
+        create_app(tmp_path)
+    assert "999" not in str(error.value)
+
+
+def test_valid_document_quota_override_reaches_upload_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A valid env override configures the real request boundary cap."""
+
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "2048")
+    small = b"%PDF-1.7 " + b"a" * 100
+    with TestClient(create_app(tmp_path)) as client:
+        workspace_id = _workspace(client)
+        created = client.post(
+            f"/api/live/workspaces/{workspace_id}/documents",
+            params={"filename": "small.pdf"},
+            content=small,
+            headers={"Content-Type": PDF_MIME},
+        )
+        assert created.status_code == 201, created.text
+        oversized = client.post(
+            f"/api/live/workspaces/{workspace_id}/documents",
+            params={"filename": "big.pdf"},
+            content=small + b"x" * 2_000,
+            headers={"Content-Type": PDF_MIME},
+        )
+        assert oversized.status_code == 413

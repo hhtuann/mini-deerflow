@@ -56,7 +56,15 @@ partially interpreted. Future column additions follow the guarded
 | Workspaces | 100 | `MINI_DEERFLOW_DOCUMENT_MAX_WORKSPACES` | 1 – 1000 |
 
 Workspace byte quota counts **all versions of active documents**. Apps may
-inject tighter fixture limits via `create_app(document_limits=...)`.
+inject tighter fixture limits via `create_app(document_limits=...)`
+(explicit injection is authoritative and bypasses environment resolution).
+
+**Fail-closed quota configuration:** an explicitly configured but invalid
+`MINI_DEERFLOW_DOCUMENT_*` value (wrong type or outside the valid range)
+raises `DocumentLimitsError` at `create_app()` — the server refuses to
+start rather than silently broadening to defaults. Invalid settings for
+unrelated provider fields (or a missing provider key) fall back to the
+audited defaults only when no document override is invalid.
 
 **Retention proposal (owner decision pending):** no automatic expiry in D1;
 documents persist until explicit deletion and survive restart. Real-data
@@ -76,6 +84,13 @@ Allowed: PDF, DOCX, TXT. All three must agree:
 Bytes are stored inert — never parsed or executed. Unsupported, mismatched,
 oversize, empty, or malformed requests fail closed (415/413/422) and leave
 no partial storage.
+
+**Known limitation (D2 handoff):** the sniff is a shallow signature check
+only — `%PDF-` anywhere in the first KiB and the ZIP local-file-header
+prefix do **not** validate document structure. Upload acceptance in D1 is
+therefore not a claim of format validity: stored documents must be treated
+as untrusted input, and D2 (parsing/chunking) owns structural validation,
+bounded ZIP decompression, and malformed-structure failure states.
 
 ## HTTP API contract
 
