@@ -1,4 +1,6 @@
+import asyncio
 import json
+import math
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -50,6 +52,7 @@ from mini_deerflow.persistence import (
 )
 from mini_deerflow.planner import PlanningBudget, create_research_plan
 from mini_deerflow.replanner import create_replacement_plan
+from mini_deerflow.resource_limits import ResourceLimitExceeded
 from mini_deerflow.review import EvidenceReviewer, Replanner
 from mini_deerflow.schemas import Plan
 from mini_deerflow.skills import SkillContext, SkillsRegistry
@@ -66,8 +69,10 @@ from mini_deerflow.tools import (
     WriteFileTool,
 )
 from mini_deerflow.tracing import (
+    ExecutionEventType,
     ExecutionTrace,
     ExecutionTracer,
+    ResourceLimitInfo,
     TraceErrorCategory,
     TraceErrorCode,
     TraceKind,
@@ -98,6 +103,7 @@ class RuntimeLimits:
     max_delegation_concurrency: int = 2
     max_session_tool_calls: int = 100
     max_conversation_context_chars: int = 12_000
+    live_run_deadline_seconds: float = 1_200.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -123,6 +129,16 @@ class RuntimeLimits:
 
         if not 1 <= self.max_delegation_concurrency <= 3:
             raise ValueError("max_delegation_concurrency must be between 1 and 3")
+
+        deadline = self.live_run_deadline_seconds
+        if (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, int | float)
+            or not math.isfinite(deadline)
+        ):
+            raise TypeError("live_run_deadline_seconds must be a finite number")
+        if deadline <= 0:
+            raise ValueError("live_run_deadline_seconds must be greater than zero")
 
 
 @runtime_checkable
@@ -304,7 +320,7 @@ class AgentRuntime:
                 operation="run",
             )
 
-            result = await self.graph.ainvoke(
+            result = await self._invoke_graph_with_deadline(
                 initial_state,
                 config=config,
             )
@@ -449,7 +465,7 @@ class AgentRuntime:
                 operation="resume",
             )
 
-            result = await self.graph.ainvoke(
+            result = await self._invoke_graph_with_deadline(
                 None,
                 config=config,
             )
@@ -551,7 +567,7 @@ class AgentRuntime:
                     operation=operation,
                 )
                 result = _validate_agent_state_result(
-                    await self.graph.ainvoke(state, config=config)
+                    await self._invoke_graph_with_deadline(state, config=config)
                 )
         except BaseException:
             interrupted = await self._try_checkpoint_state(config)
@@ -609,7 +625,7 @@ class AgentRuntime:
                     operation="resume",
                 )
                 result = _validate_agent_state_result(
-                    await self.graph.ainvoke(None, config=config)
+                    await self._invoke_graph_with_deadline(None, config=config)
                 )
         except BaseException:
             interrupted = await self._try_checkpoint_state(config)
@@ -642,6 +658,30 @@ class AgentRuntime:
             self.tracer.events_for_run(run_id),
         )
         return result
+
+    async def _invoke_graph_with_deadline(
+        self,
+        state: AgentState | None,
+        *,
+        config: dict[str, object],
+    ) -> object:
+        """Cancel and await graph work when this explicit operation expires."""
+
+        deadline = asyncio.timeout(self.limits.live_run_deadline_seconds)
+        try:
+            async with deadline:
+                return await self.graph.ainvoke(state, config=config)
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise
+            self.tracer.emit_event(
+                ExecutionEventType.RESOURCE_LIMIT_REACHED,
+                outcome=TraceOutcome.REFUSED,
+                error_category=TraceErrorCategory.RESOURCE_LIMIT,
+                error_code=TraceErrorCode.OVERALL_DEADLINE_EXCEEDED,
+                resource_limit=ResourceLimitInfo(reason="overall_deadline_exceeded"),
+            )
+            raise ResourceLimitExceeded("overall_deadline_exceeded") from error
 
     async def _load_turn_state(self, turn: TurnRecord) -> AgentState:
         state = await self._try_load_turn_state(turn)
@@ -804,7 +844,9 @@ def create_default_agent_runtime(
     structured_output_mode = settings.structured_output_mode
     workspace = Workspace(workspace_root)
 
-    resolved_limits = limits or RuntimeLimits()
+    resolved_limits = limits or RuntimeLimits(
+        live_run_deadline_seconds=settings.live_run_deadline_seconds,
+    )
     if web_provider is None:
         resolved_wiki_provider = wiki_provider or MediaWikiProvider(
             timeout_seconds=settings.wiki_request_timeout,
@@ -881,6 +923,8 @@ def create_default_agent_runtime(
     answer_synthesizer = LLMAnswerSynthesizer(
         model,
         structured_output_mode=structured_output_mode,
+        deadline_seconds=settings.synthesis_deadline_seconds,
+        max_response_chars=settings.synthesis_max_response_chars,
     )
     replanner = partial(
         create_replacement_plan,

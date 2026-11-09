@@ -17,6 +17,7 @@ from mini_deerflow.model_usage import (
     current_scope,
     model_name_of,
 )
+from mini_deerflow.resource_limits import ResourceLimitExceeded
 
 StructuredOutputMode = Literal["native", "prompt_json"]
 
@@ -143,8 +144,11 @@ class PromptJsonStructuredRunnable[SchemaT: BaseModel]:
         self,
         model: PromptJsonModel,
         schema: type[SchemaT],
+        *,
+        max_response_chars: int | None = None,
     ) -> None:
         self._model = model
+        self._max_response_chars = max_response_chars
         self._adapter: TypeAdapter[SchemaT] = TypeAdapter(schema)
         self._wrapper_keys = {
             schema.__name__,
@@ -161,6 +165,11 @@ class PromptJsonStructuredRunnable[SchemaT: BaseModel]:
         content = _text_content(getattr(response, "content", response))
         if content is None:
             raise EmptyModelContentError("model response content must be text")
+        if (
+            self._max_response_chars is not None
+            and len(content) > self._max_response_chars
+        ):
+            raise ResourceLimitExceeded("synthesis_output_limit_exceeded")
         normalized = _strip_code_fence(content)
         try:
             payload = json.loads(normalized)
@@ -182,6 +191,7 @@ def create_structured_output_runnable[SchemaT: BaseModel](
     *,
     method: str,
     mode: StructuredOutputMode,
+    max_response_chars: int | None = None,
 ) -> object:
     """Create a validated structured runnable using the selected provider mode.
 
@@ -213,7 +223,11 @@ def create_structured_output_runnable[SchemaT: BaseModel](
                 "model must support synchronous and asynchronous invocation"
             )
         recording_model = UsageRecordingModel(model, schema_name)
-        return PromptJsonStructuredRunnable(recording_model, schema)
+        return PromptJsonStructuredRunnable(
+            recording_model,
+            schema,
+            max_response_chars=max_response_chars,
+        )
     raise ValueError("unsupported structured output mode")
 
 

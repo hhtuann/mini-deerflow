@@ -51,6 +51,7 @@ class TraceKind(str, Enum):
     EVIDENCE = "evidence"
     MODEL = "model"
     SYNTHESIS = "synthesis"
+    RESOURCE_LIMIT = "resource_limit"
 
 
 class TracePhase(str, Enum):
@@ -94,6 +95,7 @@ class TraceErrorCategory(str, Enum):
     PERSISTENCE = "persistence"
     RUNTIME = "runtime"
     INTERNAL = "internal"
+    RESOURCE_LIMIT = "resource_limit"
 
 
 class TraceErrorCode(str, Enum):
@@ -106,6 +108,9 @@ class TraceErrorCode(str, Enum):
     CHECKPOINT_FAILURE = "checkpoint_failure"
     RUNTIME_FAILURE = "runtime_failure"
     UNEXPECTED_FAILURE = "unexpected_failure"
+    OVERALL_DEADLINE_EXCEEDED = "overall_deadline_exceeded"
+    SYNTHESIS_DEADLINE_EXCEEDED = "synthesis_deadline_exceeded"
+    SYNTHESIS_OUTPUT_LIMIT_EXCEEDED = "synthesis_output_limit_exceeded"
 
 
 # Model/provider SDK exception type names (matched by name across the MRO so
@@ -154,6 +159,7 @@ class ExecutionEventType(str, Enum):
     ARTIFACT_COMPLETED = "artifact_completed"
     MODEL_INVOCATION = "model_invocation"
     SYNTHESIS_FALLBACK = "synthesis_fallback"
+    RESOURCE_LIMIT_REACHED = "resource_limit_reached"
 
 
 class ExecutionStatus(str, Enum):
@@ -218,12 +224,15 @@ SynthesisFailureCategoryValue = Literal[
     "grounding_invalid",
     "provider_error",
     "empty_content",
+    "resource_limit",
 ]
 SynthesisFailureReasonValue = Literal[
     "language_mismatch",
     "evidence_index_out_of_range",
     "url_in_prose",
     "contradiction_required",
+    "synthesis_deadline_exceeded",
+    "synthesis_output_limit_exceeded",
 ]
 MAX_SYNTHESIS_ATTEMPT_RECORDS = 5
 
@@ -249,6 +258,21 @@ class SynthesisFailureInfo(BaseModel):
         default_factory=list,
         max_length=MAX_SYNTHESIS_ATTEMPT_RECORDS,
     )
+
+
+ResourceLimitReasonValue = Literal[
+    "overall_deadline_exceeded",
+    "synthesis_deadline_exceeded",
+    "synthesis_output_limit_exceeded",
+]
+
+
+class ResourceLimitInfo(BaseModel):
+    """Closed resource-limit identity; no exception or provider text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: ResourceLimitReasonValue
 
 
 _SAFE_METADATA_KEYS = frozenset(
@@ -369,6 +393,7 @@ class ExecutionEvent(BaseModel):
     error_code: TraceErrorCode | None = None
     model_invocation: ModelInvocationInfo | None = None
     synthesis_failure: SynthesisFailureInfo | None = None
+    resource_limit: ResourceLimitInfo | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -831,6 +856,20 @@ def _classify_exception(
     error: BaseException,
 ) -> tuple[TraceErrorCategory, TraceErrorCode, TraceOutcome]:
     from mini_deerflow.persistence import PersistenceError
+    from mini_deerflow.resource_limits import ResourceLimitExceeded
+
+    if isinstance(error, ResourceLimitExceeded):
+        return (
+            TraceErrorCategory.RESOURCE_LIMIT,
+            {
+                "overall_deadline_exceeded": TraceErrorCode.OVERALL_DEADLINE_EXCEEDED,
+                "synthesis_deadline_exceeded": TraceErrorCode.SYNTHESIS_DEADLINE_EXCEEDED,
+                "synthesis_output_limit_exceeded": (
+                    TraceErrorCode.SYNTHESIS_OUTPUT_LIMIT_EXCEEDED
+                ),
+            }[error.reason],
+            TraceOutcome.REFUSED,
+        )
 
     if isinstance(error, ContextBudgetExceededError):
         return (
@@ -939,6 +978,7 @@ def _event_type_from_parts(
         TraceKind.ARTIFACT: ExecutionEventType.ARTIFACT_COMPLETED,
         TraceKind.MODEL: ExecutionEventType.MODEL_INVOCATION,
         TraceKind.SYNTHESIS: ExecutionEventType.SYNTHESIS_FALLBACK,
+        TraceKind.RESOURCE_LIMIT: ExecutionEventType.RESOURCE_LIMIT_REACHED,
     }[kind]
 
 
@@ -1014,6 +1054,11 @@ def _legacy_shape_for_event(
             TraceKind.SYNTHESIS,
             TracePhase.OUTCOME,
             TraceOutcome.FALLBACK,
+        ),
+        ExecutionEventType.RESOURCE_LIMIT_REACHED: (
+            TraceKind.RESOURCE_LIMIT,
+            TracePhase.OUTCOME,
+            TraceOutcome.REFUSED,
         ),
         ExecutionEventType.FAN_IN_COMPLETED: (
             TraceKind.FAN_IN,

@@ -396,10 +396,22 @@ MINI_DEERFLOW_MODEL_NAME=glm-5.3
 ```
 
 Defaults are `glm-5.3` on the Z.AI OpenAI-compatible endpoint, `15` seconds for
-Wikipedia requests, and `prompt_json` for structured output. Model name, base URL,
-timeouts, temperature, and retry settings remain configurable through the
-`MINI_DEERFLOW_` environment variables.
-See [`.env.example`](.env.example). Never commit `.env`.
+Wikipedia requests, and `prompt_json` for structured output. Live research has a
+`1,200` second per-operation wall-clock deadline; Synthesis has one `300` second
+deadline spanning its bounded attempts. Model calls request at most `8,192` output
+tokens where the provider supports the OpenAI-compatible `max_tokens` option, and
+prompt-JSON synthesis rejects responses above `32,768` characters without retrying.
+Override these validated controls with `MINI_DEERFLOW_LIVE_RUN_DEADLINE_SECONDS`,
+`MINI_DEERFLOW_SYNTHESIS_DEADLINE_SECONDS`,
+`MINI_DEERFLOW_MODEL_MAX_OUTPUT_TOKENS`, and
+`MINI_DEERFLOW_SYNTHESIS_MAX_RESPONSE_CHARS`; see [`.env.example`](.env.example).
+
+These are local scheduling, cancellation, provider-request, and parsing bounds—not
+guarantees on provider input/cached/reasoning tokens, total billed tokens, monetary
+cost, or remote cancellation after a request has been sent. An expired operation
+prevents later local invocations and awaits task cancellation, but a provider may
+continue processing or billing in-flight work if its transport ignores cancellation.
+Provider-reported usage remains the only measured token source. Never commit `.env`.
 
 These settings belong to the Python server only. No frontend environment variable
 is required; requests use relative `/api`. Never copy credentials into `VITE_*`,

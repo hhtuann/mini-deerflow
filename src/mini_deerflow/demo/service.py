@@ -32,6 +32,7 @@ from mini_deerflow.persistence import (
     ThreadNotFoundError,
     normalize_thread_id,
 )
+from mini_deerflow.resource_limits import ResourceLimitExceeded
 from mini_deerflow.runtime import ConversationSnapshot, RuntimeLimits
 from mini_deerflow.state import AgentState
 from mini_deerflow.tracing import ExecutionTrace, TraceSink
@@ -292,6 +293,11 @@ def map_demo_error(error: BaseException, reference_id: str = "demo") -> str:
         (CheckpointPathError, CheckpointStorageError, CheckpointUnavailableError),
     ):
         return "Checkpoint operation failed."
+    if isinstance(error, ResourceLimitExceeded):
+        return (
+            "Live research reached its configured time or output limit. "
+            "Resume if a checkpoint is available."
+        )
     if isinstance(error, TimeoutError):
         return "Operation timed out."
     if _is_slide_agent_conflict(error):

@@ -80,6 +80,7 @@ from mini_deerflow.tracing import (
     MAX_SYNTHESIS_ATTEMPT_RECORDS,
     ExecutionEventType,
     ExecutionTracer,
+    ResourceLimitInfo,
     TraceErrorCategory,
     TraceErrorCode,
     TraceKind,
@@ -169,6 +170,16 @@ def _synthesis_fallback_limitation(
                 f"(code: {code}); the answer was built from validated findings."
             )
         )
+    if category is SynthesisFailureCategory.RESOURCE_LIMIT:
+        return (
+            "Tổng hợp đã dừng vì đạt giới hạn tài nguyên đã cấu hình "
+            f"(mã: {code}); câu trả lời được dựng từ các phát hiện đã xác thực."
+            if language == "vi"
+            else (
+                "Synthesis stopped at a configured resource limit "
+                f"(code: {code}); the answer was built from validated findings."
+            )
+        )
     if category is SynthesisFailureCategory.EMPTY_CONTENT:
         return (
             "Mô hình không trả về nội dung tổng hợp khả dụng; câu trả lời "
@@ -221,6 +232,32 @@ def _trace_synthesis_fallback(
     except Exception as error:  # noqa: BLE001 - telemetry must never fail a node
         logger.warning(
             "Synthesis fallback telemetry failed (%s); agent execution continues",
+            type(error).__name__,
+        )
+
+
+def _trace_synthesis_resource_limit(
+    tracer: ExecutionTracer,
+    reason: SynthesisFailureReason,
+) -> None:
+    """Emit one closed limit identity; raw model content is never accepted."""
+
+    try:
+        tracer.emit_event(
+            ExecutionEventType.RESOURCE_LIMIT_REACHED,
+            node="synthesize",
+            outcome=TraceOutcome.REFUSED,
+            error_category=TraceErrorCategory.RESOURCE_LIMIT,
+            error_code=(
+                TraceErrorCode.SYNTHESIS_DEADLINE_EXCEEDED
+                if reason is SynthesisFailureReason.SYNTHESIS_DEADLINE_EXCEEDED
+                else TraceErrorCode.SYNTHESIS_OUTPUT_LIMIT_EXCEEDED
+            ),
+            resource_limit=ResourceLimitInfo(reason=reason.value),
+        )
+    except Exception as error:  # noqa: BLE001 - telemetry is fail-open
+        logger.warning(
+            "Synthesis resource telemetry failed (%s); execution continues",
             type(error).__name__,
         )
 
@@ -1383,6 +1420,11 @@ def build_agent_workflow(
                 synthesis_failed = True
                 errors.append(synthesis_error)
                 logger.warning(synthesis_error)
+            if (
+                synthesis_category is SynthesisFailureCategory.RESOURCE_LIMIT
+                and synthesis_reason is not None
+            ):
+                _trace_synthesis_resource_limit(resolved_tracer, synthesis_reason)
             if synthesis_failed and synthesis_category is not None:
                 _trace_synthesis_fallback(
                     resolved_tracer,

@@ -201,6 +201,7 @@ class TraceEventView:
     synthesis_category: str | None = None
     synthesis_reason: str | None = None
     synthesis_attempts: int | None = None
+    resource_limit_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +343,7 @@ _SYNTHESIS_CATEGORIES = frozenset(
         "grounding_invalid",
         "provider_error",
         "empty_content",
+        "resource_limit",
     }
 )
 _SYNTHESIS_REASONS = frozenset(
@@ -350,8 +352,23 @@ _SYNTHESIS_REASONS = frozenset(
         "evidence_index_out_of_range",
         "url_in_prose",
         "contradiction_required",
+        "synthesis_deadline_exceeded",
+        "synthesis_output_limit_exceeded",
     }
 )
+_RESOURCE_LIMIT_REASONS = frozenset(
+    {
+        "overall_deadline_exceeded",
+        "synthesis_deadline_exceeded",
+        "synthesis_output_limit_exceeded",
+    }
+)
+
+
+def _safe_resource_limit_reason(value: object) -> str | None:
+    return (
+        value if isinstance(value, str) and value in _RESOURCE_LIMIT_REASONS else None
+    )
 
 
 def _safe_synthesis_code(value: object) -> str | None:
@@ -481,6 +498,9 @@ def project_trace_event(event: ExecutionTrace) -> TraceEventView:
         ),
         synthesis_attempts=_safe_synthesis_attempt_count(
             getattr(event, "synthesis_failure", None)
+        ),
+        resource_limit_reason=_safe_resource_limit_reason(
+            getattr(getattr(event, "resource_limit", None), "reason", None)
         ),
     )
 

@@ -19,6 +19,10 @@ def test_settings_load_from_environment(monkeypatch):
     assert settings.max_retries == 1
     assert settings.wiki_request_timeout == 9.0
     assert settings.structured_output_mode == "prompt_json"
+    assert settings.live_run_deadline_seconds == 1_200.0
+    assert settings.synthesis_deadline_seconds == 300.0
+    assert settings.model_max_output_tokens == 8_192
+    assert settings.synthesis_max_response_chars == 32_768
     assert "test-secret" not in repr(settings)
 
 
