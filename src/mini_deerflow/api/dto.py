@@ -11,6 +11,7 @@ from mini_deerflow.demo.view_models import (
     DemoRunView,
     TraceEventView,
 )
+from mini_deerflow.documents import DocumentRecord, WorkspaceRecord
 
 Mode = Literal["live", "offline"]
 Message = Annotated[
@@ -114,3 +115,20 @@ class SessionDTO(RootModel[ChatSessionView]):
 
 class WorkflowDTO(RootModel[ExecutionGraphProjection]):
     pass
+
+
+WorkspaceName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=80),
+]
+
+
+class WorkspaceCreateRequest(DTO):
+    name: WorkspaceName
+
+
+class WorkspaceDetailDTO(DTO):
+    """Workspace summary plus its active document summaries."""
+
+    workspace: WorkspaceRecord
+    documents: tuple[DocumentRecord, ...]

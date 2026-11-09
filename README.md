@@ -569,6 +569,19 @@ local SQLite database, there is no authenticated user ownership, and this is not
 OS/container sandbox or production artifact service. Sandboxes are retained so a
 thread can resume; automatic cleanup is not implemented.
 
+### Document workspace boundary
+
+Document workspaces (Track D1) store PDF/DOCX/TXT uploads as inert,
+checksum-verified bytes under server-derived hashed paths inside the same
+per-mode roots. User filenames are display metadata only; identifiers are
+opaque server-generated values, cross-workspace access fails closed as 404,
+and the only request-size exception to the 16 KiB boundary is the two
+raw-body upload routes, capped at the configured per-file quota and audited
+by the deployment-readiness gate. This is enumeration resistance for a
+trusted single-user loopback service, not authentication or tenancy. See
+[`docs/document-workspace.md`](docs/document-workspace.md) for the storage,
+lifecycle, quota, and API contracts.
+
 ### Session sandbox mentor check
 
 1. Run threads `sandbox-a` and `sandbox-b` with the same `--workspace` base.

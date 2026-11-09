@@ -3,6 +3,8 @@ from typing import Literal
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from mini_deerflow.documents import DEFAULT_DOCUMENT_LIMITS
+
 
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables."""
@@ -73,6 +75,32 @@ class Settings(BaseSettings):
         default=15.0,
         gt=0.0,
         le=120.0,
+    )
+
+    document_max_bytes: int = Field(
+        default=DEFAULT_DOCUMENT_LIMITS.max_document_bytes,
+        ge=1_024,
+        le=52_428_800,
+    )
+    document_workspace_max_documents: int = Field(
+        default=DEFAULT_DOCUMENT_LIMITS.max_documents_per_workspace,
+        ge=1,
+        le=1_000,
+    )
+    document_max_versions: int = Field(
+        default=DEFAULT_DOCUMENT_LIMITS.max_versions_per_document,
+        ge=1,
+        le=100,
+    )
+    document_workspace_max_bytes: int = Field(
+        default=DEFAULT_DOCUMENT_LIMITS.max_workspace_bytes,
+        ge=1_048_576,
+        le=2_147_483_648,
+    )
+    document_max_workspaces: int = Field(
+        default=DEFAULT_DOCUMENT_LIMITS.max_workspaces,
+        ge=1,
+        le=1_000,
     )
 
     structured_output_mode: Literal["native", "prompt_json"] = "prompt_json"

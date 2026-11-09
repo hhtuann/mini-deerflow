@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi import Path as ApiPath
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +28,8 @@ from mini_deerflow.api.dto import (
     SkillDTO,
     SkillsDTO,
     WorkflowDTO,
+    WorkspaceCreateRequest,
+    WorkspaceDetailDTO,
 )
 from mini_deerflow.api.jobs import ApiJobs
 from mini_deerflow.api.security import ALLOWED_ORIGINS, LocalRequestBoundary
@@ -42,6 +44,21 @@ from mini_deerflow.demo.service import (
     RunDemoCommand,
 )
 from mini_deerflow.demo.view_models import ChatSessionView
+from mini_deerflow.documents import (
+    DOCX_MIME,
+    PDF_MIME,
+    TXT_MIME,
+    DocumentIntegrityError,
+    DocumentLimits,
+    DocumentNotFoundError,
+    DocumentQuotaError,
+    DocumentRecord,
+    DocumentUnsupportedTypeError,
+    DocumentValidationError,
+    DocumentWorkspaceStore,
+    WorkspaceRecord,
+    resolve_document_limits,
+)
 from mini_deerflow.persistence import ThreadNotFoundError
 from mini_deerflow.pptx.artifacts import (
     PPTX_MIME,
@@ -59,6 +76,14 @@ from mini_deerflow.skills import SkillsError, SkillsRegistry
 Identifier = Annotated[
     str, ApiPath(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", max_length=128)
 ]
+
+# Fixed ASCII download names: user filenames are display metadata only and
+# are never placed into Content-Disposition headers.
+_DOCUMENT_DOWNLOAD_NAMES = {
+    PDF_MIME: "document.pdf",
+    DOCX_MIME: "document.docx",
+    TXT_MIME: "document.txt",
+}
 
 
 def _live_slide_planner_model():
@@ -94,6 +119,7 @@ def create_app(
     services: Mapping[Mode, DemoRuntimeService] | None = None,
     presentation_stores: Mapping[Mode, PptxArtifactStore] | None = None,
     slide_services: Mapping[Mode, SlideAgentService] | None = None,
+    document_limits: DocumentLimits | None = None,
 ) -> FastAPI:
     """Create an isolated app; supplied services override either default mode.
 
@@ -103,6 +129,10 @@ def create_app(
     Slide generation defaults to the live provider (credentials are resolved
     lazily at generation time); the offline mode requires an injected scripted
     planner through ``slide_services`` and refuses with 503 otherwise.
+    Document workspaces add a per-mode SQLite ledger plus hardened blob tree
+    under the same roots; startup sweeps crash orphans. The request boundary
+    keeps the tight default cap everywhere except the two raw-body upload
+    routes, which accept exactly the configured per-file quota.
     """
     root = (
         Path(storage_root) if storage_root is not None else Path(".mini-deerflow/demo")
@@ -140,16 +170,24 @@ def create_app(
         if set(slide_services) - {"offline", "live"}:
             raise ValueError("Unsupported slide service mode.")
         slide_agents.update(slide_services)
+    limits = document_limits or resolve_document_limits()
+    document_stores: dict[Mode, DocumentWorkspaceStore] = {
+        "offline": DocumentWorkspaceStore(root, limits=limits),
+        "live": DocumentWorkspaceStore(live_root, limits=limits),
+    }
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        for document_store in document_stores.values():
+            await document_store.recover()
         try:
             yield
         finally:
             await asyncio.to_thread(jobs.shutdown)
 
     app = FastAPI(title="Mini DeerFlow local API", lifespan=lifespan, debug=False)
-    app.add_middleware(LocalRequestBoundary)
+    app.add_middleware(LocalRequestBoundary, upload_max_bytes=limits.max_document_bytes)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(ALLOWED_ORIGINS),
@@ -168,6 +206,35 @@ def create_app(
     @app.exception_handler(ThreadNotFoundError)
     async def not_found(request: Request, error: Exception):
         return JSONResponse({"detail": "Conversation was not found."}, status_code=404)
+
+    @app.exception_handler(DocumentNotFoundError)
+    async def document_not_found(request: Request, error: Exception):
+        return JSONResponse({"detail": "Document was not found."}, status_code=404)
+
+    @app.exception_handler(DocumentUnsupportedTypeError)
+    async def document_unsupported_type(request: Request, error: Exception):
+        return JSONResponse(
+            {"detail": "Unsupported document type."},
+            status_code=415,
+        )
+
+    @app.exception_handler(DocumentValidationError)
+    async def document_invalid(request: Request, error: Exception):
+        return JSONResponse({"detail": "Invalid document request."}, status_code=422)
+
+    @app.exception_handler(DocumentQuotaError)
+    async def document_quota(request: Request, error: Exception):
+        return JSONResponse(
+            {"detail": "Document quota was exceeded."},
+            status_code=409,
+        )
+
+    @app.exception_handler(DocumentIntegrityError)
+    async def document_integrity(request: Request, error: Exception):
+        return JSONResponse(
+            {"detail": "Document is unavailable."},
+            status_code=409,
+        )
 
     @app.exception_handler(Exception)
     async def internal_error(request: Request, error: Exception):
@@ -416,6 +483,171 @@ def create_app(
                 "ETag": f'"{record.sha256}"',
             },
         )
+
+    async def _document_content_response(
+        mode: Mode,
+        workspace_id: str,
+        document_id: str,
+        version: int | None,
+    ) -> Response:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            record, version_record, data = await document_stores[mode].read_content(
+                workspace_id, document_id, version
+            )
+        # A fixed ASCII download name: user filenames are display metadata
+        # only and never enter HTTP headers.
+        download = _DOCUMENT_DOWNLOAD_NAMES.get(record.content_type, "document.bin")
+        return Response(
+            content=data,
+            media_type=record.content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{download}"',
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+                "ETag": f'"{version_record.sha256}"',
+                "X-Document-Version": str(version_record.version),
+            },
+        )
+
+    @app.post("/api/{mode}/workspaces", response_model=WorkspaceRecord, status_code=201)
+    async def create_workspace(
+        mode: Mode, body: WorkspaceCreateRequest
+    ) -> WorkspaceRecord:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].create_workspace(body.name)
+
+    @app.get("/api/{mode}/workspaces", response_model=tuple[WorkspaceRecord, ...])
+    async def workspaces(mode: Mode) -> tuple[WorkspaceRecord, ...]:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].list_workspaces()
+
+    @app.get("/api/{mode}/workspaces/{workspace_id}", response_model=WorkspaceDetailDTO)
+    async def workspace_detail(
+        mode: Mode, workspace_id: Identifier
+    ) -> WorkspaceDetailDTO:
+        store = document_stores[mode]
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            workspace = await store.get_workspace(workspace_id)
+            documents = await store.list_documents(workspace_id)
+        return WorkspaceDetailDTO(workspace=workspace, documents=documents)
+
+    @app.delete("/api/{mode}/workspaces/{workspace_id}", status_code=204)
+    async def delete_workspace(mode: Mode, workspace_id: Identifier) -> Response:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            await document_stores[mode].delete_workspace(workspace_id)
+        return Response(status_code=204)
+
+    @app.post(
+        "/api/{mode}/workspaces/{workspace_id}/documents",
+        response_model=DocumentRecord,
+        status_code=201,
+    )
+    async def upload_document(
+        mode: Mode,
+        workspace_id: Identifier,
+        request: Request,
+        filename: str = Query(min_length=1, max_length=256),
+    ) -> DocumentRecord:
+        data = await request.body()
+        content_type = (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        )
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].upload_document(
+                workspace_id,
+                filename=filename,
+                content_type=content_type,
+                data=data,
+            )
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents",
+        response_model=tuple[DocumentRecord, ...],
+    )
+    async def documents(
+        mode: Mode, workspace_id: Identifier
+    ) -> tuple[DocumentRecord, ...]:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].list_documents(workspace_id)
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}",
+        response_model=DocumentRecord,
+    )
+    async def document(
+        mode: Mode, workspace_id: Identifier, document_id: Identifier
+    ) -> DocumentRecord:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].get_document(workspace_id, document_id)
+
+    @app.post(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}/versions",
+        response_model=DocumentRecord,
+    )
+    async def upload_document_version(
+        mode: Mode,
+        workspace_id: Identifier,
+        document_id: Identifier,
+        request: Request,
+        filename: str | None = Query(default=None, max_length=256),
+    ) -> DocumentRecord:
+        data = await request.body()
+        content_type = (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        )
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            return await document_stores[mode].upload_version(
+                workspace_id,
+                document_id,
+                filename=filename,
+                content_type=content_type,
+                data=data,
+            )
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}/content",
+        response_model=None,
+    )
+    async def document_content(
+        mode: Mode, workspace_id: Identifier, document_id: Identifier
+    ) -> Response:
+        return await _document_content_response(mode, workspace_id, document_id, None)
+
+    @app.get(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}"
+        "/content/{version}",
+        response_model=None,
+    )
+    async def document_content_version(
+        mode: Mode,
+        workspace_id: Identifier,
+        document_id: Identifier,
+        version: int = ApiPath(ge=1, le=1_000_000),
+    ) -> Response:
+        return await _document_content_response(
+            mode, workspace_id, document_id, version
+        )
+
+    @app.delete(
+        "/api/{mode}/workspaces/{workspace_id}/documents/{document_id}",
+        status_code=204,
+    )
+    async def delete_document(
+        mode: Mode, workspace_id: Identifier, document_id: Identifier
+    ) -> Response:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            await document_stores[mode].delete_document(workspace_id, document_id)
+        return Response(status_code=204)
 
     return app
 

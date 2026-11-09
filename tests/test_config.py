@@ -24,6 +24,11 @@ def test_settings_load_from_environment(monkeypatch):
     assert settings.model_max_output_tokens == 8_192
     assert settings.synthesis_max_response_chars == 32_768
     assert "test-secret" not in repr(settings)
+    assert settings.document_max_bytes == 10_485_760
+    assert settings.document_workspace_max_documents == 50
+    assert settings.document_max_versions == 20
+    assert settings.document_workspace_max_bytes == 209_715_200
+    assert settings.document_max_workspaces == 100
 
 
 def test_settings_glm_provider_defaults() -> None:
@@ -49,6 +54,34 @@ def test_settings_reject_invalid_values(monkeypatch):
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_settings_reject_out_of_bounds_document_limits(monkeypatch):
+    monkeypatch.setenv("MINI_DEERFLOW_API_KEY", "test-secret")
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_settings_document_limits_match_default_document_limits() -> None:
+    from mini_deerflow.documents import DEFAULT_DOCUMENT_LIMITS
+
+    settings = Settings(api_key="test-secret", _env_file=None)
+    assert settings.document_max_bytes == DEFAULT_DOCUMENT_LIMITS.max_document_bytes
+    assert (
+        settings.document_workspace_max_documents
+        == DEFAULT_DOCUMENT_LIMITS.max_documents_per_workspace
+    )
+    assert (
+        settings.document_max_versions
+        == DEFAULT_DOCUMENT_LIMITS.max_versions_per_document
+    )
+    assert (
+        settings.document_workspace_max_bytes
+        == DEFAULT_DOCUMENT_LIMITS.max_workspace_bytes
+    )
+    assert settings.document_max_workspaces == DEFAULT_DOCUMENT_LIMITS.max_workspaces
 
 
 def test_obsolete_google_key_does_not_satisfy_api_key(monkeypatch):
