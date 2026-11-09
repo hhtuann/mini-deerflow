@@ -443,3 +443,33 @@ def test_valid_document_quota_override_reaches_upload_boundary(
             headers={"Content-Type": PDF_MIME},
         )
         assert oversized.status_code == 413
+
+
+def test_injected_limits_still_validate_ambient_document_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Injection overrides values, not fail-closed quota validation."""
+
+    from mini_deerflow.documents import DocumentLimitsError
+
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999")
+    with pytest.raises(DocumentLimitsError) as error:
+        create_app(tmp_path, document_limits=LIMITS)
+    assert "999" not in str(error.value)
+
+
+def test_injected_limits_with_valid_ambient_override_keep_injection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "2048")
+    with TestClient(create_app(tmp_path, document_limits=LIMITS)) as client:
+        workspace_id = _workspace(client)
+        # LIMITS.max_document_bytes is 4096, not the env value 2048.
+        body = b"%PDF-1.7 " + b"b" * 3_000
+        created = client.post(
+            f"/api/live/workspaces/{workspace_id}/documents",
+            params={"filename": "env-vs-injected.pdf"},
+            content=body,
+            headers={"Content-Type": PDF_MIME},
+        )
+        assert created.status_code == 201, created.text

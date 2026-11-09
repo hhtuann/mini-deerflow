@@ -56,15 +56,24 @@ partially interpreted. Future column additions follow the guarded
 | Workspaces | 100 | `MINI_DEERFLOW_DOCUMENT_MAX_WORKSPACES` | 1 – 1000 |
 
 Workspace byte quota counts **all versions of active documents**. Apps may
-inject tighter fixture limits via `create_app(document_limits=...)`
-(explicit injection is authoritative and bypasses environment resolution).
+inject tighter fixture limits via `create_app(document_limits=...)`: explicit
+injection overrides the resolved quota *values* but never bypasses quota
+validation — an app constructed with injected limits still refuses to start
+on an invalid explicit document override.
 
-**Fail-closed quota configuration:** an explicitly configured but invalid
-`MINI_DEERFLOW_DOCUMENT_*` value (wrong type or outside the valid range)
-raises `DocumentLimitsError` at `create_app()` — the server refuses to
-start rather than silently broadening to defaults. Invalid settings for
-unrelated provider fields (or a missing provider key) fall back to the
-audited defaults only when no document override is invalid.
+**Fail-closed quota configuration:** any explicitly configured
+`MINI_DEERFLOW_DOCUMENT_*` value (environment or `.env`) makes quota
+resolution fatal when it cannot be honored exactly:
+
+- an invalid value (wrong type or outside the valid range) raises
+  `DocumentLimitsError` ("Document quota configuration is invalid.");
+- a **valid** value combined with an unrelated invalid provider setting also
+  raises `DocumentLimitsError` ("…could not be verified.") rather than being
+  silently discarded and broadened to the audited defaults.
+
+Only when **no** document override is configured at all do unrelated invalid
+provider settings (or a missing provider key) fall back to the audited
+defaults.
 
 **Retention proposal (owner decision pending):** no automatic expiry in D1;
 documents persist until explicit deletion and survive restart. Real-data

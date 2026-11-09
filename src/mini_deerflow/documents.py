@@ -146,19 +146,52 @@ _DOCUMENT_LIMIT_SETTINGS_FIELDS = (
 
 
 class DocumentLimitsError(DocumentError):
-    """Explicit document quota configuration is invalid; refuse to operate."""
+    """Document quota configuration cannot be safely resolved; refuse to run."""
+
+
+def _document_override_present() -> bool:
+    """Report whether any document quota key is explicitly configured.
+
+    Mirrors the sources ``Settings`` reads (process environment plus a
+    ``.env`` file in the working directory) so a present-but-unresolvable
+    operator override can never be silently replaced by defaults.
+    """
+
+    names = {
+        f"mini_deerflow_{settings_name}"
+        for settings_name, _ in _DOCUMENT_LIMIT_SETTINGS_FIELDS
+    }
+    environment = {key.lower() for key in os.environ}
+    if any(name in environment for name in names):
+        return True
+    env_file = Path(".env")
+    if not env_file.is_file():
+        return False
+    try:
+        content = env_file.read_text(encoding="utf-8")
+    except OSError:
+        # Unreadable configuration while settings already failed: assume an
+        # override exists so the caller fails closed instead of broadening.
+        return True
+    for line in content.splitlines():
+        key = line.split("=", 1)[0].strip().lower()
+        if key in names:
+            return True
+    return False
 
 
 def resolve_document_limits() -> DocumentLimits:
-    """Resolve quotas from settings, failing closed on invalid overrides.
+    """Resolve quotas from settings, failing closed around explicit overrides.
 
     ``Settings`` requires a provider API key which unrelated local tools may
     not have, yet operator-set document quotas must still apply; a placeholder
     key (never used for document operations) lets validation run without one.
-    An explicitly configured but invalid *document* quota can never silently
-    broaden to the audited defaults — it raises :class:`DocumentLimitsError`
-    so app construction and the server refuse to start. Invalid settings for
-    unrelated provider fields keep falling back to the defaults.
+    Any explicit document override makes unresolvable settings fatal: an
+    invalid override raises :class:`DocumentLimitsError`, and a *valid*
+    override is never silently discarded (and broadened to defaults) just
+    because an unrelated provider field is invalid. Only when no document
+    override is configured at all do unrelated invalid settings fall back to
+    the audited defaults.
     """
 
     try:
@@ -173,6 +206,12 @@ def resolve_document_limits() -> DocumentLimits:
         if any((field,) in locations for field in document_fields):
             raise DocumentLimitsError(
                 "Document quota configuration is invalid."
+            ) from None
+        if _document_override_present():
+            # A valid explicit quota must not be silently broadened because
+            # an unrelated field failed validation; refuse to resolve.
+            raise DocumentLimitsError(
+                "Document quota configuration could not be verified."
             ) from None
         return DEFAULT_DOCUMENT_LIMITS
     return DocumentLimits(

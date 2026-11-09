@@ -727,3 +727,48 @@ def test_invalid_document_override_beats_unrelated_invalid_settings(
     monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "999")
     with pytest.raises(DocumentLimitsError):
         resolve_document_limits()
+
+
+def test_valid_document_override_with_unrelated_invalid_setting_fails_closed(
+    monkeypatch,
+) -> None:
+    """A valid explicit quota must never be discarded via unrelated errors."""
+
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    monkeypatch.setenv("MINI_DEERFLOW_DOCUMENT_MAX_BYTES", "2048")
+    with pytest.raises(DocumentLimitsError):
+        resolve_document_limits()
+
+
+def test_document_override_in_env_file_counts_as_explicit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mini_deerflow.documents import DocumentLimitsError, resolve_document_limits
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    (tmp_path / ".env").write_text(
+        "MINI_DEERFLOW_DOCUMENT_MAX_BYTES=2048\n", encoding="utf-8"
+    )
+    with pytest.raises(DocumentLimitsError):
+        resolve_document_limits()
+
+
+def test_unrelated_invalid_setting_without_any_override_keeps_defaults(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mini_deerflow.documents import DEFAULT_DOCUMENT_LIMITS, resolve_document_limits
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MINI_DEERFLOW_TEMPERATURE", "not-a-number")
+    for name in (
+        "MINI_DEERFLOW_DOCUMENT_MAX_BYTES",
+        "MINI_DEERFLOW_DOCUMENT_WORKSPACE_MAX_DOCUMENTS",
+        "MINI_DEERFLOW_DOCUMENT_MAX_VERSIONS",
+        "MINI_DEERFLOW_DOCUMENT_WORKSPACE_MAX_BYTES",
+        "MINI_DEERFLOW_DOCUMENT_MAX_WORKSPACES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert resolve_document_limits() == DEFAULT_DOCUMENT_LIMITS

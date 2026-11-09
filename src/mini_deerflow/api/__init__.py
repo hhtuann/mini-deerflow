@@ -140,10 +140,13 @@ def create_app(
     live_root = (
         root / "live" if storage_root is not None else Path(".mini-deerflow/live")
     )
-    # Resolve quotas before any Settings-consuming component is built so an
-    # invalid explicit document override fails closed with the controlled
-    # DocumentLimitsError instead of a raw provider-settings error.
-    limits = document_limits or resolve_document_limits()
+    # Resolve (and validate) quotas before any Settings-consuming component
+    # is built: an invalid or unverifiable explicit document override fails
+    # closed with the controlled DocumentLimitsError instead of a raw
+    # provider-settings error. Explicit injection overrides the resolved
+    # values but never bypasses this validation.
+    resolved_limits = resolve_document_limits()
+    limits = document_limits or resolved_limits
     runtime_services = {
         "offline": DemoRuntimeService(OfflineDemoBackend(root)),
         "live": DemoRuntimeService(LiveDemoBackend(live_root)),
