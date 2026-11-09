@@ -164,10 +164,12 @@ re-submitted). Result records are terminal-only: `completed` or
 Raw exception text, paths, and document internals never surface.
 
 - **PDF** (pypdf, text layer only): genuine 1-based page locators, never
-  synthesized; encrypted, scripted (catalog `/JavaScript` / `/OpenAction` /
-  `/EmbeddedFiles` / `/AA`, `/Names` JavaScript tree **or** embedded-file
-  attachments, `/AcroForm` XFA, page-level `/AA`, annotation `/AA` or
-  `/JavaScript` actions), or no-text documents are marked unavailable.
+  synthesized; encrypted, embedded-active-content, or no-text documents are
+  marked unavailable. Refusal surfaces: catalog `/JavaScript` `/OpenAction`
+  `/EmbeddedFiles` `/AA` `/AF`, the `/Names` JavaScript tree or
+  embedded-file attachments, `/AcroForm` XFA, page-level `/AA`/`/AF`, and
+  annotations with `/AA`, `/AF`, `/Subtype /FileAttachment`, or
+  `/A /S /JavaScript|/Launch` actions.
 - **DOCX** (stdlib `zipfile` + `defusedxml`, no new parser dependency):
   paragraph and table locators only — **no invented page numbers**; macro
   parts (`word/vbaProject.bin`) and external relationship targets are

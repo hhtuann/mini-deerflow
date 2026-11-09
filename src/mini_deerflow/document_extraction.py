@@ -176,15 +176,18 @@ def _strip_control_noise(text: str) -> str:
 # PDF (text layer only)
 # ---------------------------------------------------------------------------
 def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
-    """Catalog + page + annotation + names-tree + XFA script detection.
+    """Refuse embedded active content: scripts, actions, attachments.
 
-    Cheap key-presence checks only: the service never renders or executes
-    PDFs, so detection is structural refusal, not interpretation.
+    Cheap key-presence checks across the catalog (incl. the Names tree,
+    XFA, and PDF 2.0 associated files), pages (incl. /AF), and annotations
+    (additional-actions, JavaScript/Launch actions, FileAttachment
+    annotations). The service never renders or executes PDFs, so this is
+    structural refusal, not interpretation.
     """
 
     root = reader.trailer.get("/Root")
     if root is not None:
-        for flag in ("/JavaScript", "/OpenAction", "/EmbeddedFiles", "/AA"):
+        for flag in ("/JavaScript", "/OpenAction", "/EmbeddedFiles", "/AA", "/AF"):
             if flag in root:
                 return True
         names = root.get("/Names")
@@ -196,16 +199,19 @@ def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
         if acroform is not None and "/XFA" in acroform:
             return True
     for page in pages:
-        if "/AA" in page:
-            return True
+        for flag in ("/AA", "/AF"):
+            if flag in page:
+                return True
         annotations = page.get("/Annots")
         if annotations is None:
             continue
         for annotation in annotations:
-            if "/AA" in annotation:
+            if "/AA" in annotation or "/AF" in annotation:
+                return True
+            if annotation.get("/Subtype") == "/FileAttachment":
                 return True
             action = annotation.get("/A")
-            if action is not None and action.get("/S") == "/JavaScript":
+            if action is not None and action.get("/S") in ("/JavaScript", "/Launch"):
                 return True
     return False
 

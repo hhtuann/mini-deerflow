@@ -561,6 +561,47 @@ class TestFailClosedAndBudgets:
             extract_document(PDF_MIME, buffer.getvalue(), DEFAULT_EXTRACTION_LIMITS)
         assert error.value.error_class == "embedded_script"
 
+    @pytest.mark.parametrize(
+        "catalog_extra,page_extra,extra_objects",
+        (
+            ("/AF [902 0 R]", "", {902: b"<< /Type /Filespec /F (a.txt) >>"}),
+            ("", "/AF [902 0 R]", {902: b"<< /Type /Filespec /F (a.txt) >>"}),
+            (
+                "",
+                "/Annots [902 0 R]",
+                {
+                    902: (
+                        b"<< /Type /Annot /Subtype /FileAttachment /Rect [0 0 10 10] "
+                        b"/FS << /Type /Filespec /F (b.txt) /EF << /F 903 0 R >> >> >>"
+                    )
+                },
+            ),
+            (
+                "",
+                "/Annots [902 0 R]",
+                {
+                    902: (
+                        b"<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] "
+                        b"/A << /S /Launch /Win << /F (x.exe) >> >> >>"
+                    )
+                },
+            ),
+        ),
+        ids=["catalog-af", "page-af", "file-attachment", "launch-action"],
+    )
+    def test_pdf_associated_files_and_launch_actions_refused(
+        self, catalog_extra: str, page_extra: str, extra_objects
+    ) -> None:
+        data = _build_pdf(
+            ["innocent text"],
+            catalog_extra=catalog_extra,
+            page_extra=page_extra,
+            extra_objects=extra_objects,
+        )
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_script"
+
     def test_zip_bomb_uncompressed_total_budget_enforced(self) -> None:
         """Declared-size caps bound decompression before any entry is read."""
 
