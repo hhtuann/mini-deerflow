@@ -42,6 +42,32 @@ it('correlates a selected workflow node with only its own redacted context metri
   expect(screen.getByRole('region', { name: 'Node details' })).toHaveTextContent('999999');
 });
 
+it('renders bounded synthesis fallback status only for the matching Synthesis node', async () => {
+  const synthNode = { ...graph.nodes[0], id: 'workflow:run-1:synthesize', kind: 'workflow_node' as const, label: 'Synthesis',
+    details: [], safe_summary: null };
+  const otherNode = { ...graph.nodes[1], id: 'workflow:other:planner', kind: 'workflow_node' as const, label: 'Planner',
+    details: [], safe_summary: null };
+  const fallbackEvent = { ...trace, run_id: 'run-1', node: 'synthesize', kind: 'synthesis', outcome: 'fallback',
+    synthesis_fallback: true, synthesis_category: 'grounding_invalid', synthesis_reason: 'language_mismatch', synthesis_attempts: 2 };
+  render(<ExecutionGraph graph={{ ...graph, nodes: [synthNode, otherNode], edges: [] }} traces={[fallbackEvent]} />);
+  const details = screen.getByRole('region', { name: 'Node details' });
+  expect(details).toHaveTextContent('Synthesis outcome');
+  expect(details).toHaveTextContent('Completed via fallback (grounding_invalid/language_mismatch)');
+  expect(details).toHaveTextContent('Synthesis attempts2');
+  expect(details).toHaveTextContent('deterministic fallback');
+  await userEvent.selectOptions(screen.getByLabelText('Inspect node'), 'workflow:other:planner');
+  expect(screen.getByRole('region', { name: 'Node details' })).not.toHaveTextContent('Completed via fallback');
+});
+
+it('renders no fallback status for historical traces without synthesis fields', () => {
+  const synthNode = { ...graph.nodes[0], id: 'workflow:run-1:synthesize', kind: 'workflow_node' as const, label: 'Synthesis',
+    details: [], safe_summary: null };
+  render(<ExecutionGraph graph={{ ...graph, nodes: [synthNode], edges: [] }} traces={[]} />);
+  const details = screen.getByRole('region', { name: 'Node details' });
+  expect(details).not.toHaveTextContent('Synthesis outcome');
+  expect(details).not.toHaveTextContent('Completed via fallback');
+});
+
 it('renders provider-reported usage per matching node invocation, null as Not reported', () => {
   const realNode = { ...graph.nodes[0], id: 'workflow:run-1:planner', kind: 'workflow_node' as const, label: 'Planner',
     details: [], safe_summary: null };

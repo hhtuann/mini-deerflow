@@ -54,6 +54,15 @@ _INTERNAL_PREFIX_PATTERN = re.compile(
     r"^(?:step|review)\s+\d+\s*[:\-\u2013\u2014]\s*",
     re.IGNORECASE,
 )
+# Narrow Vietnamese execution lead-ins (e.g. "Bước 2 hoàn tất:") that may
+# prefix an otherwise substantive model-authored finding summary. They are
+# stripped only in claim extraction; the remainder is still filtered.
+_VIETNAMESE_EXECUTION_LEADIN_PATTERN = re.compile(
+    r"^(?:b\u01b0\u1edbc(?:\s+s\u1ed1)?|step)\s+\d+(?:\s+|(?=[:\-\u2013\u2014]))"
+    r"(?:ho\u00e0n\s+t\u1ea5t|ho\u00e0n\s+th\u00e0nh)?\s*[:\-\u2013\u2014]?\s*",
+    re.IGNORECASE,
+)
+_URL_OMISSION_MARKER = "[unverified url omitted]"
 _INTERNAL_PROGRESS_PATTERN = re.compile(
     r"^(?:completed|finished)\s+(?:evidence-backed\s+)?research\s+"
     r"step(?:\s+number)?\s+\d+[.!]?$",
@@ -280,6 +289,7 @@ class UserFacingAnswer(EvidenceModel):
     limitations: list[PublicAnswerText] = Field(default_factory=list, max_length=6)
     comparison_table: ComparisonTable | None = None
     sources: list[str] = Field(default_factory=list, max_length=MAX_EVIDENCE_RECORDS)
+    extraction_limited: bool = False
 
 
 def extract_evidence_records(
@@ -534,6 +544,26 @@ def _answer_points(statement: str) -> list[str]:
     return points
 
 
+def _strip_execution_leadin(value: str) -> str:
+    """Drop one narrow execution lead-in; keep the substantive remainder."""
+
+    return _VIETNAMESE_EXECUTION_LEADIN_PATTERN.sub("", value, count=1).strip()
+
+
+def _public_sentences(value: str) -> list[str]:
+    """Keep substantive sentences; drop execution prose and unverified URLs."""
+
+    kept: list[str] = []
+    for sentence in _ANSWER_SENTENCE_BOUNDARY.split(value):
+        stripped = sentence.strip()
+        if not stripped or _is_internal_execution_text(stripped):
+            continue
+        if _URL_OMISSION_MARKER in stripped.casefold():
+            continue
+        kept.append(stripped)
+    return kept
+
+
 def _split_overlong_answer_word(word: str) -> list[str]:
     """Split an unspaced value without leaving a trailing Markdown escape."""
 
@@ -674,10 +704,13 @@ def _claims_from_finding(
     def collect(value: str, target: list[AnswerClaim]) -> None:
         if not citations:
             return
-        points = _answer_points(value) if len(citations) == 1 else [value]
+        cleaned = _strip_execution_leadin(value)
+        sentences = _public_sentences(cleaned)
+        if not sentences:
+            return
+        cleaned = " ".join(sentences)
+        points = _answer_points(cleaned) if len(citations) == 1 else [cleaned]
         for point in points:
-            if _is_internal_execution_text(point):
-                continue
             text = _bound_public_text(_public_markdown_text(point), 1_000)
             if text:
                 target.append(AnswerClaim(text=text, citations=citations))
@@ -783,6 +816,13 @@ def build_user_facing_answer(
         )
         limitations.append(fallback_limitation)
 
+    extraction_limited = (
+        not summary
+        and not evidence_claims
+        and not discrepancies
+        and (bool(sources) or any(finding.citations for finding in findings))
+    )
+
     return UserFacingAnswer(
         language=language,
         completion_status=completion_status,
@@ -791,6 +831,7 @@ def build_user_facing_answer(
         discrepancies=discrepancies[:6],
         limitations=limitations[:6],
         sources=sources[:MAX_EVIDENCE_RECORDS],
+        extraction_limited=extraction_limited,
     )
 
 
@@ -848,6 +889,10 @@ def render_user_answer(
             "limitations": "Độ tin cậy / hạn chế",
             "sources": "Nguồn",
             "empty": "Chưa có đủ bằng chứng công khai để đưa ra kết luận trực tiếp cho câu hỏi này.",
+            "extraction_failed": (
+                "Không trích xuất được kết luận an toàn từ các phát hiện đã thu "
+                "thập; xem bằng chứng và nguồn đã xác thực bên dưới."
+            ),
             "partial": "Câu trả lời một phần: agent đã dừng vì giới hạn thực thi và chỉ tổng hợp từ bằng chứng đã xác thực.",
         }
         if answer.language == "vi"
@@ -862,6 +907,10 @@ def render_user_answer(
             "limitations": "Confidence / limitations",
             "sources": "Sources",
             "empty": "There is not enough public evidence for a direct conclusion.",
+            "extraction_failed": (
+                "No conclusion could be safely extracted from the collected "
+                "findings; see the validated evidence and sources below."
+            ),
             "partial": "Partial answer: the agent stopped at an execution limit and synthesized only validated evidence.",
         }
     )
@@ -874,6 +923,8 @@ def render_user_answer(
 
     if answer.summary:
         lines.extend(_render_claim(claim, citation_numbers) for claim in answer.summary)
+    elif answer.extraction_limited:
+        lines.append(labels["extraction_failed"])
     else:
         lines.append(labels["empty"])
 
