@@ -178,8 +178,9 @@ Raw exception text, paths, and document internals never surface.
   bit 0), and external relationship targets are refused (relationships
   parsed as bounded XML, so quoting/spacing/attribute order cannot evade
   the check; unparseable rels are malformed); nested tables inside cells
-  and `w:sdt` content-control text are extracted (depth-bounded, refused
-  as malformed beyond 32 levels); ZIP decompression is bounded by declared
+  and `w:sdt` content-control text — including sdt inside table cells —
+  are extracted (depth-bounded, refused as malformed beyond 32 levels);
+  ZIP decompression is bounded by declared
   entry sizes checked before any read (only `document.xml` and its rels
   are ever decompressed); a compression-ratio heuristic was deliberately
   rejected because legitimately compressible XML false-positives.

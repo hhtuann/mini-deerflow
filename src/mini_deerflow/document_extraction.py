@@ -333,9 +333,13 @@ def _extract_pdf_units(
         ValueError,
         TypeError,
         KeyError,
+        AttributeError,
         OverflowError,
         ZeroDivisionError,
     ) as error:
+        # AttributeError: pypdf exposes non-dictionary shapes for /Fields,
+        # /Kids, and /Annots in malformed documents (NameObject keys, plain
+        # strings); that is malformed structure, not a raw escape.
         raise ExtractionUnavailableError("malformed") from error
 
 
@@ -353,24 +357,32 @@ def _docx_paragraph_text(paragraph: Any) -> str:
     return "".join(parts).strip()
 
 
-def _docx_cell_text(cell: Any) -> str:
-    """Cell text including paragraphs and any nested tables (in order)."""
+def _docx_cell_text(cell: Any, depth: int = 0) -> str:
+    """Cell text: paragraphs, nested tables, and sdt controls, in order."""
 
+    if depth > 32:
+        raise ExtractionUnavailableError("malformed")
     parts: list[str] = []
     for child in cell:
         if child.tag == f"{_DOCX_NS}p":
             parts.append(_docx_paragraph_text(child))
         elif child.tag == f"{_DOCX_NS}tbl":
-            nested = _docx_table_text(child)
+            nested = _docx_table_text(child, depth + 1)
             if nested:
                 parts.append(nested)
+        elif child.tag == f"{_DOCX_NS}sdt":
+            content = child.find(f"{_DOCX_NS}sdtContent")
+            if content is not None:
+                wrapped = _docx_cell_text(content, depth + 1)
+                if wrapped:
+                    parts.append(wrapped)
     return " ".join(part for part in parts if part)
 
 
-def _docx_table_text(table: Any) -> str:
+def _docx_table_text(table: Any, depth: int = 0) -> str:
     rows: list[str] = []
     for row in table.findall(f"{_DOCX_NS}tr"):
-        cells = [_docx_cell_text(cell) for cell in row.findall(f"{_DOCX_NS}tc")]
+        cells = [_docx_cell_text(cell, depth) for cell in row.findall(f"{_DOCX_NS}tc")]
         rows.append(" | ".join(cells))
     return "\n".join(rows)
 
@@ -543,10 +555,11 @@ def _extract_txt_units(
 # ---------------------------------------------------------------------------
 # Deterministic chunking
 # ---------------------------------------------------------------------------
-def _hard_split(text: str) -> list[str]:
+def _hard_split(text: str, deadline: _Deadline) -> list[str]:
     pieces: list[str] = []
     remaining = text
     while len(remaining) > CHUNK_HARD_LIMIT_CHARS:
+        deadline.check()
         window = remaining[:CHUNK_HARD_LIMIT_CHARS]
         cut = window.rfind("\n")
         if cut < CHUNK_HARD_LIMIT_CHARS // 2:
@@ -627,7 +640,7 @@ def _pack_units(
         deadline.check()
         if len(unit.text) > CHUNK_HARD_LIMIT_CHARS:
             flush()
-            for piece in _hard_split(unit.text):
+            for piece in _hard_split(unit.text, deadline):
                 emit([piece], unit.kind, unit.locator)
             continue
         kind_mismatch = bool(current_units) and current_units[0].kind != unit.kind

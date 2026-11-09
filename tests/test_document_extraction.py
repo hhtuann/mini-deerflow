@@ -711,6 +711,52 @@ class TestFailClosedAndBudgets:
             with pytest.raises(ValueError):
                 DocumentExtractionLimits(deadline_seconds=value)
 
+    @pytest.mark.parametrize(
+        "catalog_extra,page_extra",
+        (
+            ("/AcroForm << /Fields << /A << /S /JavaScript >> >> >>", ""),
+            ("/AcroForm << /Fields (hello) >>", ""),
+            ("", "/Annots << /Foo 1 >>"),
+        ),
+        ids=["fields-dict", "fields-string", "annots-dict"],
+    )
+    def test_non_array_fields_or_annots_shapes_are_malformed(
+        self, catalog_extra: str, page_extra: str
+    ) -> None:
+        """Non-dict entries in /Fields//Kids//Annots stay closed failures."""
+
+        data = _build_pdf(
+            ["innocent"],
+            catalog_extra=catalog_extra,
+            page_extra=page_extra,
+        )
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "malformed"
+
+    def test_sdt_inside_table_cell_extracted(self) -> None:
+        xml_body = (
+            "<w:tbl><w:tr><w:tc>"
+            "<w:sdt><w:sdtContent>"
+            "<w:p><w:r><w:t>SDT IN CELL</w:t></w:r></w:p>"
+            "</w:sdtContent></w:sdt>"
+            "</w:tc></w:tr></w:tbl>"
+        )
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<w:document xmlns:w="{_DOCX_NS}"><w:body>{xml_body}</w:body></w:document>'
+        )
+        data = _build_docx([], document_xml=xml)
+        _, chunks, _ = extract_document(DOCX_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert "SDT IN CELL" in "\n".join(chunk.text for chunk in chunks)
+
+    def test_hard_split_honors_deadline(self) -> None:
+        huge = "word " * 800_000
+        limits = DocumentExtractionLimits(deadline_seconds=0.01, max_chars=50_000_000)
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(TXT_MIME, huge.encode(), limits)
+        assert error.value.error_class == "deadline_exceeded"
+
     def test_zip_entry_count_budget_enforced(self) -> None:
         entries = {f"extra/{index}.xml": b"<a/>" for index in range(50)}
         data = _build_docx(["text"], extra_entries=entries)
