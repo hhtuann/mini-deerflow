@@ -167,21 +167,27 @@ Raw exception text, paths, and document internals never surface.
   synthesized; encrypted, embedded-active-content, or no-text documents are
   marked unavailable. Refusal surfaces: catalog `/JavaScript` `/OpenAction`
   `/EmbeddedFiles` `/AA` `/AF`, the `/Names` JavaScript tree or
-  embedded-file attachments, `/AcroForm` XFA, page-level `/AA`/`/AF`, and
-  annotations with `/AA`, `/AF`, `/Subtype /FileAttachment`, or
-  `/A /S /JavaScript|/Launch` actions.
+  embedded-file attachments, `/AcroForm` XFA, page-level `/AA`/`/AF`,
+  annotations with `/AA`, `/AF`, media/attachment subtypes
+  (`/FileAttachment` `/RichMedia` `/Movie` `/3D` `/Sound`), `/A /S
+  /JavaScript|/Launch` actions, and AcroForm field-tree widgets carrying
+  those same active-content keys (walked via `/Fields`/`/Kids`, bounded).
 - **DOCX** (stdlib `zipfile` + `defusedxml`, no new parser dependency):
   paragraph and table locators only — **no invented page numbers**; macro
-  parts (`word/vbaProject.bin`) and external relationship targets are
-  refused (relationships parsed as bounded XML, so quoting/spacing/
-  attribute order cannot evade the check; unparseable rels are malformed);
-  ZIP decompression is bounded by declared entry sizes checked
-  before any read (only `document.xml` and its rels are ever decompressed);
-  a compression-ratio heuristic was deliberately rejected because
-  legitimately compressible XML false-positives.
+  parts (`word/vbaProject.bin`), encrypted entries (ZIP general-purpose
+  bit 0), and external relationship targets are refused (relationships
+  parsed as bounded XML, so quoting/spacing/attribute order cannot evade
+  the check; unparseable rels are malformed); nested tables inside cells
+  and `w:sdt` content-control text are extracted (depth-bounded, refused
+  as malformed beyond 32 levels); ZIP decompression is bounded by declared
+  entry sizes checked before any read (only `document.xml` and its rels
+  are ever decompressed); a compression-ratio heuristic was deliberately
+  rejected because legitimately compressible XML false-positives.
 - **TXT**: 1-based line-range locators; strict UTF-8.
-- **Chunks**: deterministic — `chunk_id = sha256(version_sha256:index)[:16]`,
-  target ≈1,600 / hard cap 2,000 chars, split at unit boundaries;
+- **Chunks**: deterministic — `chunk_id = sha256(version_sha256:index)[:16]`;
+  consecutive paragraph/line units pack toward the ≈1,600-char target with
+  merged range locators (paragraph *i..j* / line *i..j*), oversized units
+  hard-split at ≤2,000 chars, page/table units stay one-per-locator;
   `extractor_version` ("d2-v1") is persisted per extraction.
 - **Budgets** (cooperative): deadline (default 30 s, checked per
   page/paragraph/entry), max pages 300, max extracted chars 2 M, max XML

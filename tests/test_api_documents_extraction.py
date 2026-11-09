@@ -173,6 +173,27 @@ class TestExtractionJobFlow:
             )
             assert conflict.status_code == 409
 
+    def test_unavailable_extraction_can_be_requeued(self, tmp_path: Path) -> None:
+        from tests.test_document_extraction import _encrypted_pdf
+
+        with _client(tmp_path) as client:
+            workspace_id = _workspace(client)
+            document_id = _upload(
+                client, workspace_id, "locked.pdf", _encrypted_pdf(), PDF_MIME
+            )
+            first = _extract(client, workspace_id, document_id)
+            assert first["status"] == "completed"
+            record = client.get(
+                f"/api/live/workspaces/{workspace_id}/documents/{document_id}/extraction"
+            ).json()
+            assert record["status"] == "unavailable"
+            # Unavailable outcomes are re-queueable (e.g. after the bytes
+            # are replaced by a new version); completed ones are not.
+            second = client.post(
+                f"/api/live/workspaces/{workspace_id}/documents/{document_id}/extraction"
+            )
+            assert second.status_code == 202
+
     def test_new_version_gets_new_extraction(self, tmp_path: Path) -> None:
         with _client(tmp_path) as client:
             workspace_id = _workspace(client)

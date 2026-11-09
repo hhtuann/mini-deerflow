@@ -288,6 +288,47 @@ class TestFormatExtraction:
             expected = "\n".join(extracted)
             assert expected in chunk.text or chunk.text in expected
 
+    def test_txt_short_lines_pack_into_one_range_chunk(self) -> None:
+        lines = [f"line number {index}" for index in range(1, 11)]
+        _, chunks, _ = extract_document(
+            TXT_MIME, ("\n".join(lines) + "\n").encode(), DEFAULT_EXTRACTION_LIMITS
+        )
+        assert len(chunks) == 1
+        assert chunks[0].locator.line_start == 1
+        assert chunks[0].locator.line_end == 10
+        assert all(line in chunks[0].text for line in lines)
+
+    def test_docx_paragraphs_pack_into_range_chunks(self) -> None:
+        paragraphs = [f"paragraph {index}" for index in range(1, 9)]
+        data = _build_docx(paragraphs)
+        _, chunks, _ = extract_document(DOCX_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert len(chunks) == 1
+        assert chunks[0].kind == "paragraph"
+        assert chunks[0].locator.paragraph_start == 1
+        assert chunks[0].locator.paragraph_end == 8
+
+    def test_docx_nested_table_and_sdt_text_extracted(self) -> None:
+        xml_body = (
+            "<w:p><w:r><w:t>outer paragraph</w:t></w:r></w:p>"
+            "<w:tbl><w:tr><w:tc>"
+            "<w:p><w:r><w:t>NESTED CELL TEXT</w:t></w:r></w:p>"
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>inner table value</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+            "</w:tc></w:tr></w:tbl>"
+            "<w:sdt><w:sdtContent>"
+            "<w:p><w:r><w:t>SDT CONTROL TEXT</w:t></w:r></w:p>"
+            "</w:sdtContent></w:sdt>"
+        )
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<w:document xmlns:w="{_DOCX_NS}"><w:body>{xml_body}</w:body></w:document>'
+        )
+        data = _build_docx([], document_xml=xml)
+        _, chunks, _ = extract_document(DOCX_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        joined = "\n".join(chunk.text for chunk in chunks)
+        assert "NESTED CELL TEXT" in joined
+        assert "inner table value" in joined
+        assert "SDT CONTROL TEXT" in joined
+
     def test_vietnamese_diacritics_preserved_docx_and_txt(self) -> None:
         docx = _build_docx([VI_TEXT.strip()])
         _, chunks, _ = extract_document(DOCX_MIME, docx, DEFAULT_EXTRACTION_LIMITS)
@@ -619,6 +660,56 @@ class TestFailClosedAndBudgets:
         with pytest.raises(ExtractionUnavailableError) as error:
             extract_document(DOCX_MIME, data, limits)
         assert error.value.error_class == "budget_exceeded"
+
+    def test_encrypted_zip_docx_unavailable(self) -> None:
+        """General-purpose bit 0 in the central directory means encrypted."""
+
+        base = bytearray(_build_docx(["text"]))
+        position = base.rfind(b"PK\x01\x02")
+        assert position != -1
+        base[position + 8] |= 0x1
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(DOCX_MIME, bytes(base), DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "encrypted"
+
+    @pytest.mark.parametrize(
+        "subtype",
+        ("/RichMedia", "/Movie", "/3D", "/Sound"),
+    )
+    def test_media_annotation_subtypes_refused(self, subtype: str) -> None:
+        annotation = (
+            f"<< /Type /Annot /Subtype {subtype} /Rect [0 0 10 10] "
+            "/FS << /Type /Filespec /F (m.bin) /EF << /F 903 0 R >> >> >>"
+        )
+        data = _build_pdf(
+            ["innocent"],
+            page_extra="/Annots [902 0 R]",
+            extra_objects={902: annotation.encode()},
+        )
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_script"
+
+    def test_acroform_field_only_widget_script_refused(self) -> None:
+        """Field-tree widgets never listed in /Annots still get inspected."""
+
+        widget = (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (f1) "
+            b"/A << /S /JavaScript /JS (x) >> >>"
+        )
+        data = _build_pdf(
+            ["innocent"],
+            catalog_extra="/AcroForm << /Fields [902 0 R] >>",
+            extra_objects={902: widget},
+        )
+        with pytest.raises(ExtractionUnavailableError) as error:
+            extract_document(PDF_MIME, data, DEFAULT_EXTRACTION_LIMITS)
+        assert error.value.error_class == "embedded_script"
+
+    def test_nan_or_infinite_deadline_rejected(self) -> None:
+        for value in (float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                DocumentExtractionLimits(deadline_seconds=value)
 
     def test_zip_entry_count_budget_enforced(self) -> None:
         entries = {f"extra/{index}.xml": b"<a/>" for index in range(50)}

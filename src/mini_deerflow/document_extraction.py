@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import re
 import time
 import zipfile
@@ -75,9 +76,10 @@ class DocumentExtractionLimits:
         if (
             isinstance(self.deadline_seconds, bool)
             or not isinstance(self.deadline_seconds, (int, float))
+            or not math.isfinite(self.deadline_seconds)
             or self.deadline_seconds < 0
         ):
-            raise ValueError("deadline_seconds must be a non-negative number.")
+            raise ValueError("deadline_seconds must be a finite non-negative number.")
         for name in (
             "max_pages",
             "max_chars",
@@ -175,14 +177,31 @@ def _strip_control_noise(text: str) -> str:
 # ---------------------------------------------------------------------------
 # PDF (text layer only)
 # ---------------------------------------------------------------------------
+_EMBEDDING_ANNOTATION_SUBTYPES = frozenset(
+    {"/FileAttachment", "/RichMedia", "/Movie", "/3D", "/Sound"}
+)
+
+
+def _pdf_active_node(node: Any) -> bool:
+    """Key-presence active-content check for one annotation/field node."""
+
+    if "/AA" in node or "/AF" in node:
+        return True
+    if node.get("/Subtype") in _EMBEDDING_ANNOTATION_SUBTYPES:
+        return True
+    action = node.get("/A")
+    return action is not None and action.get("/S") in ("/JavaScript", "/Launch")
+
+
 def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
     """Refuse embedded active content: scripts, actions, attachments.
 
     Cheap key-presence checks across the catalog (incl. the Names tree,
-    XFA, and PDF 2.0 associated files), pages (incl. /AF), and annotations
-    (additional-actions, JavaScript/Launch actions, FileAttachment
-    annotations). The service never renders or executes PDFs, so this is
-    structural refusal, not interpretation.
+    XFA, and PDF 2.0 associated files), pages (incl. /AF), page annotations
+    (additional-actions, JavaScript/Launch actions, media/FileAttachment
+    subtypes), and the AcroForm field tree (field-level scripts are the
+    classic form-scripting vector). The service never renders or executes
+    PDFs, so this is structural refusal, not interpretation.
     """
 
     root = reader.trailer.get("/Root")
@@ -196,8 +215,12 @@ def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
         ):
             return True
         acroform = root.get("/AcroForm")
-        if acroform is not None and "/XFA" in acroform:
-            return True
+        if acroform is not None:
+            if "/XFA" in acroform:
+                return True
+            fields = acroform.get("/Fields")
+            if fields is not None and _pdf_fields_active(fields):
+                return True
     for page in pages:
         for flag in ("/AA", "/AF"):
             if flag in page:
@@ -206,13 +229,28 @@ def _pdf_has_scripting(reader: Any, pages: Any) -> bool:
         if annotations is None:
             continue
         for annotation in annotations:
-            if "/AA" in annotation or "/AF" in annotation:
+            if _pdf_active_node(annotation):
                 return True
-            if annotation.get("/Subtype") == "/FileAttachment":
-                return True
-            action = annotation.get("/A")
-            if action is not None and action.get("/S") in ("/JavaScript", "/Launch"):
-                return True
+    return False
+
+
+def _pdf_fields_active(
+    fields: Any, depth: int = 0, budget: list[int] | None = None
+) -> bool:
+    """Bounded walk of the AcroForm field tree (fields may nest via /Kids)."""
+
+    if depth > 32:
+        return True  # pathological nesting: fail closed
+    counter = budget if budget is not None else [0]
+    for field in fields:
+        counter[0] += 1
+        if counter[0] > 10_000:
+            return True  # refuse rather than walk unbounded field trees
+        if _pdf_active_node(field):
+            return True
+        kids = field.get("/Kids")
+        if kids is not None and _pdf_fields_active(kids, depth + 1, counter):
+            return True
     return False
 
 
@@ -315,15 +353,24 @@ def _docx_paragraph_text(paragraph: Any) -> str:
     return "".join(parts).strip()
 
 
+def _docx_cell_text(cell: Any) -> str:
+    """Cell text including paragraphs and any nested tables (in order)."""
+
+    parts: list[str] = []
+    for child in cell:
+        if child.tag == f"{_DOCX_NS}p":
+            parts.append(_docx_paragraph_text(child))
+        elif child.tag == f"{_DOCX_NS}tbl":
+            nested = _docx_table_text(child)
+            if nested:
+                parts.append(nested)
+    return " ".join(part for part in parts if part)
+
+
 def _docx_table_text(table: Any) -> str:
     rows: list[str] = []
     for row in table.findall(f"{_DOCX_NS}tr"):
-        cells: list[str] = []
-        for cell in row.findall(f"{_DOCX_NS}tc"):
-            cell_parts = []
-            for paragraph in cell.findall(f"{_DOCX_NS}p"):
-                cell_parts.append(_docx_paragraph_text(paragraph))
-            cells.append(" ".join(part for part in cell_parts if part))
+        cells = [_docx_cell_text(cell) for cell in row.findall(f"{_DOCX_NS}tc")]
         rows.append(" | ".join(cells))
     return "\n".join(rows)
 
@@ -361,6 +408,12 @@ def _extract_docx_units(
             deadline.check()
             if info.is_dir():
                 continue
+            if info.flag_bits & 0x1:
+                # General-purpose bit 0: encrypted entry. zipfile would
+                # raise a raw RuntimeError on read; refuse first with the
+                # closed encrypted class (password-protected DOCX is a
+                # routine real-world input).
+                raise ExtractionUnavailableError("encrypted")
             total_uncompressed += info.file_size
             if total_uncompressed > limits.max_total_uncompressed:
                 raise ExtractionUnavailableError("budget_exceeded")
@@ -370,7 +423,12 @@ def _extract_docx_units(
             rels = archive.read("word/_rels/document.xml.rels")
         except KeyError:
             rels = b""
-        except (OSError, zipfile.BadZipFile) as error:
+        except (
+            OSError,
+            zipfile.BadZipFile,
+            RuntimeError,
+            NotImplementedError,
+        ) as error:
             raise ExtractionUnavailableError("malformed") from error
         if rels:
             # Parse the relationships as bounded XML (size already capped by
@@ -388,7 +446,12 @@ def _extract_docx_units(
             document = archive.read("word/document.xml")
         except KeyError as error:
             raise ExtractionUnavailableError("malformed") from error
-        except (OSError, zipfile.BadZipFile) as error:
+        except (
+            OSError,
+            zipfile.BadZipFile,
+            RuntimeError,
+            NotImplementedError,
+        ) as error:
             raise ExtractionUnavailableError("malformed") from error
         if len(document) > limits.max_xml_bytes:
             raise ExtractionUnavailableError("budget_exceeded")
@@ -405,34 +468,49 @@ def _extract_docx_units(
         units: list[_Unit] = []
         paragraph_index = 0
         table_index = 0
-        for child in body:
-            deadline.check()
-            if child.tag == f"{_DOCX_NS}p":
-                paragraph_index += 1
-                text = _strip_control_noise(_docx_paragraph_text(child)).strip()
-                if text:
-                    units.append(
-                        _Unit(
-                            "paragraph",
-                            text,
-                            SourceLocator(
-                                kind="paragraph",
-                                paragraph_start=paragraph_index,
-                                paragraph_end=paragraph_index,
-                            ),
+
+        def dispatch(node: Any, depth: int = 0) -> None:
+            nonlocal paragraph_index, table_index
+            if depth > 32:
+                # Pathological nesting; the XML budget bounds size, this
+                # bounds structure. Fail closed instead of dropping text.
+                raise ExtractionUnavailableError("malformed")
+            for child in node:
+                deadline.check()
+                if child.tag == f"{_DOCX_NS}p":
+                    paragraph_index += 1
+                    text = _strip_control_noise(_docx_paragraph_text(child)).strip()
+                    if text:
+                        units.append(
+                            _Unit(
+                                "paragraph",
+                                text,
+                                SourceLocator(
+                                    kind="paragraph",
+                                    paragraph_start=paragraph_index,
+                                    paragraph_end=paragraph_index,
+                                ),
+                            )
                         )
-                    )
-            elif child.tag == f"{_DOCX_NS}tbl":
-                table_index += 1
-                text = _strip_control_noise(_docx_table_text(child)).strip()
-                if text:
-                    units.append(
-                        _Unit(
-                            "table",
-                            text,
-                            SourceLocator(kind="table", table=table_index),
+                elif child.tag == f"{_DOCX_NS}tbl":
+                    table_index += 1
+                    text = _strip_control_noise(_docx_table_text(child)).strip()
+                    if text:
+                        units.append(
+                            _Unit(
+                                "table",
+                                text,
+                                SourceLocator(kind="table", table=table_index),
+                            )
                         )
-                    )
+                elif child.tag == f"{_DOCX_NS}sdt":
+                    # Structured document tags wrap regular body content;
+                    # descend so control-wrapped text is never dropped.
+                    content = child.find(f"{_DOCX_NS}sdtContent")
+                    if content is not None:
+                        dispatch(content, depth + 1)
+
+        dispatch(body)
         return units
 
 
@@ -480,8 +558,9 @@ def _hard_split(text: str) -> list[str]:
     return pieces
 
 
-def _pack_units(units: list[_Unit], source_sha: str) -> tuple[str, list[DocumentChunk]]:
-    """Pack extraction units into bounded chunks with running char offsets."""
+def _pack_units(
+    units: list[_Unit], source_sha: str, deadline: _Deadline
+) -> tuple[str, list[DocumentChunk]]:
 
     full_parts: list[str] = []
     chunks: list[DocumentChunk] = []
@@ -509,34 +588,58 @@ def _pack_units(units: list[_Unit], source_sha: str) -> tuple[str, list[Document
             )
         )
 
-    current: list[str] = []
+    current_units: list[_Unit] = []
     current_chars = 0
-    current_kind: str | None = None
-    current_locator: SourceLocator | None = None
 
     def flush() -> None:
-        nonlocal current, current_chars, current_kind, current_locator
-        if current and current_locator is not None:
-            emit(current, current_kind or "paragraph", current_locator)
-        current = []
+        nonlocal current_units, current_chars
+        if current_units:
+            first = current_units[0]
+            last = current_units[-1]
+            # Consecutive same-kind units merge into a range locator
+            # (paragraph i..j, lines i..j); single-unit chunks keep the
+            # unit's own locator shape (page, table).
+            if first.locator.kind == "paragraph":
+                locator = SourceLocator(
+                    kind="paragraph",
+                    paragraph_start=first.locator.paragraph_start,
+                    paragraph_end=last.locator.paragraph_end,
+                )
+            elif first.locator.kind == "lines":
+                locator = SourceLocator(
+                    kind="lines",
+                    line_start=first.locator.line_start,
+                    line_end=last.locator.line_end,
+                )
+            else:
+                locator = first.locator
+            emit(
+                [unit.text for unit in current_units],
+                first.kind,
+                locator,
+            )
+        current_units = []
         current_chars = 0
-        current_kind = None
-        current_locator = None
 
     for unit in units:
-        if current_locator is not None and unit.locator != current_locator:
-            flush()
+        # Packing is pure but not free (join + sha per chunk); keep the
+        # cooperative deadline honored here too.
+        deadline.check()
         if len(unit.text) > CHUNK_HARD_LIMIT_CHARS:
             flush()
             for piece in _hard_split(unit.text):
                 emit([piece], unit.kind, unit.locator)
             continue
-        if current_chars + len(unit.text) > CHUNK_TARGET_CHARS and current:
+        kind_mismatch = bool(current_units) and current_units[0].kind != unit.kind
+        locator_incompatible = bool(current_units) and current_units[
+            0
+        ].locator.kind not in ("paragraph", "lines")
+        if kind_mismatch or locator_incompatible:
+            # Page/table units carry singular locators and never merge.
             flush()
-        if current_locator is None:
-            current_locator = unit.locator
-            current_kind = unit.kind
-        current.append(unit.text)
+        if current_chars + len(unit.text) > CHUNK_TARGET_CHARS and current_units:
+            flush()
+        current_units.append(unit)
         current_chars += len(unit.text) + 1
     flush()
     return "\n".join(full_parts), chunks
@@ -567,7 +670,7 @@ def extract_document(
         raise ExtractionUnavailableError("malformed")
     if not units:
         raise ExtractionUnavailableError("no_extractable_text")
-    full_text, chunk_list = _pack_units(units, source_sha)
+    full_text, chunk_list = _pack_units(units, source_sha, deadline)
     total = len(full_text)
     if total > limits.max_chars:
         raise ExtractionUnavailableError("budget_exceeded")
