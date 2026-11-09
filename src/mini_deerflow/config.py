@@ -37,6 +37,32 @@ class Settings(BaseSettings):
         gt=0.0,
     )
 
+    live_run_deadline_seconds: float = Field(
+        default=1_200.0,
+        gt=0.0,
+        le=86_400.0,
+        allow_inf_nan=False,
+    )
+
+    synthesis_deadline_seconds: float = Field(
+        default=300.0,
+        gt=0.0,
+        le=3_600.0,
+        allow_inf_nan=False,
+    )
+
+    model_max_output_tokens: int = Field(
+        default=8_192,
+        ge=256,
+        le=131_072,
+    )
+
+    synthesis_max_response_chars: int = Field(
+        default=32_768,
+        ge=1_024,
+        le=1_000_000,
+    )
+
     max_retries: int = Field(
         default=1,
         ge=0,

@@ -14,4 +14,5 @@ def create_chat_model(settings: Settings) -> StructuredChatModel:
         temperature=settings.temperature,
         timeout=settings.request_timeout,
         max_retries=settings.max_retries,
+        max_tokens=settings.model_max_output_tokens,
     )

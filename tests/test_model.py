@@ -29,4 +29,5 @@ def test_create_chat_model_forwards_validated_settings():
         temperature=0.25,
         timeout=30,
         max_retries=1,
+        max_tokens=8_192,
     )

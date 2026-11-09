@@ -59,6 +59,22 @@ it('renders bounded synthesis fallback status only for the matching Synthesis no
   expect(screen.getByRole('region', { name: 'Node details' })).not.toHaveTextContent('Completed via fallback');
 });
 
+it('renders a closed resource-limit reason only for its correlated node', async () => {
+  const synthNode = { ...graph.nodes[0], id: 'workflow:run-1:synthesize', kind: 'workflow_node' as const, label: 'Synthesis',
+    details: [], safe_summary: null };
+  const otherNode = { ...graph.nodes[1], id: 'workflow:other:planner', kind: 'workflow_node' as const, label: 'Planner',
+    details: [], safe_summary: null };
+  const limitEvent = { ...trace, run_id: 'run-1', node: 'synthesize', kind: 'resource_limit', outcome: 'refused',
+    resource_limit_reason: 'synthesis_deadline_exceeded' };
+  render(<ExecutionGraph graph={{ ...graph, nodes: [synthNode, otherNode], edges: [] }} traces={[limitEvent]} />);
+  const details = screen.getByRole('region', { name: 'Node details' });
+  expect(details).toHaveTextContent('Resource limitsynthesis_deadline_exceeded');
+  expect(details).toHaveTextContent('no cost estimate is implied');
+  await userEvent.selectOptions(screen.getByLabelText('Inspect node'), 'workflow:other:planner');
+  expect(screen.getByRole('region', { name: 'Node details' })).not.toHaveTextContent('synthesis_deadline_exceeded');
+});
+
+
 it('renders no fallback status for historical traces without synthesis fields', () => {
   const synthNode = { ...graph.nodes[0], id: 'workflow:run-1:synthesize', kind: 'workflow_node' as const, label: 'Synthesis',
     details: [], safe_summary: null };

@@ -57,11 +57,16 @@ class LiveDemoBackend:
         )
         self._sandbox_resolver = SessionSandboxResolver(self._workspaces_root)
         self._settings = settings
-        self._limits = limits or RuntimeLimits()
+        # ``None`` keeps ``Settings`` authoritative at execution time so the
+        # configured Live deadline reaches the runtime; explicit injection
+        # (tests/budget overrides) still wins over configuration.
+        self._limits = limits
 
     @property
     def limits(self) -> RuntimeLimits:
-        return self._limits
+        """Projection limits; execution limits may resolve later from settings."""
+
+        return self._limits or RuntimeLimits()
 
     async def run(
         self,
@@ -189,7 +194,7 @@ class LiveDemoBackend:
         return _BackendResult(
             state=state,
             traces=tuple(events),
-            limits=self._limits,
+            limits=self.limits,
         )
 
     def _resolved_settings(self) -> Settings:

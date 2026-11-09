@@ -37,6 +37,7 @@ export interface TraceEvent {
   model_cache_creation_tokens: number | null; model_usage_truncated: boolean | null;
   model_omitted_invocations: number | null; usage_reported: boolean | null;
   synthesis_fallback: boolean | null; synthesis_category: string | null; synthesis_reason: string | null; synthesis_attempts: number | null;
+  resource_limit_reason: string | null;
 }
 export interface Evidence {
   canonical_url: string; source_tool: string; title: string; excerpt: string; is_cited: boolean;

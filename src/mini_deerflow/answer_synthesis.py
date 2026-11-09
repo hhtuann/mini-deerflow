@@ -1,6 +1,8 @@
 """Evidence-grounded, language-aware public answer synthesis."""
 
+import asyncio
 import json
+import math
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -32,6 +34,7 @@ from mini_deerflow.evidence import (
     StepFinding,
     UserFacingAnswer,
 )
+from mini_deerflow.resource_limits import ResourceLimitExceeded, ResourceLimitReason
 from mini_deerflow.skills import SkillContext
 from mini_deerflow.structured_output import (
     StructuredOutputMode,
@@ -193,6 +196,7 @@ class SynthesisFailureCategory(str, Enum):
     GROUNDING_INVALID = "grounding_invalid"
     PROVIDER_ERROR = "provider_error"
     EMPTY_CONTENT = "empty_content"
+    RESOURCE_LIMIT = "resource_limit"
 
 
 class SynthesisFailureReason(str, Enum):
@@ -202,6 +206,8 @@ class SynthesisFailureReason(str, Enum):
     EVIDENCE_INDEX_OUT_OF_RANGE = "evidence_index_out_of_range"
     URL_IN_PROSE = "url_in_prose"
     CONTRADICTION_REQUIRED = "contradiction_required"
+    SYNTHESIS_DEADLINE_EXCEEDED = "synthesis_deadline_exceeded"
+    SYNTHESIS_OUTPUT_LIMIT_EXCEEDED = "synthesis_output_limit_exceeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +235,7 @@ class AnswerSynthesisFormatError(RuntimeError):
         message: str,
         *,
         category: SynthesisFailureCategory = SynthesisFailureCategory.SCHEMA_INVALID,
-        reason: SynthesisFailureReason | None = None,
+        reason: SynthesisFailureReason | ResourceLimitReason | None = None,
         attempt_failures: tuple[SynthesisAttemptFailure, ...] = (),
     ) -> None:
         super().__init__(message)
@@ -383,16 +389,34 @@ class LLMAnswerSynthesizer:
         model: object,
         *,
         structured_output_mode: StructuredOutputMode = "native",
+        deadline_seconds: float = 300.0,
+        max_response_chars: int = 32_768,
     ) -> None:
+        if (
+            isinstance(deadline_seconds, bool)
+            or not isinstance(deadline_seconds, int | float)
+            or not math.isfinite(deadline_seconds)
+        ):
+            raise TypeError("deadline_seconds must be a finite number")
+        if deadline_seconds <= 0:
+            raise ValueError("deadline_seconds must be greater than zero")
+        if isinstance(max_response_chars, bool) or not isinstance(
+            max_response_chars, int
+        ):
+            raise TypeError("max_response_chars must be an integer")
+        if not 1_024 <= max_response_chars <= 1_000_000:
+            raise ValueError("max_response_chars must be between 1024 and 1000000")
         structured_model = create_structured_output_runnable(
             model,
             AnswerSynthesisDraft,
             method="json_mode",
             mode=structured_output_mode,
+            max_response_chars=max_response_chars,
         )
         if not isinstance(structured_model, StructuredSynthesisRunnable):
             raise TypeError("structured model must support async invocation")
         self._structured_model = structured_model
+        self._deadline_seconds = deadline_seconds
 
     async def synthesize_answer(
         self,
@@ -411,33 +435,72 @@ class LLMAnswerSynthesizer:
         ]
         last_error: Exception | None = None
         attempt_failures: list[SynthesisAttemptFailure] = []
-        for attempt in range(1, SYNTHESIS_MAX_ATTEMPTS + 1):
-            messages = (
-                [
-                    *base_messages,
-                    HumanMessage(content=SYNTHESIS_FORMAT_CORRECTION_MESSAGE),
-                ]
-                if attempt > 1
-                else base_messages
-            )
-            try:
-                response = await self._structured_model.ainvoke(messages)
-                draft = (
-                    response
-                    if isinstance(response, AnswerSynthesisDraft)
-                    else AnswerSynthesisDraft.model_validate(response)
-                )
-                return validate_answer_draft(draft, context)
-            except (OutputParserException, ValidationError, ValueError) as error:
-                last_error = error
-                category, reason = _classify_validation_failure(error)
-                attempt_failures.append(
-                    SynthesisAttemptFailure(
-                        attempt=attempt,
-                        category=category,
-                        reason=reason,
+        deadline = asyncio.timeout(self._deadline_seconds)
+        answer: UserFacingAnswer | None = None
+        try:
+            async with deadline:
+                for attempt in range(1, SYNTHESIS_MAX_ATTEMPTS + 1):
+                    if deadline.expired():
+                        # Cancellation was delivered and suppressed earlier;
+                        # never schedule another invocation after expiry.
+                        raise TimeoutError
+                    messages = (
+                        [
+                            *base_messages,
+                            HumanMessage(content=SYNTHESIS_FORMAT_CORRECTION_MESSAGE),
+                        ]
+                        if attempt > 1
+                        else base_messages
                     )
-                )
+                    try:
+                        response = await self._structured_model.ainvoke(messages)
+                        draft = (
+                            response
+                            if isinstance(response, AnswerSynthesisDraft)
+                            else AnswerSynthesisDraft.model_validate(response)
+                        )
+                        answer = validate_answer_draft(draft, context)
+                        break
+                    except ResourceLimitExceeded as error:
+                        attempt_failures.append(
+                            SynthesisAttemptFailure(
+                                attempt=attempt,
+                                category=SynthesisFailureCategory.RESOURCE_LIMIT,
+                                reason=SynthesisFailureReason(error.reason),
+                            )
+                        )
+                        raise self._resource_limit_error(
+                            error, attempt_failures
+                        ) from error
+                    except (
+                        OutputParserException,
+                        ValidationError,
+                        ValueError,
+                    ) as error:
+                        last_error = error
+                        category, reason = _classify_validation_failure(error)
+                        attempt_failures.append(
+                            SynthesisAttemptFailure(
+                                attempt=attempt,
+                                category=category,
+                                reason=reason,
+                            )
+                        )
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise
+            self._record_deadline_failure(attempt_failures)
+            limit = ResourceLimitExceeded("synthesis_deadline_exceeded")
+            raise self._resource_limit_error(limit, attempt_failures) from error
+
+        if answer is not None and deadline.expired():
+            # The provider swallowed cancellation and returned late; a late
+            # structured answer is not acceptable as a success.
+            self._record_deadline_failure(attempt_failures)
+            limit = ResourceLimitExceeded("synthesis_deadline_exceeded")
+            raise self._resource_limit_error(limit, attempt_failures)
+        if answer is not None:
+            return answer
 
         final_failure = attempt_failures[-1] if attempt_failures else None
         raise AnswerSynthesisFormatError(
@@ -451,6 +514,32 @@ class LLMAnswerSynthesizer:
             reason=final_failure.reason if final_failure else None,
             attempt_failures=tuple(attempt_failures),
         ) from last_error
+
+    @staticmethod
+    def _record_deadline_failure(
+        attempt_failures: list[SynthesisAttemptFailure],
+    ) -> None:
+        """Record the attempt that the deadline stopped or invalidated."""
+
+        attempt_failures.append(
+            SynthesisAttemptFailure(
+                attempt=min(len(attempt_failures) + 1, SYNTHESIS_MAX_ATTEMPTS),
+                category=SynthesisFailureCategory.RESOURCE_LIMIT,
+                reason=SynthesisFailureReason.SYNTHESIS_DEADLINE_EXCEEDED,
+            )
+        )
+
+    @staticmethod
+    def _resource_limit_error(
+        error: ResourceLimitExceeded,
+        attempts: list[SynthesisAttemptFailure],
+    ) -> AnswerSynthesisFormatError:
+        return AnswerSynthesisFormatError(
+            "Structured answer synthesis exhausted a configured resource limit",
+            category=SynthesisFailureCategory.RESOURCE_LIMIT,
+            reason=error.reason,
+            attempt_failures=tuple(attempts),
+        )
 
 
 def _classify_validation_failure(

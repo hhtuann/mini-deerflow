@@ -26,6 +26,8 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
   const usage = invocations.at(-1);
   const fallbackEvents = !isWorkflow ? traces.filter((event) => event.kind === 'synthesis' && event.node != null && node?.id === `workflow:${event.run_id}:${event.node}`) : [];
   const fallback = fallbackEvents.at(-1);
+  const resourceEvents = !isWorkflow ? traces.filter((event) => event.kind === 'resource_limit' && event.node != null && node?.id === `workflow:${event.run_id}:${event.node}`) : [];
+  const resourceLimit = resourceEvents.at(-1);
   const { nodes, edges } = useMemo(() => {
     const layout = new dagre.graphlib.Graph().setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 65 }).setDefaultEdgeLabel(() => ({}));
     graph.nodes.forEach((item) => layout.setNode(item.id, { width: 180, height: 75 }));
@@ -84,6 +86,10 @@ export default function ExecutionGraph({ graph, traces = [], run, isWorkflow = f
               'Synthesis outcome': `Completed via fallback${fallback.synthesis_category ? ` (${fallback.synthesis_category}${fallback.synthesis_reason ? `/${fallback.synthesis_reason}` : ''})` : ''}`,
               'Synthesis attempts': fallback.synthesis_attempts }} />
             <p className="caption">Structured model synthesis failed after bounded attempts; the node finished through the deterministic fallback. Provider invocation outcomes above are unaffected.</p>
+          </>}
+          {resourceLimit?.resource_limit_reason && <>
+            <Fields values={{ 'Resource limit': resourceLimit.resource_limit_reason }} />
+            <p className="caption">Execution stopped at a configured local limit. In-flight provider work may not be cancellable or unbilled; no cost estimate is implied.</p>
           </>}
           <p>{node.safe_summary ?? 'Raw model/tool response not recorded. See the safe structured fields below for observable results.'}</p>
           {node.details.map((field, index) => <Fields key={index} values={{ [field.label]: field.value }} />)}
