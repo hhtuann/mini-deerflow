@@ -158,6 +158,55 @@ def test_wildcard_cors_and_missing_body_limit_fail_gate(tmp_path: Path):
     assert not readiness.request_body_limit(tmp_path)
 
 
+def _copy_document_gate_sources(tmp_path: Path) -> None:
+    for relative in (
+        "src/mini_deerflow/api/security.py",
+        "src/mini_deerflow/api/__init__.py",
+        "src/mini_deerflow/documents.py",
+    ):
+        source = ROOT / relative
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def test_document_upload_boundary_gate_passes_on_current_repo():
+    assert readiness.document_upload_boundary(ROOT)
+
+
+def test_document_upload_boundary_gate_fails_on_mutations(tmp_path: Path):
+    _copy_document_gate_sources(tmp_path)
+    security = tmp_path / "src/mini_deerflow/api/security.py"
+    source = security.read_text(encoding="utf-8")
+    security.write_text(
+        source.replace("MAX_REQUEST_BYTES = 16_384", "MAX_REQUEST_BYTES = 1_000_000"),
+        encoding="utf-8",
+    )
+    assert not readiness.document_upload_boundary(tmp_path)
+    security.write_text(source.replace("/documents", "/anything"), encoding="utf-8")
+    assert not readiness.document_upload_boundary(tmp_path)
+    security.write_text(source, encoding="utf-8")
+
+    documents = tmp_path / "src/mini_deerflow/documents.py"
+    documents_source = documents.read_text(encoding="utf-8")
+    documents.write_text(
+        documents_source.replace(
+            "max_document_bytes=10_485_760", "max_document_bytes=999_999_999"
+        ),
+        encoding="utf-8",
+    )
+    assert not readiness.document_upload_boundary(tmp_path)
+    documents.write_text(documents_source, encoding="utf-8")
+
+    api_init = tmp_path / "src/mini_deerflow/api/__init__.py"
+    api_source = api_init.read_text(encoding="utf-8")
+    api_init.write_text(
+        api_source.replace(", upload_max_bytes=limits.max_document_bytes", ""),
+        encoding="utf-8",
+    )
+    assert not readiness.document_upload_boundary(tmp_path)
+
+
 def test_vite_public_bind_and_proxy_target_are_blocked(tmp_path: Path):
     source = (ROOT / "frontend/vite.config.ts").read_text(encoding="utf-8")
     target = tmp_path / "frontend/vite.config.ts"

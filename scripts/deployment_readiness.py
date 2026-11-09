@@ -19,6 +19,7 @@ CHECK_NAMES = (
     "api_trusted_hosts",
     "api_explicit_browser_origins",
     "request_body_limit",
+    "document_upload_boundary",
     "locked_dependencies",
     "ignored_local_secrets",
     "no_tracked_env_credentials",
@@ -161,6 +162,66 @@ def locked_dependencies(root: Path) -> bool:
     return all(
         (root / name).is_file() and not (root / name).is_symlink()
         for name in ("uv.lock", "frontend/package-lock.json")
+    )
+
+
+def document_upload_boundary(root: Path) -> bool:
+    """The only body-cap exception is bounded, explicit, and route-scoped.
+
+    Audits that the default tight cap stays at 16_384, that the upload
+    exception names exactly the two document upload routes, that the default
+    per-file and per-workspace quotas stay inside literal maxima, and that
+    the app wires the configured quota into the boundary instead of
+    widening it globally.
+    """
+    security = _python_tree(root, "src/mini_deerflow/api/security.py")
+    try:
+        default_cap = _literal_assign(security, "MAX_REQUEST_BYTES")
+        upload_pattern = _literal_assign(security, "UPLOAD_ROUTE_PATTERN")
+    except (ValueError, TypeError, KeyError):
+        return False
+    if default_cap != 16_384:
+        return False
+    pattern_text = (
+        upload_pattern if isinstance(upload_pattern, str) else "".join(upload_pattern)
+    )
+    if not all(
+        marker in pattern_text
+        for marker in ("^/api/", "workspaces", "/documents", "/versions")
+    ):
+        return False
+    try:
+        documents_tree = ast.parse(_read(root, "src/mini_deerflow/documents.py"))
+    except SyntaxError:
+        return False
+    quotas: dict[str, int] = {}
+    for node in ast.walk(documents_tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "DEFAULT_DOCUMENT_LIMITS"
+        ):
+            for keyword in getattr(node.value, "keywords", []):
+                if keyword.arg in {"max_document_bytes", "max_workspace_bytes"} and (
+                    isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, int)
+                ):
+                    quotas[keyword.arg] = keyword.value.value
+    if not 1_024 <= quotas.get("max_document_bytes", 0) <= 52_428_800:
+        return False
+    if not 1_048_576 <= quotas.get("max_workspace_bytes", 0) <= 2_147_483_648:
+        return False
+    api_tree = _python_tree(root, "src/mini_deerflow/api/__init__.py")
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_middleware"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "LocalRequestBoundary"
+        and any(keyword.arg == "upload_max_bytes" for keyword in node.keywords)
+        for node in ast.walk(api_tree)
     )
 
 
