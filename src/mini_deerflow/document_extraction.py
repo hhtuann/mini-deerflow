@@ -158,7 +158,9 @@ class _Deadline:
         self._deadline = time.monotonic() + seconds
 
     def check(self) -> None:
-        if time.monotonic() > self._deadline:
+        # ``>=`` (not ``>``): a zero deadline must fire deterministically even
+        # when two monotonic readings land on the same clock tick.
+        if time.monotonic() >= self._deadline:
             raise ExtractionUnavailableError("deadline_exceeded")
 
 
