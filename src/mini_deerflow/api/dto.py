@@ -11,6 +11,7 @@ from mini_deerflow.demo.view_models import (
     DemoRunView,
     TraceEventView,
 )
+from mini_deerflow.document_qa import DocumentContinuation
 from mini_deerflow.documents import DocumentRecord, WorkspaceRecord
 
 Mode = Literal["live", "offline"]
@@ -193,3 +194,15 @@ class RetrievalResponseDTO(DTO):
     total_candidates: int
     truncated_by_budget: bool
     scoped_documents: tuple[str, ...]
+
+
+class DocumentQuestionRequestDTO(DTO):
+    question: Annotated[
+        str,
+        StringConstraints(
+            strict=True, strip_whitespace=True, min_length=1, max_length=2000
+        ),
+    ]
+    document_ids: tuple[str, ...] | None = None
+    previous_answer: DocumentContinuation | None = None
+    skill_id: SkillId | None = None

@@ -591,6 +591,11 @@ silently served. See
 lifecycle, quota, extraction, and API contracts and
 [`docs/document-retrieval.md`](docs/document-retrieval.md) for retrieval
 and citation contracts.
+D4 adds selected-document extractive Q&A, exact claim-to-source membership,
+honest abstention, current-source/version followups, bounded provider fallback,
+and an opt-in source-pinned agent tool. Both API modes remain credential-free by
+default; see [`docs/document-qa.md`](docs/document-qa.md). No real-data policy,
+public deployment, or factual-truth guarantee is implied.
 
 ### Session sandbox mentor check
 
