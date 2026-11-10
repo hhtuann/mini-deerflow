@@ -56,6 +56,15 @@ spans or locators are invented to fit a budget. Shared `ContextBudget`, exact JS
 rendering and `ProjectionMetadata` bound the full dynamic envelope, including
 metadata, question, optional skill and prior-question context.
 
+D4's default excerpt allowance matches D2's 2,000-character hard chunk limit;
+the shared 60,000-character total envelope is unchanged. Explicit caller budgets
+remain authoritative, including smaller excerpt/item limits. Exact serialized
+envelope pressure (including JSON escaping) still omits whole evidence chunks,
+never slices their text or changes persisted locators. API and real-server E2E
+regressions cover 1,501/1,600/2,000-character upload → extraction → retrieval →
+answer → source resolution; API controls also cover the 1,500 boundary, provider
+projection and restrictive explicit budgets.
+
 ## Agent/provider compatibility
 
 `DocumentQAService` accepts the existing retriever protocol, `ContextBudget`,

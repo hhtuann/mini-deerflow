@@ -40,3 +40,40 @@ test('document answers verify citations and replace source versions without netw
   expect(unsupported.status()).toBe(200);
   expect((await unsupported.json()).status).toBe('abstained');
 });
+
+for (const length of [1501, 1600, 2000]) {
+  test(`complete ${length}-character D2 evidence survives question projection`, async ({ request }) => {
+    const text = 'Revenue ' + 'x'.repeat(length - 8);
+    const created = await request.post('/api/offline/workspaces', { data: { name: `Synthetic D2 ${length}` } });
+    expect(created.status()).toBe(201);
+    const root = `/api/offline/workspaces/${(await created.json()).workspace_id}`;
+    const upload = await request.post(`${root}/documents?filename=fixture.txt`, { data: Buffer.from(text), headers: { 'Content-Type': 'text/plain' } });
+    expect(upload.status()).toBe(201);
+    const doc = (await upload.json()).document_id;
+    const extraction = await request.post(`${root}/documents/${doc}/extraction`);
+    expect(extraction.status()).toBe(202);
+    const job = (await extraction.json()).job_id;
+    await expect.poll(async () => (await (await request.get(`/api/offline/jobs/${job}`)).json()).status).toBe('completed');
+    const retrieved = await request.post(`${root}/retrieval`, { data: { query: 'Revenue', document_ids: [doc] } });
+    expect(retrieved.status()).toBe(200);
+    const [hit] = (await retrieved.json()).hits;
+    expect(hit.char_end - hit.char_start).toBe(length);
+    const result = await request.post(`${root}/questions`, { data: { question: 'Revenue', document_ids: [doc] } });
+    expect(result.status()).toBe(200);
+    const answer = await result.json();
+    expect(answer.status).toBe('answered');
+    expect(answer.claims[0].text).toBe(text);
+    const citation = answer.claims[0].citations[0];
+    expect(citation.quote).toBe(text);
+    expect(citation.document_id).toBe(doc);
+    expect(citation.version).toBe(1);
+    expect(citation.chunk_id).toBe(hit.chunk_id);
+    const source = await request.get(`${root}/documents/${doc}/chunks/${citation.chunk_id}?version=1`);
+    expect(source.status()).toBe(200);
+    const persisted = await source.json();
+    expect(persisted.text).toBe(text);
+    expect(citation.locator).toEqual(persisted.locator);
+    expect(answer.context_projection.omitted_items).toBe(0);
+    expect(answer.context_projection.payload_chars).toBeLessThanOrEqual(60000);
+  });
+}

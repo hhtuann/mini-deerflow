@@ -23,7 +23,7 @@ from mini_deerflow.context_budget import (
     estimate_token_count,
     render_llm_payload,
 )
-from mini_deerflow.document_extraction import SourceLocator
+from mini_deerflow.document_extraction import CHUNK_HARD_LIMIT_CHARS, SourceLocator
 from mini_deerflow.document_retrieval import (
     DEFAULT_RETRIEVAL_LIMITS,
     CitationIntegrityError,
@@ -44,6 +44,12 @@ from mini_deerflow.tracing import (
     TraceOutcome,
     TracePhase,
     TraceSink,
+)
+
+# Document evidence is an indivisible D2 chunk, not a shortened web excerpt.
+# Keep the shared total envelope unchanged and honor explicit caller budgets.
+DEFAULT_DOCUMENT_QA_CONTEXT_BUDGET = ContextBudget(
+    max_excerpt_chars=CHUNK_HARD_LIMIT_CHARS,
 )
 
 
@@ -388,7 +394,7 @@ class DocumentQAService:
             previous_answer,
             items,
             active_skill,
-            context_budget or ContextBudget(),
+            context_budget or DEFAULT_DOCUMENT_QA_CONTEXT_BUDGET,
         )
         retained = context.data["evidence"]
         assert isinstance(retained, list)

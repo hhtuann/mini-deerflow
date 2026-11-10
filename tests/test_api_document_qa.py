@@ -3,9 +3,12 @@
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mini_deerflow.api import create_app
+from mini_deerflow.context_budget import ContextBudget, render_llm_payload
+from mini_deerflow.document_qa import DocumentQAService
 
 
 def _workspace(client):
@@ -194,3 +197,102 @@ def test_large_answer_has_bounded_continuation(tmp_path: Path):
         assert next_turn.status_code == 200, next_turn.text
         assert next_turn.json()["status"] == "answered"
         assert next_turn.json()["source_snapshot"] == answer["source_snapshot"]
+
+
+@pytest.mark.parametrize("length", [1500, 1501, 1600, 2000])
+@pytest.mark.parametrize("provider_enabled", [False, True])
+def test_real_d2_chunk_survives_default_projection(tmp_path, length, provider_enabled):
+    text = "Revenue " + "x" * (length - len("Revenue "))
+
+    class Provider:
+        context = None
+
+        async def synthesize_answer(self, context):
+            self.context = context
+            return {
+                "claims": [
+                    {"text": text, "citations": [{"evidence_index": 1, "quote": text}]}
+                ]
+            }
+
+    provider = Provider()
+    service = DocumentQAService(synthesizer=provider if provider_enabled else None)
+    with TestClient(
+        create_app(tmp_path, document_qa_services={"offline": service})
+    ) as client:
+        ws = _workspace(client)
+        doc = _document(client, ws, text)
+        root = f"/api/offline/workspaces/{ws}"
+        retrieval = client.post(
+            f"{root}/retrieval", json={"query": "Revenue", "document_ids": [doc]}
+        )
+        assert retrieval.status_code == 200
+        (hit,) = retrieval.json()["hits"]
+        assert hit["char_end"] - hit["char_start"] == length
+        source = client.get(
+            f"{root}/documents/{doc}/chunks/{hit['chunk_id']}?version=1"
+        ).json()
+        assert source["text"] == text
+        response = client.post(
+            f"{root}/questions", json={"question": "Revenue", "document_ids": [doc]}
+        )
+        assert response.status_code == 200, response.text
+        answer = response.json()
+        assert answer["status"] == "answered"
+        (claim,) = answer["claims"]
+        (citation,) = claim["citations"]
+        assert claim["text"] == citation["quote"] == text
+        assert citation["document_id"] == doc and citation["version"] == 1
+        assert citation["chunk_id"] == hit["chunk_id"]
+        assert citation["locator"] == source["locator"] == hit["locator"]
+        assert answer["context_projection"]["omitted_items"] == 0
+        assert answer["context_projection"]["payload_chars"] <= 60000
+        if provider_enabled:
+            assert answer["synthesis_status"] == "provider"
+            assert answer["context_projection"]["payload_chars"] == len(
+                render_llm_payload(provider.context)
+            )
+            assert provider.context.data["evidence"][0]["text"] == text
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        ContextBudget(),
+        ContextBudget(
+            max_total_chars=10000, max_item_chars=2000, max_excerpt_chars=1500
+        ),
+        ContextBudget(
+            max_total_chars=5100, max_item_chars=2000, max_excerpt_chars=2000
+        ),
+    ],
+)
+def test_real_d2_chunks_respect_explicit_and_full_envelope_limits(tmp_path, budget):
+    class RestrictedService(DocumentQAService):
+        async def answer(self, *args, **kwargs):
+            return await super().answer(*args, **kwargs, context_budget=budget)
+
+    with TestClient(
+        create_app(tmp_path, document_qa_services={"offline": RestrictedService()})
+    ) as client:
+        ws = _workspace(client)
+        # Quotes survive D2 intact but double in JSON, exercising total-envelope
+        # pressure independently of the 2000-character per-evidence allowance.
+        text = "Revenue " + '"' * 1992
+        doc = _document(client, ws, text)
+        root = f"/api/offline/workspaces/{ws}"
+        retrieval = client.post(
+            f"{root}/retrieval", json={"query": "Revenue", "document_ids": [doc]}
+        )
+        assert len(retrieval.json()["hits"]) == 1
+        (hit,) = retrieval.json()["hits"]
+        assert hit["char_end"] - hit["char_start"] == len(text)
+        response = client.post(
+            f"{root}/questions", json={"question": "Revenue", "document_ids": [doc]}
+        )
+        assert response.status_code == 200, response.text
+        answer = response.json()
+        assert answer["status"] == "abstained" and answer["claims"] == []
+        assert answer["context_projection"]["omitted_items"] == 1
+        assert answer["context_projection"]["payload_chars"] <= budget.max_total_chars
+        assert "Context limits omitted whole evidence chunks." in answer["limitations"]
