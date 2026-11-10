@@ -14,16 +14,20 @@ deterministic by construction, nothing to re-sync or corrupt.
   Superseded versions, deleted documents, not-yet-extracted versions, and
   other workspaces are excluded by construction; orphan rows (chunks
   without a live extraction join) can never surface.
-- **Tokenizer**: casefold + NFKD + diacritic strip + word split — Vietnamese
-  base-letter matching ("truong hoc" ↔ "trường học").
-- **Ranking**: BM25 over the caller-scoped corpus; ties broken by
-  `(document_id, chunk_index)` for determinism; identical queries on
-  identical stores produce identical orders across processes.
+- **Tokenizer**: casefold + NFKD + diacritic strip (incl. explicit
+  Vietnamese `đ`→`d`, a single Latin letter that does not decompose) +
+  word split — Vietnamese base-letter matching ("truong hoc" ↔
+  "trường học", "dien" ↔ "điện").
 - **Budgets** (env-overridable, fail-closed like D1/D2): max hits (8),
   max context chars (12,000), max query chars (400), deadline seconds (5,
   cooperative — checked per chunk during scoring). Requests may shrink
-  budgets only; larger values are rejected. Unknown scope document ids are
-  rejected rather than silently narrowing the corpus.
+  budgets only; larger values are rejected. **`max_context_chars` is a
+  hard limit for every hit including the first**: a candidate whose span
+  alone exceeds the remaining budget is skipped — source spans are never
+  sliced to fit — and lower-ranked smaller candidates may still fill the
+  budget; `truncated_by_budget` then reports that results were
+  budget-affected. Unknown scope document ids are rejected rather than
+  silently narrowing the corpus.
 - **Injection resistance**: the query is data — tokenized in Python, never
   interpolated into SQL (all statements parameterized) and never passed to
   any matcher DSL; previews are ≤200 chars; errors are closed prose.
@@ -33,20 +37,22 @@ deterministic by construction, nothing to re-sync or corrupt.
 A citation is `(workspace, document_id, version, chunk_id)`.
 `resolve_citation` allowlist-validates every resolution against persisted
 rows: active document in the *given* workspace → completed extraction for
-the latest version → chunk row with a re-validating locator. Closed
-outcomes: `not_found` (deleted/cross-workspace/unknown —
-indistinguishable), `stale_version` (chunk exists only under a superseded
-version, or the latest version has no completed extraction),
-`integrity` (persisted locator/data fails allowlist validation). The D2
-chunk-detail endpoint now serves this contract: 200 verified, 404
-not-found, **409 stale**.
+the cited version (or the latest version when omitted) → chunk row with a
+re-validating locator. Closed outcomes: `not_found`
+(deleted/cross-workspace/unknown — indistinguishable), `stale_version`
+(the cited version is superseded, the chunk exists only under a superseded
+version, or the latest version has no completed extraction — including
+chunk ids *reused* by identical re-uploaded content, distinguished by the
+explicit `version`), `integrity` (persisted locator/data fails allowlist
+validation). The chunk-detail endpoint serves this contract: 200 verified,
+404 not-found, **409 stale**, 409 integrity.
 
 ## API (additive)
 
 | Method | Path | Success | Errors |
 |---|---|---|---|
 | POST | `/api/{mode}/workspaces/{workspace_id}/retrieval` — body `{"query", "document_ids"?, "max_hits"?, "max_context_chars"?}` | 200 `{hits[], total_candidates, truncated_by_budget, scoped_documents}` | 404 unknown workspace · 422 invalid body/scope/query or budget-above-limit · 409 while another operation is active · 503 scan deadline exhausted · 403/413 from the global boundary |
-| GET | `/api/{mode}/workspaces/{ws}/documents/{doc}/chunks/{chunk_id}` (citation resolution) | 200 verified chunk | 404 not found (deleted/cross-workspace/unknown, indistinguishable) · 422 malformed chunk-id shape (path pattern) · **409 stale** · 409 integrity |
+| GET | `/api/{mode}/workspaces/{ws}/documents/{doc}/chunks/{chunk_id}?version=` (citation resolution; version optional, defaults to latest) | 200 verified chunk | 404 not found (deleted/cross-workspace/unknown, indistinguishable) · 422 malformed chunk-id shape or version (path/query pattern) · **409 stale** · 409 integrity |
 
 ## Benchmark (AC1) — `scripts/document_retrieval_benchmark.py`
 
