@@ -136,11 +136,15 @@ class TestRetrievalEndpoint:
             )
             assert response.status_code == 200
             assert len(response.json()["hits"]) == 2
+            # 9 is inside the DTO cap (<=50) but above the env default of 8,
+            # so this discriminates the endpoint's shrink-only check rather
+            # than the DTO validation.
             exceeded = client.post(
                 f"/api/live/workspaces/{workspace_id}/retrieval",
-                json={"query": "shared topic", "max_hits": 5_000},
+                json={"query": "shared topic", "max_hits": 9},
             )
             assert exceeded.status_code == 422
+            assert exceeded.json()["detail"] == "Retrieval budgets exceed the limit."
 
     def test_invalid_bodies_rejected(self, tmp_path: Path) -> None:
         with _client(tmp_path) as client:

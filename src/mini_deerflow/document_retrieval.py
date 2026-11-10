@@ -38,6 +38,13 @@ class RetrievalValidationError(ValueError):
     """Caller input violates the retrieval contract."""
 
 
+class RetrievalDeadlineExceededError(RetrievalError):
+    """Server-side scan budget exhausted; not a client-input error."""
+
+    def __init__(self) -> None:
+        super().__init__("Retrieval deadline was exceeded.")
+
+
 class CitationNotFoundError(RetrievalError):
     """Citation target does not exist for this caller's exact scope."""
 
@@ -159,7 +166,7 @@ def _bm25_scores(
 
     def check_deadline() -> None:
         if deadline is not None and time.monotonic() - start >= deadline:
-            raise RetrievalValidationError("Retrieval deadline was exceeded.")
+            raise RetrievalDeadlineExceededError()
 
     postings: dict[str, list[int]] = {}
     frequencies: list[dict[str, int]] = []
@@ -340,6 +347,7 @@ __all__ = [
     "CitationStaleError",
     "DocumentRetriever",
     "LexicalRetriever",
+    "RetrievalDeadlineExceededError",
     "RetrievalError",
     "RetrievalHit",
     "RetrievalLimits",

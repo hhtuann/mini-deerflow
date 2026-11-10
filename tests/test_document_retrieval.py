@@ -521,12 +521,16 @@ class TestLimitsAndDeadline:
         assert limits.max_hits == 3
 
     def test_zero_deadline_refuses(self, tmp_path: Path) -> None:
+        from mini_deerflow.document_retrieval import (
+            RetrievalDeadlineExceededError,
+        )
+
         store = _store(tmp_path)
         workspace_id = _run(store.create_workspace("D")).workspace_id
         _seed_extraction(
             store, workspace_id, "a.txt", b"deadline probe content\n", TXT_MIME
         )
-        with pytest.raises(RetrievalValidationError):
+        with pytest.raises(RetrievalDeadlineExceededError):
             _retrieve(
                 store,
                 workspace_id,

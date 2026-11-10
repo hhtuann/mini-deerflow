@@ -45,12 +45,8 @@ not-found, **409 stale**.
 
 | Method | Path | Success | Errors |
 |---|---|---|---|
-| POST | `/api/{mode}/workspaces/{workspace_id}/retrieval` — body `{"query", "document_ids"?, "max_hits"?, "max_context_chars"?}` | 200 `{hits[], total_candidates, truncated_by_budget, scoped_documents}` | 404/422 |
-| GET | `/api/{mode}/workspaces/{ws}/documents/{doc}/chunks/{chunk_id}` (citation resolution) | 200 verified chunk | 404 / 409 stale |
-
-Retrieval is a bounded synchronous scan (no job). Hit DTOs carry
-`document_id, version, chunk_id, score, preview, char_start, char_end,
-locator` — every hit resolves through the same citation validation.
+| POST | `/api/{mode}/workspaces/{workspace_id}/retrieval` — body `{"query", "document_ids"?, "max_hits"?, "max_context_chars"?}` | 200 `{hits[], total_candidates, truncated_by_budget, scoped_documents}` | 404 unknown workspace · 422 invalid body/scope/query or budget-above-limit · 409 while another operation is active · 503 scan deadline exhausted · 403/413 from the global boundary |
+| GET | `/api/{mode}/workspaces/{ws}/documents/{doc}/chunks/{chunk_id}` (citation resolution) | 200 verified chunk | 404 not found (deleted/cross-workspace/unknown, indistinguishable) · 422 malformed chunk-id shape (path pattern) · **409 stale** · 409 integrity |
 
 ## Benchmark (AC1) — `scripts/document_retrieval_benchmark.py`
 
@@ -64,9 +60,15 @@ Deterministic, credential-free, synthetic corpus (6 docs, VI+EN). Results:
 
 **Documented limitation (by design):** pure lexical retrieval does not
 handle semantic paraphrases — "renewable energy from sunlight" does not
-retrieve the solar document; "học đường mới" retrieves unrelated VI
-documents. This is the accepted D3 baseline; semantic recall is out of
-scope (issue #49), as are managed vector services and paid embeddings.
+retrieve the solar document, and "học đường mới" surfaces the relevant
+school document only by lexical accident (token overlap on "học"/"mới")
+alongside an unrelated farming document. This is the accepted D3
+baseline; semantic recall is out of scope (issue #49), as are managed
+vector services and paid embeddings. Trust-boundary note: the read path
+validates chunk rows against the live extraction join; a local operator
+directly tampering with the SQLite file (e.g. inserting extra chunk rows
+under a live completed extraction) is outside the single-user
+trusted-local threat model, consistent with D1/D2.
 
 ## Testing
 

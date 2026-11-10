@@ -62,6 +62,7 @@ from mini_deerflow.document_retrieval import (
     CitationNotFoundError,
     CitationStaleError,
     LexicalRetriever,
+    RetrievalDeadlineExceededError,
     RetrievalLimits,
     RetrievalValidationError,
     resolve_citation,
@@ -835,6 +836,10 @@ def create_app(
                     body.document_ids,
                     effective,
                 )
+            except RetrievalDeadlineExceededError:
+                # Server-side scan budget exhaustion: not a client-input
+                # error, so it is not classified as 422.
+                raise HTTPException(503, "Retrieval budget was exhausted.") from None
             except RetrievalValidationError:
                 raise HTTPException(422, "Invalid retrieval request.") from None
         return RetrievalResponseDTO(
