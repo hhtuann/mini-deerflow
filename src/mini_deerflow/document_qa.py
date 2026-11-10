@@ -198,9 +198,12 @@ def _query(
         ("con", "bay", "gio"),
     }
     if previous is not None and followup in underspecified:
-        remaining = limit - len(question) - 1
-        if remaining > 0:
-            return question + " " + previous.question[:remaining]
+        prior = (
+            previous.continuation.question
+            if isinstance(previous, DocumentAnswer)
+            else previous.question
+        )
+        return prior[:limit]
     return question
 
 
@@ -526,7 +529,7 @@ class DocumentQAService:
             context_projection=context.context_projection,
             continuation=DocumentContinuation(
                 workspace_id=workspace_id,
-                question=question,
+                question=query,
                 source_fingerprint=_source_fingerprint(snapshot),
             ),
         )

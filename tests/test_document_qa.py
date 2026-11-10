@@ -346,6 +346,13 @@ def test_underspecified_followup_retrieves_current_sources(tmp_path):
     assert followup.question == "And now?"
     assert followup.status == "answered"
     assert followup.claims[0].citations[0].document_id == docs[0][0]
+    third = run(
+        service.answer(
+            store, workspace, "And now?", previous_answer=followup.continuation
+        )
+    )
+    assert third.status == "answered"
+    assert third.claims[0].citations[0].document_id == docs[0][0]
 
 
 def test_fabricated_locator_is_not_member(tmp_path):
