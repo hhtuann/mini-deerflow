@@ -19,6 +19,7 @@ from mini_deerflow.api.dto import (
     ChunkLocatorDTO,
     ChunkSummaryDTO,
     ConversationsDTO,
+    DocumentQuestionRequestDTO,
     HealthDTO,
     JobDTO,
     MessageRequest,
@@ -56,6 +57,11 @@ from mini_deerflow.document_extraction import (
     DocumentExtractionLimits,
     ExtractionRecord,
     run_document_extraction,
+)
+from mini_deerflow.document_qa import (
+    DocumentAnswer,
+    DocumentQAService,
+    DocumentQAValidationError,
 )
 from mini_deerflow.document_retrieval import (
     CitationIntegrityError,
@@ -147,6 +153,7 @@ def create_app(
     document_limits: DocumentLimits | None = None,
     extraction_limits: DocumentExtractionLimits | None = None,
     retrieval_limits: "RetrievalLimits | None" = None,
+    document_qa_services: Mapping[Mode, DocumentQAService] | None = None,
 ) -> FastAPI:
     """Create an isolated app; supplied services override either default mode.
 
@@ -215,6 +222,14 @@ def create_app(
         "offline": DocumentWorkspaceStore(root, limits=limits),
         "live": DocumentWorkspaceStore(live_root, limits=limits),
     }
+    qa_services = {
+        mode: DocumentQAService(retrieval_limits=retrieval_limits)
+        for mode in document_stores
+    }
+    if document_qa_services is not None:
+        if set(document_qa_services) - {"offline", "live"}:
+            raise ValueError("Unsupported document Q&A service mode.")
+        qa_services.update(document_qa_services)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -867,6 +882,38 @@ def create_app(
             truncated_by_budget=result.truncated_by_budget,
             scoped_documents=result.scoped_documents,
         )
+
+    @app.post(
+        "/api/{mode}/workspaces/{workspace_id}/questions",
+        response_model=DocumentAnswer,
+    )
+    async def document_question(
+        mode: Mode, workspace_id: Identifier, body: DocumentQuestionRequestDTO
+    ) -> DocumentAnswer:
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            store = document_stores[mode]
+            await store.get_workspace(workspace_id)
+            try:
+                skill = (
+                    SkillsRegistry().activate(body.skill_id) if body.skill_id else None
+                )
+                return await qa_services[mode].answer(
+                    store,
+                    workspace_id,
+                    body.question,
+                    document_ids=body.document_ids,
+                    previous_answer=body.previous_answer,
+                    active_skill=skill,
+                )
+            except RetrievalDeadlineExceededError:
+                raise HTTPException(503, "Retrieval deadline was exceeded.") from None
+            except (DocumentQAValidationError, RetrievalValidationError, SkillsError):
+                raise HTTPException(422, "Invalid document question request.") from None
+            except (CitationStaleError, CitationIntegrityError, CitationNotFoundError):
+                raise HTTPException(
+                    409, "Document evidence changed or is unavailable."
+                ) from None
 
     return app
 
