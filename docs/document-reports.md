@@ -65,6 +65,11 @@ missing selected sources fails without appending a version. A changed source
 can regenerate one section at its new version while untouched sections retain
 their old, explicitly historical provenance.
 
+Report sections accept up to 50 verified claims, matching the supported D3
+retrieval-hit ceiling; D4's actual context budget can retain fewer and reports
+preserve its honest omission limitations. Retrieval deadline exhaustion remains
+a server-side 503 for both creation and revision, never invalid-client 422.
+
 ## Persistence, recovery and limits
 
 Each mode has `reports.sqlite`, separate from `documents.sqlite`. Version JSON

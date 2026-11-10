@@ -28,7 +28,10 @@ from mini_deerflow.document_qa import (
     DocumentQAValidationError,
     DocumentSourceSnapshot,
 )
-from mini_deerflow.document_retrieval import RetrievalError
+from mini_deerflow.document_retrieval import (
+    RetrievalDeadlineExceededError,
+    RetrievalError,
+)
 from mini_deerflow.documents import (
     DocumentError,
     DocumentValidationError,
@@ -131,7 +134,7 @@ class ReportSection(_Frozen):
     section_id: SectionIdentifier
     title: Title
     question: Question
-    claims: tuple[DocumentClaim, ...] = Field(default=(), max_length=8)
+    claims: tuple[DocumentClaim, ...] = Field(default=(), max_length=50)
     limitations: tuple[Annotated[str, Field(max_length=2000)], ...] = Field(
         default=(), max_length=50
     )
@@ -494,6 +497,8 @@ class ReportWriterAgent:
                 created_at=datetime.now(UTC).isoformat(),
             )
             return await self._verify_and_publish(report, generated)
+        except RetrievalDeadlineExceededError:
+            raise
         except (
             DocumentError,
             DocumentValidationError,
@@ -543,6 +548,8 @@ class ReportWriterAgent:
                 }
             )
             return await self._verify_and_publish(report, generated)
+        except RetrievalDeadlineExceededError:
+            raise
         except (
             DocumentError,
             DocumentValidationError,
