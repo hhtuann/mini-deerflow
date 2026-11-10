@@ -156,8 +156,17 @@ _DOCUMENT_EXTRACTION_SETTINGS_FIELDS = (
     ),
 )
 
+_DOCUMENT_RETRIEVAL_SETTINGS_FIELDS = (
+    ("document_retrieval_max_hits", "max_hits"),
+    ("document_retrieval_max_context_chars", "max_context_chars"),
+    ("document_retrieval_max_query_chars", "max_query_chars"),
+    ("document_retrieval_deadline_seconds", "deadline_seconds"),
+)
+
 _ALL_DOCUMENT_SETTINGS_FIELDS = (
-    _DOCUMENT_LIMIT_SETTINGS_FIELDS + _DOCUMENT_EXTRACTION_SETTINGS_FIELDS
+    _DOCUMENT_LIMIT_SETTINGS_FIELDS
+    + _DOCUMENT_EXTRACTION_SETTINGS_FIELDS
+    + _DOCUMENT_RETRIEVAL_SETTINGS_FIELDS
 )
 
 
@@ -277,6 +286,38 @@ def resolve_document_extraction_limits() -> Any:
         **{
             limits_name: getattr(settings, settings_name)
             for settings_name, limits_name in _DOCUMENT_EXTRACTION_SETTINGS_FIELDS
+        }
+    )
+
+
+def resolve_document_retrieval_limits() -> Any:
+    """Resolve retrieval budgets with the same fail-closed contract."""
+
+    from mini_deerflow.document_retrieval import (
+        DEFAULT_RETRIEVAL_LIMITS,
+        RetrievalLimits,
+    )
+
+    try:
+        from mini_deerflow.config import Settings
+
+        settings = Settings(api_key="document-limits-placeholder")
+    except ValidationError as error:
+        document_fields = {
+            settings_name for settings_name, _ in _ALL_DOCUMENT_SETTINGS_FIELDS
+        }
+        locations = {item.get("loc", ())[:1] for item in error.errors()}
+        if any((field,) in locations for field in document_fields):
+            raise DocumentLimitsError("Document configuration is invalid.") from None
+        if _document_override_present():
+            raise DocumentLimitsError(
+                "Document configuration could not be verified."
+            ) from None
+        return DEFAULT_RETRIEVAL_LIMITS
+    return RetrievalLimits(
+        **{
+            limits_name: getattr(settings, settings_name)
+            for settings_name, limits_name in _DOCUMENT_RETRIEVAL_SETTINGS_FIELDS
         }
     )
 
@@ -1209,6 +1250,98 @@ class DocumentWorkspaceStore:
             char_end=row["char_end"],
             locator=SourceLocator.model_validate_json(row["locator_json"]),
         )
+
+    async def retrievable_chunks(
+        self,
+        workspace_id: str,
+        document_ids: tuple[str, ...] | None = None,
+    ) -> tuple[tuple[str, int, Any], ...]:
+        """Chunks eligible for retrieval: active docs whose LATEST version
+        has a completed extraction — version-pinned by construction.
+
+        Orphan rows (chunks without a matching completed extraction) can
+        never appear: the join requires both the extraction row and the
+        active document row.
+        """
+
+        from mini_deerflow.document_extraction import DocumentChunk, SourceLocator
+
+        workspace_id = _validated_identifier(workspace_id, "workspace_id")
+        if document_ids is not None:
+            if not document_ids:
+                raise DocumentValidationError("document scope is invalid")
+            for identifier in document_ids:
+                _validated_identifier(identifier, "document_ids")
+        scope_sql = ""
+        parameters: list[object] = [workspace_id]
+        if document_ids is not None:
+            placeholders = ", ".join("?" for _ in document_ids)
+            scope_sql = f" AND c.document_id IN ({placeholders})"
+            parameters.extend(document_ids)
+        async with self._connection() as connection:
+            await connection.execute("BEGIN")
+            rows = await (
+                await connection.execute(
+                    f"""
+                    SELECT c.document_id, c.version, c.chunk_index,
+                           c.chunk_id, c.kind, c.text, c.char_start, c.char_end,
+                           c.locator_json
+                    FROM document_chunks c
+                    JOIN document_extractions e
+                        ON e.workspace_id = c.workspace_id
+                       AND e.document_id = c.document_id
+                       AND e.version = c.version
+                       AND e.status = 'completed'
+                    JOIN documents d
+                        ON d.workspace_id = c.workspace_id
+                       AND d.document_id = c.document_id
+                       AND d.status = 'active'
+                       AND d.latest_version = c.version
+                    WHERE c.workspace_id = ?{scope_sql}
+                    ORDER BY c.document_id, c.chunk_index
+                    """,
+                    parameters,
+                )
+            ).fetchall()
+            await connection.commit()
+        return tuple(
+            (
+                row["document_id"],
+                int(row["version"]),
+                DocumentChunk(
+                    chunk_id=row["chunk_id"],
+                    index=row["chunk_index"],
+                    kind=row["kind"],
+                    text=row["text"],
+                    char_start=row["char_start"],
+                    char_end=row["char_end"],
+                    locator=SourceLocator.model_validate_json(row["locator_json"]),
+                ),
+            )
+            for row in rows
+        )
+
+    async def chunk_versions(
+        self, workspace_id: str, document_id: str, chunk_id: str
+    ) -> tuple[int, ...]:
+        """Every version a chunk_id appears under (stale-citation probe)."""
+
+        workspace_id = _validated_identifier(workspace_id, "workspace_id")
+        document_id = _validated_identifier(document_id, "document_id")
+        if not isinstance(chunk_id, str) or not re.fullmatch(r"[0-9a-f]{16}", chunk_id):
+            raise DocumentValidationError("chunk_id is invalid")
+        async with self._connection() as connection:
+            await connection.execute("BEGIN")
+            rows = await (
+                await connection.execute(
+                    "SELECT DISTINCT version FROM document_chunks "
+                    "WHERE workspace_id = ? AND document_id = ? AND chunk_id = ? "
+                    "ORDER BY version",
+                    (workspace_id, document_id, chunk_id),
+                )
+            ).fetchall()
+            await connection.commit()
+        return tuple(int(row["version"]) for row in rows)
 
     async def recover(self) -> None:
         """Sweep crash orphans: staging files and unreferenced blobs.

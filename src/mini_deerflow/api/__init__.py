@@ -27,6 +27,9 @@ from mini_deerflow.api.dto import (
     PresentationRequestDTO,
     PresentationSlideOutlineDTO,
     ResumeRequest,
+    RetrievalHitDTO,
+    RetrievalRequestDTO,
+    RetrievalResponseDTO,
     SessionDTO,
     SkillDTO,
     SkillsDTO,
@@ -54,6 +57,16 @@ from mini_deerflow.document_extraction import (
     ExtractionRecord,
     run_document_extraction,
 )
+from mini_deerflow.document_retrieval import (
+    CitationIntegrityError,
+    CitationNotFoundError,
+    CitationStaleError,
+    LexicalRetriever,
+    RetrievalDeadlineExceededError,
+    RetrievalLimits,
+    RetrievalValidationError,
+    resolve_citation,
+)
 from mini_deerflow.documents import (
     DOCX_MIME,
     PDF_MIME,
@@ -69,6 +82,7 @@ from mini_deerflow.documents import (
     WorkspaceRecord,
     resolve_document_extraction_limits,
     resolve_document_limits,
+    resolve_document_retrieval_limits,
 )
 from mini_deerflow.persistence import ThreadNotFoundError
 from mini_deerflow.pptx.artifacts import (
@@ -132,6 +146,7 @@ def create_app(
     slide_services: Mapping[Mode, SlideAgentService] | None = None,
     document_limits: DocumentLimits | None = None,
     extraction_limits: DocumentExtractionLimits | None = None,
+    retrieval_limits: "RetrievalLimits | None" = None,
 ) -> FastAPI:
     """Create an isolated app; supplied services override either default mode.
 
@@ -146,7 +161,8 @@ def create_app(
     keeps the tight default cap everywhere except the two raw-body upload
     routes, which accept exactly the configured per-file quota. Document
     extraction runs as a ``document_extraction`` job bounded by the resolved
-    extraction budgets.
+    extraction budgets; retrieval is a bounded synchronous scan with
+    shrink-only request budgets.
     """
     root = (
         Path(storage_root) if storage_root is not None else Path(".mini-deerflow/demo")
@@ -163,6 +179,8 @@ def create_app(
     limits = document_limits or resolved_limits
     resolved_extraction = resolve_document_extraction_limits()
     extraction_limits = extraction_limits or resolved_extraction
+    resolved_retrieval = resolve_document_retrieval_limits()
+    retrieval_limits = retrieval_limits or resolved_retrieval
     runtime_services = {
         "offline": DemoRuntimeService(OfflineDemoBackend(root)),
         "live": DemoRuntimeService(LiveDemoBackend(live_root)),
@@ -755,12 +773,31 @@ def create_app(
         workspace_id: Identifier,
         document_id: Identifier,
         chunk_id: str = ApiPath(pattern=r"^[0-9a-f]{16}$"),
+        version: int | None = Query(default=None, ge=1, le=1_000_000),
     ) -> ChunkDetailDTO:
+        """Citation resolution: allowlist-verified chunk for the cited
+        version (or the latest completed version when omitted); stale
+        citations — including chunk ids reused by identical re-uploaded
+        content — are a distinct 409."""
+
         async with jobs.submission_lock:
             jobs.check_idle()
-            chunk = await document_stores[mode].get_chunk(
-                workspace_id, document_id, chunk_id
-            )
+            try:
+                _, chunk = await resolve_citation(
+                    document_stores[mode],
+                    workspace_id,
+                    document_id,
+                    chunk_id,
+                    version,
+                )
+            except CitationStaleError:
+                raise HTTPException(
+                    409, "Citation refers to a stale document version."
+                ) from None
+            except CitationNotFoundError:
+                raise HTTPException(404, "Citation was not found.") from None
+            except CitationIntegrityError:
+                raise HTTPException(409, "Citation failed verification.") from None
         return ChunkDetailDTO(
             chunk_id=chunk.chunk_id,
             index=chunk.index,
@@ -769,6 +806,66 @@ def create_app(
             char_start=chunk.char_start,
             char_end=chunk.char_end,
             locator=ChunkLocatorDTO(**chunk.locator.model_dump()),
+        )
+
+    @app.post(
+        "/api/{mode}/workspaces/{workspace_id}/retrieval",
+        response_model=RetrievalResponseDTO,
+    )
+    async def document_retrieval(
+        mode: Mode,
+        workspace_id: Identifier,
+        body: RetrievalRequestDTO,
+    ) -> RetrievalResponseDTO:
+        """Bounded synchronous lexical retrieval over the workspace."""
+
+        async with jobs.submission_lock:
+            jobs.check_idle()
+            await document_stores[mode].get_workspace(workspace_id)
+            effective = RetrievalLimits(
+                max_hits=body.max_hits or retrieval_limits.max_hits,
+                max_context_chars=(
+                    body.max_context_chars or retrieval_limits.max_context_chars
+                ),
+                max_query_chars=retrieval_limits.max_query_chars,
+                deadline_seconds=retrieval_limits.deadline_seconds,
+            )
+            if (
+                effective.max_hits > retrieval_limits.max_hits
+                or effective.max_context_chars > retrieval_limits.max_context_chars
+            ):
+                raise HTTPException(422, "Retrieval budgets exceed the limit.")
+            try:
+                result = await LexicalRetriever().retrieve(
+                    document_stores[mode],
+                    workspace_id,
+                    body.query,
+                    body.document_ids,
+                    effective,
+                )
+            except RetrievalDeadlineExceededError:
+                # Server-side scan budget exhaustion: not a client-input
+                # error, so it is not classified as 422.
+                raise HTTPException(503, "Retrieval budget was exhausted.") from None
+            except RetrievalValidationError:
+                raise HTTPException(422, "Invalid retrieval request.") from None
+        return RetrievalResponseDTO(
+            hits=tuple(
+                RetrievalHitDTO(
+                    document_id=hit.document_id,
+                    version=hit.version,
+                    chunk_id=hit.chunk_id,
+                    score=hit.score,
+                    preview=hit.preview,
+                    char_start=hit.char_start,
+                    char_end=hit.char_end,
+                    locator=ChunkLocatorDTO(**hit.locator.model_dump()),
+                )
+                for hit in result.hits
+            ),
+            total_candidates=result.total_candidates,
+            truncated_by_budget=result.truncated_by_budget,
+            scoped_documents=result.scoped_documents,
         )
 
     return app

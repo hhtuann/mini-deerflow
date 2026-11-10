@@ -135,6 +135,28 @@ class Settings(BaseSettings):
         le=2_147_483_648,
     )
 
+    document_retrieval_max_hits: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+    )
+    document_retrieval_max_context_chars: int = Field(
+        default=12_000,
+        ge=500,
+        le=200_000,
+    )
+    document_retrieval_max_query_chars: int = Field(
+        default=400,
+        ge=16,
+        le=2_000,
+    )
+    document_retrieval_deadline_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        allow_inf_nan=False,
+    )
+
     structured_output_mode: Literal["native", "prompt_json"] = "prompt_json"
 
     @field_validator("api_key")
