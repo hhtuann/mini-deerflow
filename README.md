@@ -582,9 +582,15 @@ trusted single-user loopback service, not authentication or tenancy. D2
 adds bounded extraction (`document_extraction` jobs): deterministic
 hash-tied chunks with genuine PDF page / DOCX paragraph-table / TXT line
 locators, closed failure classes, and refuse-first handling of encrypted,
-macro, remote-referenced, or scripted documents. See
+macro, remote-referenced, or scripted documents. D3 adds local lexical
+retrieval (pure-Python BM25, no FTS/embeddings/network) over
+version-pinned chunks with allowlist-validated citations: stale,
+deleted, or cross-workspace references are closed failures, never
+silently served. See
 [`docs/document-workspace.md`](docs/document-workspace.md) for the storage,
-lifecycle, quota, extraction, and API contracts.
+lifecycle, quota, extraction, and API contracts and
+[`docs/document-retrieval.md`](docs/document-retrieval.md) for retrieval
+and citation contracts.
 
 ### Session sandbox mentor check
 

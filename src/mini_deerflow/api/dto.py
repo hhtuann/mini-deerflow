@@ -166,3 +166,30 @@ class ChunkDetailDTO(DTO):
     char_start: int
     char_end: int
     locator: ChunkLocatorDTO
+
+
+class RetrievalRequestDTO(DTO):
+    query: Annotated[
+        str, StringConstraints(strict=True, strip_whitespace=True, min_length=1)
+    ]
+    document_ids: tuple[str, ...] | None = None
+    max_hits: int | None = Field(default=None, strict=True, ge=1, le=50)
+    max_context_chars: int | None = Field(default=None, strict=True, ge=500, le=200_000)
+
+
+class RetrievalHitDTO(DTO):
+    document_id: str
+    version: int
+    chunk_id: str
+    score: float
+    preview: str
+    char_start: int
+    char_end: int
+    locator: ChunkLocatorDTO
+
+
+class RetrievalResponseDTO(DTO):
+    hits: tuple[RetrievalHitDTO, ...]
+    total_candidates: int
+    truncated_by_budget: bool
+    scoped_documents: tuple[str, ...]
