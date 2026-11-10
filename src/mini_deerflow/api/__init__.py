@@ -39,6 +39,7 @@ from mini_deerflow.api.dto import (
     WorkspaceDetailDTO,
 )
 from mini_deerflow.api.jobs import ApiJobs
+from mini_deerflow.api.reports import report_router
 from mini_deerflow.api.security import ALLOWED_ORIGINS, LocalRequestBoundary
 from mini_deerflow.conversation import ConversationNotFoundError
 from mini_deerflow.demo.graph_projection import project_static_workflow
@@ -63,6 +64,7 @@ from mini_deerflow.document_qa import (
     DocumentQAService,
     DocumentQAValidationError,
 )
+from mini_deerflow.document_reports import ReportStore
 from mini_deerflow.document_retrieval import (
     CitationIntegrityError,
     CitationNotFoundError,
@@ -230,11 +232,14 @@ def create_app(
         if set(document_qa_services) - {"offline", "live"}:
             raise ValueError("Unsupported document Q&A service mode.")
         qa_services.update(document_qa_services)
+    report_stores = {"offline": ReportStore(root), "live": ReportStore(live_root)}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         for document_store in document_stores.values():
             await document_store.recover()
+        for report_store in report_stores.values():
+            await report_store.recover()
         try:
             yield
         finally:
@@ -914,6 +919,8 @@ def create_app(
                 raise HTTPException(
                     409, "Document evidence changed or is unavailable."
                 ) from None
+
+    app.include_router(report_router(document_stores, report_stores, qa_services, jobs))
 
     return app
 
