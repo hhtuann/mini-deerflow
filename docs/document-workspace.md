@@ -151,3 +151,73 @@ and corruption rejection, cross-workspace isolation, schema fail-closed) and
 `tests/test_api_documents.py` (HTTP contract, boundary scoping, origin
 policy on uploads, mode isolation, restart durability, leak canaries). All
 fixtures are synthetic; no credentials, network, or real documents.
+
+## Extraction and chunking (D2, issue #48)
+
+Bounded text extraction runs as a `document_extraction` job on the app's
+single worker (one active operation at a time; in-flight state is
+process-local, so a crash leaves no partial rows and the operation can be
+re-submitted). Result records are terminal-only: `completed` or
+`unavailable` with a closed error class (`encrypted`, `malformed`,
+`budget_exceeded`, `deadline_exceeded`, `no_extractable_text`,
+`embedded_macro`, `embedded_remote`, `embedded_script`, `storage_error`).
+Raw exception text, paths, and document internals never surface.
+
+- **PDF** (pypdf, text layer only): genuine 1-based page locators, never
+  synthesized; encrypted, embedded-active-content, or no-text documents are
+  marked unavailable. Refusal surfaces: catalog `/JavaScript` `/OpenAction`
+  `/EmbeddedFiles` `/AA` `/AF`, the `/Names` JavaScript tree or
+  embedded-file attachments, `/AcroForm` XFA, page-level `/AA`/`/AF`,
+  annotations with `/AA`, `/AF`, media/attachment subtypes
+  (`/FileAttachment` `/RichMedia` `/Movie` `/3D` `/Sound`), `/A /S
+  /JavaScript|/Launch` actions, and AcroForm field-tree widgets carrying
+  those same active-content keys (walked via `/Fields`/`/Kids`, bounded).
+- **DOCX** (stdlib `zipfile` + `defusedxml`, no new parser dependency):
+  paragraph and table locators only — **no invented page numbers**; macro
+  parts (`word/vbaProject.bin`), encrypted entries (ZIP general-purpose
+  bit 0), and external relationship targets are refused (relationships
+  parsed as bounded XML, so quoting/spacing/attribute order cannot evade
+  the check; unparseable rels are malformed); nested tables inside cells
+  and `w:sdt` content-control text — including sdt inside table cells —
+  are extracted (depth-bounded, refused as malformed beyond 32 levels);
+  ZIP decompression is bounded by declared
+  entry sizes checked before any read (only `document.xml` and its rels
+  are ever decompressed); a compression-ratio heuristic was deliberately
+  rejected because legitimately compressible XML false-positives.
+- **TXT**: 1-based line-range locators; strict UTF-8.
+- **Chunks**: deterministic — `chunk_id = sha256(version_sha256:index)[:16]`;
+  consecutive paragraph/line units pack toward the ≈1,600-char target with
+  merged range locators (paragraph *i..j* / line *i..j*), oversized units
+  hard-split at ≤2,000 chars, page/table units stay one-per-locator;
+  `extractor_version` ("d2-v1") is persisted per extraction.
+- **Budgets** (cooperative): deadline (default 30 s, checked per
+  page/paragraph/entry), max pages 300, max extracted chars 2 M, max XML
+  bytes 20 MiB, max zip entries 5,000, max total uncompressed 100 MiB.
+  The character budget is enforced **incrementally**: a running total is
+  checked after every PDF page, and a within-page pypdf text visitor aborts
+  a page as soon as its flushed text exceeds the cap — at pypdf's visitor
+  granularity (positioning operations, TJ-array boundaries, end of stream).
+  A degenerate stream of bare `Tj` repeats without positioning ops defers
+  the abort to end-of-stream: it is bounded by pypdf's own
+  decompression/parsing caps (zlib output length, stream-parsing work)
+  rather than the deadline, and can hold the single worker for a bounded
+  stretch before terminating as `budget_exceeded` (pypdf's
+  `LimitReachedError` maps there too). Honest residual limit: extraction is
+  cooperative, not preemptive — the D1 input-size quota plus these caps
+  bound the worst case; hard preemption would need process isolation
+  (out of D2 scope).
+- **API (additive)**: `POST …/extraction` (202 job; 409 when a completed
+  extraction exists for the version; unavailable can be re-queued),
+  `GET …/extraction`, `GET …/chunks` (≤200-char previews), and
+  `GET …/chunks/{chunk_id}` (full text + typed locator). Extraction
+  configuration uses the same fail-closed resolution as quotas (invalid
+  explicit `MINI_DEERFLOW_DOCUMENT_EXTRACTION_*` overrides refuse startup).
+
+D2 tests: `tests/test_document_extraction.py` (parsers, determinism,
+reimport/restart identity, budgets, embedded-content refusal, zip bombs)
+and `tests/test_api_documents_extraction.py` (job flow, error classes,
+wrong-workspace 404, leak canaries, restart persistence, fail-closed
+config). Fixtures are synthetic hand-built documents; Vietnamese diacritics
+are covered on DOCX/TXT (PDF-with-Vietnamese fixtures would require
+PDF-writing tooling outside the dependency budget; pypdf passes UTF-16
+text through when a ToUnicode map exists).

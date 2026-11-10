@@ -103,6 +103,38 @@ class Settings(BaseSettings):
         le=1_000,
     )
 
+    document_extraction_deadline_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=3_600.0,
+        allow_inf_nan=False,
+    )
+    document_extraction_max_pages: int = Field(
+        default=300,
+        ge=1,
+        le=5_000,
+    )
+    document_extraction_max_chars: int = Field(
+        default=2_000_000,
+        ge=10_000,
+        le=50_000_000,
+    )
+    document_extraction_max_xml_bytes: int = Field(
+        default=20_971_520,
+        ge=1_024,
+        le=524_288_000,
+    )
+    document_extraction_max_zip_entries: int = Field(
+        default=5_000,
+        ge=1,
+        le=100_000,
+    )
+    document_extraction_max_total_uncompressed: int = Field(
+        default=104_857_600,
+        ge=1_048_576,
+        le=2_147_483_648,
+    )
+
     structured_output_mode: Literal["native", "prompt_json"] = "prompt_json"
 
     @field_validator("api_key")

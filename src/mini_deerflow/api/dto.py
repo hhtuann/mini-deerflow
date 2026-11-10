@@ -97,7 +97,9 @@ class JobDTO(DTO):
     mode: Mode
     thread_id: str
     turn_id: str | None
-    operation: Literal["run", "continue", "resume", "presentation"]
+    operation: Literal[
+        "run", "continue", "resume", "presentation", "document_extraction"
+    ]
     status: Literal["queued", "running", "completed", "failed"]
     error_message: str | None = None
     traces: tuple[TraceEventView, ...] = ()
@@ -132,3 +134,35 @@ class WorkspaceDetailDTO(DTO):
 
     workspace: WorkspaceRecord
     documents: tuple[DocumentRecord, ...]
+
+
+class ChunkLocatorDTO(DTO):
+    """Closed integer-only source locator mirrored from the store."""
+
+    kind: Literal["page", "paragraph", "table", "lines"]
+    page: int | None = None
+    paragraph_start: int | None = None
+    paragraph_end: int | None = None
+    table: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+
+
+class ChunkSummaryDTO(DTO):
+    chunk_id: str
+    index: int
+    kind: Literal["page", "paragraph", "table", "lines"]
+    preview: str
+    char_start: int
+    char_end: int
+    locator: ChunkLocatorDTO
+
+
+class ChunkDetailDTO(DTO):
+    chunk_id: str
+    index: int
+    kind: Literal["page", "paragraph", "table", "lines"]
+    text: str
+    char_start: int
+    char_end: int
+    locator: ChunkLocatorDTO

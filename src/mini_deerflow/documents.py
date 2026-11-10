@@ -144,13 +144,31 @@ _DOCUMENT_LIMIT_SETTINGS_FIELDS = (
     ("document_max_workspaces", "max_workspaces"),
 )
 
+_DOCUMENT_EXTRACTION_SETTINGS_FIELDS = (
+    ("document_extraction_deadline_seconds", "deadline_seconds"),
+    ("document_extraction_max_pages", "max_pages"),
+    ("document_extraction_max_chars", "max_chars"),
+    ("document_extraction_max_xml_bytes", "max_xml_bytes"),
+    ("document_extraction_max_zip_entries", "max_zip_entries"),
+    (
+        "document_extraction_max_total_uncompressed",
+        "max_total_uncompressed",
+    ),
+)
+
+_ALL_DOCUMENT_SETTINGS_FIELDS = (
+    _DOCUMENT_LIMIT_SETTINGS_FIELDS + _DOCUMENT_EXTRACTION_SETTINGS_FIELDS
+)
+
 
 class DocumentLimitsError(DocumentError):
-    """Document quota configuration cannot be safely resolved; refuse to run."""
+    """Document configuration cannot be safely resolved; refuse to run."""
 
 
-def _document_override_present() -> bool:
-    """Report whether any document quota key is explicitly configured.
+def _document_override_present(
+    fields: tuple[tuple[str, str], ...] | None = None,
+) -> bool:
+    """Report whether any document configuration key is explicitly set.
 
     Mirrors the exact sources ``Settings`` reads (process environment plus a
     ``.env`` file parsed by python-dotenv itself, so ``export``-prefixed and
@@ -161,7 +179,7 @@ def _document_override_present() -> bool:
 
     names = {
         f"mini_deerflow_{settings_name}"
-        for settings_name, _ in _DOCUMENT_LIMIT_SETTINGS_FIELDS
+        for settings_name, _ in (fields or _ALL_DOCUMENT_SETTINGS_FIELDS)
     }
     environment = {key.lower() for key in os.environ}
     if any(name in environment for name in names):
@@ -220,6 +238,45 @@ def resolve_document_limits() -> DocumentLimits:
         **{
             limits_name: getattr(settings, settings_name)
             for settings_name, limits_name in _DOCUMENT_LIMIT_SETTINGS_FIELDS
+        }
+    )
+
+
+def resolve_document_extraction_limits() -> Any:
+    """Resolve extraction budgets with the same fail-closed contract.
+
+    An invalid explicit extraction override raises
+    :class:`DocumentLimitsError`; a valid one is never silently discarded
+    because an unrelated provider setting failed validation; unrelated
+    invalid settings fall back to the audited defaults only when no
+    document-family override is configured at all.
+    """
+
+    from mini_deerflow.document_extraction import (
+        DEFAULT_EXTRACTION_LIMITS,
+        DocumentExtractionLimits,
+    )
+
+    try:
+        from mini_deerflow.config import Settings
+
+        settings = Settings(api_key="document-limits-placeholder")
+    except ValidationError as error:
+        document_fields = {
+            settings_name for settings_name, _ in _ALL_DOCUMENT_SETTINGS_FIELDS
+        }
+        locations = {item.get("loc", ())[:1] for item in error.errors()}
+        if any((field,) in locations for field in document_fields):
+            raise DocumentLimitsError("Document configuration is invalid.") from None
+        if _document_override_present():
+            raise DocumentLimitsError(
+                "Document configuration could not be verified."
+            ) from None
+        return DEFAULT_EXTRACTION_LIMITS
+    return DocumentExtractionLimits(
+        **{
+            limits_name: getattr(settings, settings_name)
+            for settings_name, limits_name in _DOCUMENT_EXTRACTION_SETTINGS_FIELDS
         }
     )
 
@@ -379,6 +436,43 @@ async def _initialize_schema(connection: aiosqlite.Connection) -> None:
             PRIMARY KEY(workspace_id, document_id, version),
             FOREIGN KEY(workspace_id, document_id)
                 REFERENCES documents(workspace_id, document_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS document_extractions (
+            workspace_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version >= 1),
+            source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
+            status TEXT NOT NULL CHECK(status IN ('completed','unavailable')),
+            error_class TEXT CHECK(error_class IS NULL OR error_class IN (
+                'encrypted','malformed','budget_exceeded','deadline_exceeded',
+                'no_extractable_text','embedded_macro','embedded_remote',
+                'embedded_script','storage_error'
+            )),
+            extractor_version TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),
+            total_chars INTEGER NOT NULL CHECK(total_chars >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(workspace_id, document_id, version),
+            FOREIGN KEY(workspace_id, document_id)
+                REFERENCES documents(workspace_id, document_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            workspace_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version >= 1),
+            chunk_index INTEGER NOT NULL CHECK(chunk_index >= 1),
+            chunk_id TEXT NOT NULL CHECK(length(chunk_id) = 16),
+            kind TEXT NOT NULL CHECK(kind IN ('page','paragraph','table','lines')),
+            text TEXT NOT NULL,
+            char_start INTEGER NOT NULL CHECK(char_start >= 0),
+            char_end INTEGER NOT NULL CHECK(char_end >= 0),
+            locator_json TEXT NOT NULL,
+            PRIMARY KEY(workspace_id, document_id, version, chunk_index),
+            FOREIGN KEY(workspace_id, document_id, version)
+                REFERENCES document_extractions(
+                    workspace_id, document_id, version
+                ) ON DELETE CASCADE
         );
         """
     )
@@ -906,6 +1000,215 @@ class DocumentWorkspaceStore:
             )
             await connection.commit()
         await self.recover()
+
+    async def begin_extraction(
+        self, workspace_id: str, document_id: str
+    ) -> tuple[int, str, str, bytes]:
+        """Return (latest version, its sha256, content type, verified bytes)."""
+
+        record, _, data = await self.read_content(workspace_id, document_id)
+        latest = next(
+            version
+            for version in record.versions
+            if version.version == record.latest_version
+        )
+        return latest.version, latest.sha256, record.content_type, data
+
+    async def save_extraction(self, record: Any, chunks: Any) -> None:
+        """Replace the extraction record and chunks for one version."""
+
+        from mini_deerflow.document_extraction import DocumentChunk, ExtractionRecord
+
+        if not isinstance(record, ExtractionRecord):
+            raise TypeError("record must be an ExtractionRecord")
+        if not all(isinstance(chunk, DocumentChunk) for chunk in chunks):
+            raise TypeError("chunks must be DocumentChunk instances")
+        validated_ws = _validated_identifier(record.workspace_id, "workspace_id")
+        validated_doc = _validated_identifier(record.document_id, "document_id")
+        if (validated_ws, validated_doc) != (record.workspace_id, record.document_id):
+            raise DocumentValidationError("extraction identifiers are invalid")
+        async with self._connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await self._active_document_row(
+                connection, record.workspace_id, record.document_id
+            )
+            version = await (
+                await connection.execute(
+                    "SELECT version FROM document_versions "
+                    "WHERE workspace_id = ? AND document_id = ? AND version = ?",
+                    (
+                        record.workspace_id,
+                        record.document_id,
+                        record.version,
+                    ),
+                )
+            ).fetchone()
+            if version is None:
+                await connection.rollback()
+                raise DocumentNotFoundError("Document version was not found.")
+            await connection.execute(
+                "DELETE FROM document_chunks WHERE workspace_id = ? "
+                "AND document_id = ? AND version = ?",
+                (record.workspace_id, record.document_id, record.version),
+            )
+            await connection.execute(
+                "DELETE FROM document_extractions WHERE workspace_id = ? "
+                "AND document_id = ? AND version = ?",
+                (record.workspace_id, record.document_id, record.version),
+            )
+            await connection.execute(
+                "INSERT INTO document_extractions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.workspace_id,
+                    record.document_id,
+                    record.version,
+                    record.source_sha256,
+                    record.status,
+                    record.error_class,
+                    record.extractor_version,
+                    record.chunk_count,
+                    record.total_chars,
+                    record.created_at,
+                    record.updated_at,
+                ),
+            )
+            for chunk in chunks:
+                await connection.execute(
+                    "INSERT INTO document_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.workspace_id,
+                        record.document_id,
+                        record.version,
+                        chunk.index,
+                        chunk.chunk_id,
+                        chunk.kind,
+                        chunk.text,
+                        chunk.char_start,
+                        chunk.char_end,
+                        chunk.locator.model_dump_json(),
+                    ),
+                )
+            await connection.commit()
+
+    async def get_extraction(
+        self, workspace_id: str, document_id: str, version: int | None = None
+    ) -> Any:
+        from mini_deerflow.document_extraction import ExtractionRecord
+
+        workspace_id = _validated_identifier(workspace_id, "workspace_id")
+        document_id = _validated_identifier(document_id, "document_id")
+        async with self._connection() as connection:
+            await connection.execute("BEGIN")
+            document = await self._active_document_row(
+                connection, workspace_id, document_id
+            )
+            resolved = (
+                version if version is not None else int(document["latest_version"])
+            )
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM document_extractions "
+                    "WHERE workspace_id = ? AND document_id = ? AND version = ?",
+                    (workspace_id, document_id, resolved),
+                )
+            ).fetchone()
+            await connection.commit()
+        if row is None:
+            raise DocumentNotFoundError("Extraction was not found.")
+        return ExtractionRecord(
+            workspace_id=row["workspace_id"],
+            document_id=row["document_id"],
+            version=row["version"],
+            source_sha256=row["source_sha256"],
+            status=row["status"],
+            error_class=row["error_class"],
+            extractor_version=row["extractor_version"],
+            chunk_count=row["chunk_count"],
+            total_chars=row["total_chars"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    async def list_chunks(
+        self, workspace_id: str, document_id: str, version: int | None = None
+    ) -> tuple[Any, ...]:
+        from mini_deerflow.document_extraction import DocumentChunk, SourceLocator
+
+        workspace_id = _validated_identifier(workspace_id, "workspace_id")
+        document_id = _validated_identifier(document_id, "document_id")
+        await self.get_extraction(workspace_id, document_id, version)
+        async with self._connection() as connection:
+            await connection.execute("BEGIN")
+            document = await self._active_document_row(
+                connection, workspace_id, document_id
+            )
+            resolved = (
+                version if version is not None else int(document["latest_version"])
+            )
+            rows = await (
+                await connection.execute(
+                    "SELECT * FROM document_chunks "
+                    "WHERE workspace_id = ? AND document_id = ? AND version = ? "
+                    "ORDER BY chunk_index",
+                    (workspace_id, document_id, resolved),
+                )
+            ).fetchall()
+            await connection.commit()
+        return tuple(
+            DocumentChunk(
+                chunk_id=row["chunk_id"],
+                index=row["chunk_index"],
+                kind=row["kind"],
+                text=row["text"],
+                char_start=row["char_start"],
+                char_end=row["char_end"],
+                locator=SourceLocator.model_validate_json(row["locator_json"]),
+            )
+            for row in rows
+        )
+
+    async def get_chunk(
+        self,
+        workspace_id: str,
+        document_id: str,
+        chunk_id: str,
+        version: int | None = None,
+    ) -> Any:
+        from mini_deerflow.document_extraction import DocumentChunk, SourceLocator
+
+        workspace_id = _validated_identifier(workspace_id, "workspace_id")
+        document_id = _validated_identifier(document_id, "document_id")
+        if not isinstance(chunk_id, str) or not re.fullmatch(r"[0-9a-f]{16}", chunk_id):
+            raise DocumentValidationError("chunk_id is invalid")
+        await self.get_extraction(workspace_id, document_id, version)
+        async with self._connection() as connection:
+            await connection.execute("BEGIN")
+            document = await self._active_document_row(
+                connection, workspace_id, document_id
+            )
+            resolved = (
+                version if version is not None else int(document["latest_version"])
+            )
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM document_chunks "
+                    "WHERE workspace_id = ? AND document_id = ? AND version = ? "
+                    "AND chunk_id = ?",
+                    (workspace_id, document_id, resolved, chunk_id),
+                )
+            ).fetchone()
+            await connection.commit()
+        if row is None:
+            raise DocumentNotFoundError("Chunk was not found.")
+        return DocumentChunk(
+            chunk_id=row["chunk_id"],
+            index=row["chunk_index"],
+            kind=row["kind"],
+            text=row["text"],
+            char_start=row["char_start"],
+            char_end=row["char_end"],
+            locator=SourceLocator.model_validate_json(row["locator_json"]),
+        )
 
     async def recover(self) -> None:
         """Sweep crash orphans: staging files and unreferenced blobs.
