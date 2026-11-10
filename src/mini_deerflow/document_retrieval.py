@@ -26,8 +26,8 @@ from mini_deerflow.document_extraction import DocumentChunk, SourceLocator
 PREVIEW_CHARS = 200
 BM25_K1 = 1.5
 BM25_B = 0.75
-
 _TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+_VIETNAMESE_FOLD = str.maketrans({"đ": "d"})
 
 
 class RetrievalError(RuntimeError):
@@ -98,12 +98,16 @@ DEFAULT_RETRIEVAL_LIMITS = RetrievalLimits(
 
 
 def tokenize(text: str) -> tuple[str, ...]:
-    """Case- and diacritic-insensitive word tokens (VI base letters)."""
+    """Case- and diacritic-insensitive word tokens (VI base letters).
+
+    Vietnamese ``đ`` is a single Latin letter (not a base + combining
+    mark), so it is folded explicitly to ``d`` after mark-stripping.
+    """
 
     normalized = unicodedata.normalize("NFKD", text.casefold())
     stripped = "".join(
         character for character in normalized if not unicodedata.combining(character)
-    )
+    ).translate(_VIETNAMESE_FOLD)
     return tuple(_TOKEN_PATTERN.findall(stripped))
 
 
@@ -253,9 +257,13 @@ class LexicalRetriever:
             if len(hits) >= limits.max_hits:
                 truncated = True
                 break
-            if hits and context_chars + chunk_chars > limits.max_context_chars:
+            if context_chars + chunk_chars > limits.max_context_chars:
+                # Hard budget, including for the first hit: source spans are
+                # never forged (no slicing to fit), so an oversized
+                # candidate is skipped and smaller candidates below it in
+                # rank order may still fit.
                 truncated = True
-                break
+                continue
             hits.append(
                 RetrievalHit(
                     document_id=item.document_id,

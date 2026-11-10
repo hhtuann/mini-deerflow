@@ -157,6 +157,70 @@ class TestRetrieval:
         )
         assert result2.hits
 
+    def test_vietnamese_d_with_stroke_matches_plain_d(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        workspace_id = self._workspace(store)
+        _seed_extraction(
+            store,
+            workspace_id,
+            "vi2.docx",
+            _build_docx(
+                [
+                    "Điện mặt trời Đà Nẵng phát triển nhanh.",
+                    "Đồng bằng sông Cửu Long trồng lúa.",
+                ]
+            ),
+            DOCX_MIME,
+        )
+        # đ is a single Latin letter, not a decomposable mark sequence.
+        assert tokenize("điện") == tokenize("dien")
+        assert tokenize("Đà Nẵng") == tokenize("da nang")
+        for query in ("dien mat troi", "da nang", "dong bang song cuu long"):
+            result = _retrieve(
+                store, workspace_id, query, None, DEFAULT_RETRIEVAL_LIMITS
+            )
+            assert result.hits, query
+
+    def test_context_budget_is_hard_even_for_first_hit(self, tmp_path: Path) -> None:
+        """A matching chunk longer than the budget is skipped, never
+        admitted oversized or sliced; smaller lower-ranked hits may fit."""
+
+        store = _store(tmp_path)
+        workspace_id = self._workspace(store)
+        # Two documents: the higher-scoring one has one huge matching chunk
+        # (unique rare term), the lower-scoring one a small matching chunk.
+        _seed_extraction(
+            store,
+            workspace_id,
+            "big.txt",
+            ("zorblax unique " * 200).encode() + b"\n",
+            TXT_MIME,
+        )
+        _seed_extraction(
+            store,
+            workspace_id,
+            "small.txt",
+            b"zorblax brief\n",
+            TXT_MIME,
+        )
+        result = _retrieve(
+            store,
+            workspace_id,
+            "zorblax",
+            None,
+            RetrievalLimits(max_hits=10, max_context_chars=500),
+        )
+        assert result.truncated_by_budget is True
+        selected = [hit.char_end - hit.char_start for hit in result.hits]
+        assert selected and sum(selected) <= 500
+        assert all(size <= 500 for size in selected)
+        # The oversized top-ranked chunk must NOT appear.
+        assert all(
+            "unique" not in hit.preview or len(hit.preview) <= 500
+            for hit in result.hits
+        )
+        assert any(hit.preview.startswith("zorblax brief") for hit in result.hits)
+
     def test_no_token_overlap_returns_empty(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
         workspace_id = self._workspace(store)

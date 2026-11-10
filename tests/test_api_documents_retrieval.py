@@ -328,6 +328,80 @@ class TestCitationEndpoint:
             )
             assert response.status_code in (404, 422)
 
+    def test_version_param_distinguishes_reused_chunk_ids(self, tmp_path) -> None:
+        """A→B→A content reuse: v1 and v3 share chunk ids; ?version must
+        distinguish a stale v1 citation from the current v3 one."""
+
+        with _client(tmp_path) as client:
+            workspace_id = _workspace(client)
+            document_id = _upload_and_extract(
+                client, workspace_id, "v.txt", b"alpha bravo content\n"
+            )
+            retrieval = client.post(
+                f"/api/live/workspaces/{workspace_id}/retrieval",
+                json={"query": "alpha bravo"},
+            ).json()
+            v1_chunk = retrieval["hits"][0]["chunk_id"]
+
+            for content in (b"charlie delta content\n", b"alpha bravo content\n"):
+                version = client.post(
+                    f"/api/live/workspaces/{workspace_id}/documents/{document_id}"
+                    "/versions",
+                    params={"filename": "v.txt"},
+                    content=content,
+                    headers={"Content-Type": "text/plain"},
+                )
+                assert version.status_code == 200
+                _extract(client, workspace_id, document_id)
+
+            base = (
+                f"/api/live/workspaces/{workspace_id}/documents/{document_id}"
+                f"/chunks/{v1_chunk}"
+            )
+            # Omitted version resolves the latest (v3): same chunk id is
+            # legitimately current again.
+            assert client.get(base).status_code == 200
+            assert client.get(base, params={"version": 3}).status_code == 200
+            # Explicit stale citation of v1 is 409 even though the chunk id
+            # exists under the current version.
+            stale = client.get(base, params={"version": 1})
+            assert stale.status_code == 409
+            assert "stale" in stale.json()["detail"].lower()
+            # Malformed version values are client errors.
+            assert client.get(base, params={"version": 0}).status_code == 422
+            assert client.get(base, params={"version": "x"}).status_code == 422
+
+    def test_context_budget_hard_limit_at_api(self, tmp_path: Path) -> None:
+        """A matching chunk larger than max_context_chars never appears."""
+
+        with _client(tmp_path) as client:
+            workspace_id = _workspace(client)
+            _upload_and_extract(
+                client,
+                workspace_id,
+                "big.txt",
+                ("quantumflux probe " * 200).encode() + b"\n",
+            )
+            _upload_and_extract(
+                client, workspace_id, "small.txt", b"quantumflux tiny\n"
+            )
+            response = client.post(
+                f"/api/live/workspaces/{workspace_id}/retrieval",
+                json={
+                    "query": "quantumflux",
+                    "max_hits": 8,
+                    "max_context_chars": 500,
+                },
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["truncated_by_budget"] is True
+            spans = [hit["char_end"] - hit["char_start"] for hit in body["hits"]]
+            assert spans and sum(spans) <= 500
+            assert any(
+                hit["preview"].startswith("quantumflux tiny") for hit in body["hits"]
+            )
+
 
 class TestRetrievalConfig:
     def test_invalid_retrieval_env_fails_closed(

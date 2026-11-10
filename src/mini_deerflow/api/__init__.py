@@ -773,15 +773,22 @@ def create_app(
         workspace_id: Identifier,
         document_id: Identifier,
         chunk_id: str = ApiPath(pattern=r"^[0-9a-f]{16}$"),
+        version: int | None = Query(default=None, ge=1, le=1_000_000),
     ) -> ChunkDetailDTO:
-        """Citation resolution: allowlist-verified chunk for the latest
-        completed version; stale citations are a distinct 409."""
+        """Citation resolution: allowlist-verified chunk for the cited
+        version (or the latest completed version when omitted); stale
+        citations — including chunk ids reused by identical re-uploaded
+        content — are a distinct 409."""
 
         async with jobs.submission_lock:
             jobs.check_idle()
             try:
                 _, chunk = await resolve_citation(
-                    document_stores[mode], workspace_id, document_id, chunk_id
+                    document_stores[mode],
+                    workspace_id,
+                    document_id,
+                    chunk_id,
+                    version,
                 )
             except CitationStaleError:
                 raise HTTPException(
