@@ -81,6 +81,6 @@ not synthetic provider success. Actual provider behavior is not verified by fixt
 
 Synthetic regressions: `tests/test_document_qa.py`,
 `tests/test_api_document_qa.py`, `tests/test_document_qa_tool.py`.
-Real-local-FastAPI scenario: `frontend/e2e/document-qa.spec.ts` (upload/extract,
+Real-local-FastAPI scenario: `frontend/e2e/zz-document-qa.spec.ts` (upload/extract,
 answer, inspect citation, revise, followup, stale citation, abstention). No paid
 providers, real files or confidential content are required.
