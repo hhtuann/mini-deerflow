@@ -35,6 +35,7 @@ It is a local learning MVP—not a production platform, DeerFlow clone, or upstr
 | Phase 2 PPTX core (Issue #8, task 2.1) | PASS — automated local acceptance; review APPROVE; manual viewer verification unverified |
 | Production deployment | Deferred |
 | Upstream DeerFlow parity | Not claimed |
+| Phase 3 implementation (Tasks 3.0–3.4) | Merged; live/Office/manual release acceptance not complete — [acceptance ledger](docs/phase3-acceptance-ledger.md) |
 
 ## What It Does
 
